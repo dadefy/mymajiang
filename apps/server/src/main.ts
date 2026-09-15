@@ -6,6 +6,7 @@ import { createWebSocketServer } from "./ws-server.js";
 import { PostgresDatabase } from "./database.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
 import { PostgresAccountStore } from "./postgres-account-store.js";
+import { PostgresAdminAccountStore } from "./postgres-admin-account-store.js";
 import { PostgresAdminStore } from "./postgres-admin-store.js";
 import { PostgresFriendStore } from "./postgres-friend-store.js";
 import { PostgresGameStateStore } from "./postgres-game-state-store.js";
@@ -61,6 +62,10 @@ const roomStore = database && writeQueue && accountStore
 const matchHistory = database ? new PostgresMatchHistory(database) : undefined;
 // The round in flight is overwritten on every action, so it shares the write queue.
 const gameStateStore = database && writeQueue ? PostgresGameStateStore.create(database, writeQueue) : undefined;
+// 管理员账号：密码哈希只在服务端实现，领域层只声明接口。
+const adminAccountStore = database && writeQueue
+  ? await PostgresAdminAccountStore.load(database, writeQueue)
+  : undefined;
 
 const dependencies = createInMemoryDependencies({
   tokens,
@@ -78,6 +83,7 @@ const dependencies = createInMemoryDependencies({
   ...(accountStore ? { accountStore } : {}),
   ...(invitationKeyStore ? { invitationKeyStore } : {}),
   ...(adminStore ? { adminStore } : {}),
+  ...(adminAccountStore ? { adminAccountStore } : {}),
   ...(friendService ? { friendService } : {}),
   ...(groupService ? { groupService } : {}),
   ...(roomStore
@@ -89,6 +95,21 @@ const dependencies = createInMemoryDependencies({
   ...(matchHistory ? { matchHistory } : {}),
   ...(gameStateStore ? { gameStateStore } : {}),
 });
+
+// 第一个管理员由环境变量引导。只在账号不存在时创建，所以重复启动不会把改过的密码覆盖回去。
+const adminId = process.env.ADMIN_ID;
+const adminPassword = process.env.ADMIN_PASSWORD;
+if (adminId && adminPassword) {
+  if (dependencies.adminAuth.createAdminIfAbsent({ adminId, password: adminPassword })) {
+    process.stdout.write(`[admin] 已创建管理员 ${adminId}（密码来自 ADMIN_PASSWORD）\n`);
+  }
+  if (adminAccountStore) await adminAccountStore.flush();
+}
+// 生产环境必须至少有一个管理员，否则后台谁也进不去 —— 这是配置错误，宁可启动失败。
+if (process.env.NODE_ENV === "production" && dependencies.adminAuth.listAdmins().length === 0) {
+  throw new Error("No administrator account exists: set ADMIN_ID and ADMIN_PASSWORD once to bootstrap one");
+}
+
 const app = createApp(dependencies);
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3000);
@@ -96,10 +117,11 @@ await app.listen({
   host,
   port,
 });
+// 不再打印管理员令牌。以前非生产环境会打印一枚 2 小时令牌，那等于把后台钥匙放进日志里，
+// 任何能读到日志的人都能进管理后台 —— 现在必须用账号密码登录（见 POST /v1/admin/session）。
 if (process.env.NODE_ENV !== "production") {
-  const adminToken = await tokens.issueAdminToken(process.env.DEV_ADMIN_ID ?? "local-developer", "super_admin");
   const adminHost = host === "0.0.0.0" ? "127.0.0.1" : host;
-  process.stdout.write(`[development admin] http://${adminHost}:${port}/admin\n[token] ${adminToken}\n`);
+  process.stdout.write(`[admin] http://${adminHost}:${port}/admin\n`);
 }
 const wss = await createWebSocketServer(dependencies, Number(process.env.WS_PORT ?? 3001));
 process.stdout.write(`[websocket] listening on ${process.env.WS_PORT ?? 3001}\n`);

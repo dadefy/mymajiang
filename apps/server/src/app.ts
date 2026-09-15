@@ -3,16 +3,20 @@ import { z } from "zod";
 import {
   AccountService,
   AccountAdministrationService,
+  AdminAuthService,
   FriendService,
   GroupService,
   InMemoryAccountStore,
+  InMemoryAdminAccountStore,
   InMemoryInvitationKeyStore,
   InvitationKeyService,
   MatchRoom,
   PointService,
   type AccountStore,
+  type AdminAccountStore,
   type ChatGroup,
   type InvitationKey,
+  type PasswordHasher,
   type InvitationKeyCodec,
   type InvitationKeyStore,
   type StoredGroupMessage,
@@ -24,6 +28,7 @@ import type { AdminStore } from "./admin-store.js";
 import type { GameStateStore } from "./game-state-store.js";
 import { InMemoryGroupEventBus, type GroupEventBus, type GroupMessageView } from "./group-events.js";
 import type { MatchHistoryReader, MatchRoundRecord, MatchSummary } from "./match-history.js";
+import { ScryptPasswordHasher } from "./password-hasher.js";
 
 export interface AppDependencies {
   accountStore: AccountStore;
@@ -32,6 +37,8 @@ export interface AppDependencies {
   pointService: PointService;
   /** 内测入口：开发方签发的一次性邀请密钥。 */
   invitationKeys: InvitationKeyService;
+  /** 管理员账号的登录与改密。没配时后台无法登录 —— 见 main.ts 的引导逻辑。 */
+  adminAuth: AdminAuthService;
   tokens: TokenService;
   roomStore: Map<string, MatchRoom>;
   groupService: GroupService;
@@ -41,6 +48,8 @@ export interface AppDependencies {
   database?: { ping(): Promise<void> };
   /** When present, owns balance/status writes so they commit with their ledger or audit row. */
   adminStore?: AdminStore;
+  /** 有它时改密码会等落盘再返回；内存模式省略。 */
+  adminAccountStore?: AdminAccountStore & { flush?(): Promise<void> };
   createRoomId: () => string;
   /** When present, rooms record themselves as they are created and mutated. */
   createRoom?: (roomId: string, owner: UserAccount) => MatchRoom;
@@ -92,6 +101,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     // 密钥格式不对是客户端问题；密钥不存在或已撤销等同于认证失败。
     if (code === "KEY_MALFORMED") return reply.status(400).send({ code });
     if (code === "KEY_INVALID" || code === "KEY_REVOKED") return reply.status(401).send({ code });
+    // 管理员登录：凭据不对与用户侧一样按认证失败处理，不区分「账号不存在」和「密码错」。
+    if (code === "INVALID_ADMIN_CREDENTIALS") return reply.status(401).send({ code });
+    if (code === "TOO_MANY_ATTEMPTS") return reply.status(429).send({ code });
+    // 密码强度不足属于输入问题，不是业务冲突。
+    if (code.startsWith("Admin password must")) {
+      return reply.status(400).send({ code: "INVALID_INPUT", message: code });
+    }
     if (code.endsWith("_NOT_FOUND") || code === "User not found") {
       return reply.status(404).send({ code: "NOT_FOUND", message: code });
     }
@@ -158,6 +174,37 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const user = await requireUser(request.headers.authorization, dependencies);
     dependencies.accountService.deleteAccount(user);
     await dependencies.accountStore.flush?.();
+    return reply.status(204).send();
+  });
+
+  /**
+   * 管理员登录。
+   *
+   * 返回 2 小时的管理员令牌。失败时「账号不存在」与「密码不对」是同一条错误，
+   * 且连续失败会锁定 —— 既不能用来枚举账号，也不适合爆破。
+   */
+  app.post("/v1/admin/session", async (request, reply) => {
+    const body = z.object({
+      adminId: z.string().trim().min(1).max(64),
+      password: z.string().min(1).max(200),
+    }).parse(request.body);
+    const admin = dependencies.adminAuth.login(body.adminId, body.password);
+    return reply.status(201).send({
+      adminId: admin.adminId,
+      role: admin.role,
+      token: await dependencies.tokens.issueAdminToken(admin.adminId, admin.role),
+    });
+  });
+
+  /** 改自己的密码。必须提供当前密码，并且同样受失败锁定约束。 */
+  app.post("/v1/admin/password", async (request, reply) => {
+    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const body = z.object({
+      currentPassword: z.string().min(1).max(200),
+      newPassword: z.string().min(1).max(200),
+    }).parse(request.body);
+    dependencies.adminAuth.changePassword(admin.adminId, body.currentPassword, body.newPassword);
+    await dependencies.adminAccountStore?.flush?.();
     return reply.status(204).send();
   });
 
@@ -797,6 +844,9 @@ export function createInMemoryDependencies(input: {
   accountStore?: AccountStore;
   invitationKeyStore?: InvitationKeyStore;
   adminStore?: AdminStore;
+  adminAccountStore?: AdminAccountStore;
+  /** 密码哈希实现；测试可注入假实现，生产用 scrypt。 */
+  passwordHasher?: PasswordHasher;
   friendService?: FriendService;
   groupService?: GroupService;
   roomStore?: Map<string, MatchRoom>;
@@ -812,6 +862,8 @@ export function createInMemoryDependencies(input: {
     input.invitationKeyCodec,
     input.createKeyId,
   );
+  const adminAccountStore = input.adminAccountStore ?? new InMemoryAdminAccountStore();
+  const adminAuth = new AdminAuthService(adminAccountStore, input.passwordHasher ?? new ScryptPasswordHasher());
   if (input.adminStore) {
     accountAdministration.restore(input.adminStore.auditEntries);
     pointService.restore(input.adminStore.ledgerEntries);
@@ -822,6 +874,7 @@ export function createInMemoryDependencies(input: {
     accountAdministration,
     pointService,
     invitationKeys,
+    adminAuth,
     tokens: input.tokens,
     roomStore: input.roomStore ?? new Map<string, MatchRoom>(),
     groupService: input.groupService
@@ -831,6 +884,7 @@ export function createInMemoryDependencies(input: {
     createRoomId: input.createRoomId,
     ...(input.database ? { database: input.database } : {}),
     ...(input.adminStore ? { adminStore: input.adminStore } : {}),
+    ...(input.adminAccountStore ? { adminAccountStore: input.adminAccountStore } : {}),
     ...(input.createRoom ? { createRoom: input.createRoom } : {}),
     ...(input.matchHistory ? { matchHistory: input.matchHistory } : {}),
     ...(input.gameStateStore ? { gameStateStore: input.gameStateStore } : {}),

@@ -1,4 +1,5 @@
 export * from "./accounts.js";
+export * from "./admin-auth.js";
 export * from "./administration.js";
 export * from "./chat.js";
 export * from "./friends.js";

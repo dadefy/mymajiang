@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FriendService, GroupService } from "@mianyang-mahjong/domain";
+import { ADMIN_LOGIN_POLICY, FriendService, GroupService } from "@mianyang-mahjong/domain";
 import { TokenService } from "./auth.js";
 import { createApp, createInMemoryDependencies } from "./app.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
@@ -182,6 +182,130 @@ describe("server API", () => {
     });
     expect(locked.statusCode).toBe(409);
     expect(locked.json().message).toBe("KEY_ALREADY_ACTIVATED");
+  });
+
+  it("管理员用账号密码换令牌；密码错与账号不存在返回同一条错误", async () => {
+    const { app, dependencies } = fixture();
+    dependencies.adminAuth.createAdminIfAbsent({ adminId: "dev", password: "correct horse battery" });
+
+    const wrongPassword = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "not the password" },
+    });
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(wrongPassword.json().code).toBe("INVALID_ADMIN_CREDENTIALS");
+
+    const unknownAdmin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "ghost", password: "not the password" },
+    });
+    // 两者完全一致 —— 不能让人靠错误信息枚举出有哪些管理员账号。
+    expect(unknownAdmin.statusCode).toBe(401);
+    expect(unknownAdmin.json()).toEqual(wrongPassword.json());
+
+    const signedIn = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "correct horse battery" },
+    });
+    expect(signedIn.statusCode).toBe(201);
+    expect(signedIn.json()).toMatchObject({ adminId: "dev", role: "super_admin" });
+
+    // 换来的令牌确实能进管理接口。
+    const keys = await app.inject({
+      method: "GET",
+      url: "/v1/admin/invitation-keys",
+      headers: { authorization: `Bearer ${signedIn.json().token}` },
+    });
+    expect(keys.statusCode).toBe(200);
+  });
+
+  it("管理员登录连续失败到达上限后返回 429，且正确密码也进不去", async () => {
+    const { app, dependencies } = fixture();
+    dependencies.adminAuth.createAdminIfAbsent({ adminId: "dev", password: "correct horse battery" });
+
+    for (let attempt = 0; attempt < ADMIN_LOGIN_POLICY.maxFailures; attempt += 1) {
+      const failed = await app.inject({
+        method: "POST",
+        url: "/v1/admin/session",
+        payload: { adminId: "dev", password: "guess " + attempt },
+      });
+      expect(failed.statusCode).toBe(401);
+    }
+
+    const locked = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "correct horse battery" },
+    });
+    expect(locked.statusCode).toBe(429);
+    expect(locked.json().code).toBe("TOO_MANY_ATTEMPTS");
+  });
+
+  it("改管理员密码需要当前密码，改完旧密码立刻失效", async () => {
+    const { app, dependencies } = fixture();
+    dependencies.adminAuth.createAdminIfAbsent({ adminId: "dev", password: "correct horse battery" });
+    const signedIn = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "correct horse battery" },
+    });
+    const authorization = `Bearer ${signedIn.json().token}`;
+
+    const wrongCurrent = await app.inject({
+      method: "POST",
+      url: "/v1/admin/password",
+      headers: { authorization },
+      payload: { currentPassword: "wrong", newPassword: "a brand new passphrase" },
+    });
+    expect(wrongCurrent.statusCode).toBe(401);
+
+    const changed = await app.inject({
+      method: "POST",
+      url: "/v1/admin/password",
+      headers: { authorization },
+      payload: { currentPassword: "correct horse battery", newPassword: "a brand new passphrase" },
+    });
+    expect(changed.statusCode).toBe(204);
+
+    const withOld = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "correct horse battery" },
+    });
+    expect(withOld.statusCode).toBe(401);
+
+    const withNew = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "a brand new passphrase" },
+    });
+    expect(withNew.statusCode).toBe(201);
+  });
+
+  it("管理员密码太短时返回 400，且不会改掉现有密码", async () => {
+    const { app, dependencies } = fixture();
+    dependencies.adminAuth.createAdminIfAbsent({ adminId: "dev", password: "correct horse battery" });
+    const authorization = `Bearer ${await dependencies.tokens.issueAdminToken("dev", "super_admin")}`;
+
+    const weak = await app.inject({
+      method: "POST",
+      url: "/v1/admin/password",
+      headers: { authorization },
+      payload: { currentPassword: "correct horse battery", newPassword: "short" },
+    });
+    expect(weak.statusCode).toBe(400);
+    expect(weak.json().message).toContain("at least 12 characters");
+
+    // 被拒之后密码没变，原密码仍能登录。
+    const stillWorks = await app.inject({
+      method: "POST",
+      url: "/v1/admin/session",
+      payload: { adminId: "dev", password: "correct horse battery" },
+    });
+    expect(stillWorks.statusCode).toBe(201);
   });
 
   it("注销账号后：令牌立刻失效、密钥既登不进也建不了新号、管理员也复活不了", async () => {

@@ -13,7 +13,8 @@ export function adminConsoleHtml(): string {
     header h1 { margin: 0; font-size: 22px; }
     header p { margin: 4px 0 0; color: #b9d7ca; font-size: 13px; }
     .auth { display: flex; gap: 8px; min-width: min(100%, 520px); }
-    .auth input { flex: 1; min-width: 180px; }
+    .auth input { min-width: 140px; }
+    .auth input[type=password] { min-width: 160px; }
     main { max-width: 1440px; margin: 0 auto; padding: 20px; }
     .status { min-height: 40px; padding: 10px 14px; margin-bottom: 16px; border-radius: 8px; background: #e8eef2; }
     .status.ok { background: #dff3e8; color: #145b35; }
@@ -47,10 +48,10 @@ export function adminConsoleHtml(): string {
 <body>
   <header>
     <div><h1>绵阳麻将管理后台</h1><p>邀请密钥、用户状态、积分与审计</p></div>
-    <div class="auth"><input id="token" type="password" autocomplete="off" placeholder="粘贴超级管理员 JWT"><button id="connect">连接</button><button id="logout" class="secondary">清除</button></div>
+    <div class="auth"><input id="admin-id" autocomplete="username" placeholder="管理员账号"><input id="admin-password" type="password" autocomplete="current-password" placeholder="密码"><button id="connect">登录</button><button id="logout" class="secondary">退出</button></div>
   </header>
   <main>
-    <div id="status" class="status">请输入开发环境启动时打印的管理员令牌。</div>
+    <div id="status" class="status">请用管理员账号登录。首次部署时用 ADMIN_ID / ADMIN_PASSWORD 环境变量引导出第一个管理员。</div>
     <div class="grid">
       <section>
         <h2>邀请密钥</h2>
@@ -72,12 +73,16 @@ export function adminConsoleHtml(): string {
   </main>
   <dialog id="ledger-dialog"><div class="dialog-head"><strong id="ledger-title">积分流水</strong><button id="close-ledger" class="secondary">关闭</button></div><div class="dialog-body"><table><thead><tr><th>时间</th><th>类型</th><th>变化</th><th>余额</th><th>原因</th><th>操作</th></tr></thead><tbody id="ledger-body"></tbody></table></div></dialog>
   <script>
-    const tokenInput = document.querySelector('#token');
+    const adminIdInput = document.querySelector('#admin-id');
+    const passwordInput = document.querySelector('#admin-password');
     const statusBox = document.querySelector('#status');
     const ledgerDialog = document.querySelector('#ledger-dialog');
     let selectedUserId = '';
+    // 令牌只放 sessionStorage：关掉标签页即失效，也不会被同源的其他页面长期读到。
+    // 密码**从不**落任何存储。
+    let token = sessionStorage.getItem('mymj-admin-token') || '';
 
-    tokenInput.value = sessionStorage.getItem('mymj-admin-token') || '';
+    adminIdInput.value = sessionStorage.getItem('mymj-admin-id') || '';
 
     function showStatus(message, kind) {
       statusBox.textContent = message;
@@ -110,16 +115,51 @@ export function adminConsoleHtml(): string {
     }
 
     async function api(path, options) {
-      const token = tokenInput.value.trim();
-      if (!token) throw new Error('请先输入管理员令牌');
+      if (!token) throw new Error('尚未登录');
       const init = Object.assign({}, options || {});
       init.headers = Object.assign({ Authorization: 'Bearer ' + token }, init.headers || {});
       if (init.body) init.headers['Content-Type'] = 'application/json';
       const response = await fetch(path, init);
       const text = await response.text();
       const body = text ? JSON.parse(text) : null;
+      if (response.status === 401) {
+        // 令牌过期或被吊销：清掉它，让界面回到「请登录」的状态，而不是一直报错。
+        signOut();
+        throw new Error('登录已过期，请重新登录');
+      }
       if (!response.ok) throw new Error((body && (body.message || body.code)) || ('HTTP ' + response.status));
       return body;
+    }
+
+    function signOut() {
+      token = '';
+      sessionStorage.removeItem('mymj-admin-token');
+      sessionStorage.removeItem('mymj-admin-id');
+      passwordInput.value = '';
+    }
+
+    /** 用账号密码换一枚管理员令牌；令牌只存在内存与 sessionStorage 里。 */
+    async function signIn() {
+      const adminId = adminIdInput.value.trim();
+      const password = passwordInput.value;
+      if (!adminId || !password) throw new Error('请输入管理员账号与密码');
+      const response = await fetch('/v1/admin/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminId, password }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (response.status === 429) throw new Error('失败次数过多，请稍后再试');
+        if (response.status === 401) throw new Error('账号或密码不正确');
+        throw new Error((body && (body.message || body.code)) || ('HTTP ' + response.status));
+      }
+      token = body.token;
+      sessionStorage.setItem('mymj-admin-token', token);
+      sessionStorage.setItem('mymj-admin-id', adminId);
+      passwordInput.value = '';
+      await loadAll();
+      showStatus('已登录：' + adminId, 'ok');
     }
 
     async function loadKeys() {
@@ -251,13 +291,14 @@ export function adminConsoleHtml(): string {
     }
 
     async function loadAll() {
-      sessionStorage.setItem('mymj-admin-token', tokenInput.value.trim());
       await Promise.all([loadKeys(), loadUsers(), loadAudit()]);
-      showStatus('管理后台已连接', 'ok');
     }
 
-    document.querySelector('#connect').addEventListener('click', () => loadAll().catch((error) => showStatus(error.message, 'error')));
-    document.querySelector('#logout').addEventListener('click', () => { sessionStorage.removeItem('mymj-admin-token'); tokenInput.value = ''; showStatus('管理员令牌已清除'); });
+    document.querySelector('#connect').addEventListener('click', () => signIn().catch((error) => showStatus(error.message, 'error')));
+    document.querySelector('#logout').addEventListener('click', () => { signOut(); showStatus('已退出登录'); });
+    passwordInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') signIn().catch((error) => showStatus(error.message, 'error'));
+    });
     document.querySelector('#issue-form').addEventListener('submit', (event) => issueKeys(event).catch((error) => showStatus(error.message, 'error')));
     document.querySelector('#refresh-keys').addEventListener('click', () => loadKeys().catch((error) => showStatus(error.message, 'error')));
     document.querySelector('#user-search').addEventListener('submit', (event) => loadUsers(event).catch((error) => showStatus(error.message, 'error')));
@@ -265,7 +306,12 @@ export function adminConsoleHtml(): string {
     document.querySelector('#close-ledger').addEventListener('click', () => ledgerDialog.close());
     document.querySelector('#copy-keys').addEventListener('click', async () => { await navigator.clipboard.writeText(document.querySelector('#issued').textContent); showStatus('密钥已复制到剪贴板', 'ok'); });
 
-    if (tokenInput.value) loadAll().catch((error) => showStatus(error.message, 'error'));
+    // 页面刷新后如果令牌还在（2 小时内），直接恢复到已登录状态，不必重新输密码。
+    if (token) {
+      loadAll()
+        .then(() => showStatus('已恢复登录状态', 'ok'))
+        .catch((error) => showStatus(error.message, 'error'));
+    }
   </script>
 </body>
 </html>`;
