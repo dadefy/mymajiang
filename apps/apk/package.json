@@ -1,0 +1,14 @@
+{
+  "name": "@mianyang-mahjong/apk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mianyang-mahjong/client": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "laya:build:web": "layaair --version=3.4.0 build web -p ."
+  }
+}

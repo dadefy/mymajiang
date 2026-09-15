@@ -11,13 +11,19 @@ function fakeDatabase(options: {
   matches?: unknown[];
   players?: unknown[];
   rounds?: unknown[];
+  /** 当 listMatchesFor 带上游标（翻第二页）时返回的比赛；缺省复用 matches。 */
+  nextMatches?: unknown[];
 } = {}) {
   const queries: RecordedQuery[] = [];
   const database = {
     pool: {
       async query(sql: string, parameters: unknown[] = []) {
         queries.push({ sql, parameters });
-        if (sql.includes("JOIN match_room_players mine")) return { rows: options.matches ?? [], rowCount: 1 };
+        if (sql.includes("JOIN match_room_players mine")) {
+          // 带了游标的查询参数更长（userId + finalizedAt + roomId + limit+1），据此区分页。
+          const rows = parameters.length > 2 ? (options.nextMatches ?? options.matches ?? []) : (options.matches ?? []);
+          return { rows, rowCount: 1 };
+        }
         if (sql.includes("FROM match_rooms")) return { rows: options.matches ?? [], rowCount: 1 };
         if (sql.includes("FROM match_room_players")) return { rows: options.players ?? [], rowCount: 1 };
         if (sql.includes("FROM match_rounds")) return { rows: options.rounds ?? [], rowCount: 1 };
@@ -59,10 +65,11 @@ describe("PostgresMatchHistory", () => {
     const { database, queries } = fakeDatabase({ matches: [MATCH_ROW], players: PLAYER_ROWS });
     const history = new PostgresMatchHistory(database);
 
-    const matches = await history.listMatchesFor("A", 5);
+    const page = await history.listMatchesFor("A", 5);
 
-    expect(queries[0]!.parameters).toEqual(["A", 5]);
-    expect(matches).toEqual([
+    expect(queries[0]!.parameters).toEqual(["A", 6]);
+    expect(page.nextCursor).toBeUndefined();
+    expect(page.matches).toEqual([
       {
         roomId: "room-1",
         ruleVersion: "MIANYANG_XZ_1_0",
@@ -77,6 +84,39 @@ describe("PostgresMatchHistory", () => {
         ],
       },
     ]);
+  });
+
+  it("pages with a keyset cursor over finalized_at and room_id", async () => {
+    const older = { ...MATCH_ROW, room_id: "room-0", finalized_at: new Date("2026-09-14T01:00:00.000Z") };
+    // 第一页 limit=1 却取回 2 行，说明还有下一页；游标指向最后一行的键，翻页时返回它之后（更早）的数据。
+    const { database, queries } = fakeDatabase({
+      matches: [MATCH_ROW, older],
+      nextMatches: [],
+      players: PLAYER_ROWS,
+    });
+    const history = new PostgresMatchHistory(database);
+
+    const first = await history.listMatchesFor("A", 1);
+    expect(first.matches).toHaveLength(1);
+    expect(first.matches[0]!.roomId).toBe("room-1");
+    expect(first.nextCursor).toBeDefined();
+
+    const second = await history.listMatchesFor("A", 1, first.nextCursor);
+    expect(second.matches).toHaveLength(0);
+    expect(second.nextCursor).toBeUndefined();
+
+    // 翻页查询必须带上游标的时间戳与房间号两个键。
+    const followUp = queries.at(-1)!;
+    expect(followUp.parameters.length).toBe(4); // userId, finalizedAt, roomId, limit+1
+    expect(followUp.sql).toContain("(r.finalized_at, r.room_id) <");
+  });
+
+  it("rejects a cursor it did not issue", async () => {
+    const { database } = fakeDatabase({ matches: [MATCH_ROW], players: PLAYER_ROWS });
+    const history = new PostgresMatchHistory(database);
+
+    await expect(history.listMatchesFor("A", 5, "m1:garbage")).rejects.toThrow("INVALID_CURSOR");
+    await expect(history.listMatchesFor("A", 5, "not-a-marker")).rejects.toThrow("INVALID_CURSOR");
   });
 
   it("only asks for matches that actually played a round", async () => {

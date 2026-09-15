@@ -399,7 +399,7 @@ describe("server API", () => {
 
   it("serves a player's match history and a match's round detail", async () => {
     const state: { matches: MatchSummary[] } = { matches: [] };
-    const requested: Array<{ userId: string; limit: number }> = [];
+    const requested: Array<{ userId: string; limit: number; cursor: string | undefined }> = [];
     const rounds: MatchRoundRecord[] = [
       {
         roundId: "round-1",
@@ -416,9 +416,9 @@ describe("server API", () => {
       },
     ];
     const history: MatchHistoryReader = {
-      async listMatchesFor(userId, limit) {
-        requested.push({ userId, limit });
-        return state.matches;
+      async listMatchesFor(userId, limit, cursor) {
+        requested.push({ userId, limit, cursor });
+        return { matches: state.matches, nextCursor: undefined };
       },
       async findMatch(roomId) {
         return state.matches.find((match) => match.roomId === roomId);
@@ -453,7 +453,7 @@ describe("server API", () => {
       headers: { authorization: `Bearer ${first.token}` },
     });
     expect(listed.statusCode).toBe(200);
-    expect(requested).toEqual([{ userId: first.userId, limit: 5 }]);
+    expect(requested).toEqual([{ userId: first.userId, limit: 5, cursor: undefined }]);
     expect(listed.json().matches).toHaveLength(1);
     expect(listed.json().matches[0]).toMatchObject({
       roomId: "room-1",

@@ -381,9 +381,15 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.get("/v1/matches", async (request) => {
     const user = await requireUser(request.headers.authorization, dependencies);
     const history = requireMatchHistory(dependencies);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(50).default(20) }).parse(request.query);
-    const matches = await history.listMatchesFor(user.userId, query.limit);
-    return { matches: matches.map((match) => matchSummaryView(match, dependencies, user.userId)) };
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(50).default(20),
+      cursor: z.string().min(1).optional(),
+    }).parse(request.query);
+    const page = await history.listMatchesFor(user.userId, query.limit, query.cursor);
+    return {
+      matches: page.matches.map((match) => matchSummaryView(match, dependencies, user.userId)),
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    };
   });
 
   app.get("/v1/rooms/:roomId/history", async (request) => {

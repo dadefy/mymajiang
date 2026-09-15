@@ -35,6 +35,28 @@ git status          # 应为空
 - 提交信息是 UTF-8 中文，**用 `-F 消息文件` 提交**，不要用 `-m`（PowerShell 传中文会乱码）。
   文件要用无 BOM 的 UTF-8 写。
 
+### 提交身份（多个 AI 协作时务必区分）
+
+仓库级身份是 `Administrator <administrator@localhost>`，所有协作者共用。**提交前必须
+用环境变量覆盖成自己的身份**，否则提交历史里分不清是谁干的：
+
+| 协作者 | GIT_AUTHOR_NAME / GIT_COMMITTER_NAME | email |
+| --- | --- | --- |
+| WorkBuddy（我） | `WorkBuddy` | `workbuddy@local` |
+| 混元 4 | `Hunyuan` | `hunyuan@local` |
+| 人类开发者 | 你的真实姓名 | 你的真实邮箱 |
+
+```powershell
+$env:GIT_AUTHOR_NAME = "WorkBuddy"
+$env:GIT_AUTHOR_EMAIL = "workbuddy@local"
+$env:GIT_COMMITTER_NAME = "WorkBuddy"
+$env:GIT_COMMITTER_EMAIL = "workbuddy@local"
+# ... 然后 git add / git commit ...
+```
+
+提交后可用 `git log -1 --format="%an <%ae>"` 核对。**混元把上表的 `WorkBuddy` 换成
+`Hunyuan` / `hunyuan@local` 即可**，不要照抄。
+
 ### 远端
 
 - 远端：`origin = https://github.com/dadefy/mymajiang.git`

@@ -34,6 +34,18 @@ export interface MatchRoundRecord {
 }
 
 /**
+ * Opaque cursor returned by {@link MatchHistoryReader.listMatchesFor}. Its encoding is an
+ * implementation detail; callers must only pass a cursor they got back from the same method.
+ */
+export type MatchCursor = string;
+
+/** One page of a match list. `nextCursor` is undefined when there are no older matches. */
+export interface MatchPage {
+  matches: MatchSummary[];
+  nextCursor: MatchCursor | undefined;
+}
+
+/**
  * Reads finished matches back out of durable storage.
  *
  * History is a persistence feature: a match only has a record if the server had a database when it
@@ -41,8 +53,14 @@ export interface MatchRoundRecord {
  * a room dissolved before the first deal never shows up as a result.
  */
 export interface MatchHistoryReader {
-  /** Matches this player took part in, most recently finished first. */
-  listMatchesFor(userId: string, limit: number): Promise<MatchSummary[]>;
+  /**
+   * Matches this player took part in, most recently finished first, in pages.
+   *
+   * Pass `undefined` as the cursor for the first page; the returned `nextCursor` (when present)
+   * fetches the following, older page. Matches are keyed by their room id, so a match is never
+   * returned twice and none is skipped, regardless of how `finalized_at` ties are ordered.
+   */
+  listMatchesFor(userId: string, limit: number, cursor?: MatchCursor): Promise<MatchPage>;
 
   /** One match with all of its players, or undefined when the room has no recorded result. */
   findMatch(roomId: string): Promise<MatchSummary | undefined>;

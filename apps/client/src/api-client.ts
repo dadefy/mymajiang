@@ -185,8 +185,10 @@ export class ApiClient {
 
   // ---------- 战绩 ----------
 
-  matches(limit = 20): Promise<ApiResult<{ matches: MatchSummary[] }>> {
-    return this.call({ method: "GET", path: `/v1/matches?limit=${limit}` });
+  matches(limit = 20, cursor?: string): Promise<ApiResult<{ matches: MatchSummary[]; nextCursor?: string }>> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return this.call({ method: "GET", path: `/v1/matches?${query.toString()}` });
   }
 
   matchDetail(roomId: string): Promise<ApiResult<{ match: MatchSummary; rounds: MatchRoundView[] }>> {
