@@ -17,7 +17,7 @@
 
 ## 2. 版本控制
 
-`mianyang-mahjong` 已有自己的 git 仓库（初始提交 `db0cbd0`，分支 `master`，
+`mianyang-mahjong` 已有自己的 git 仓库（初始提交 `db0cbd0`，分支 `main`，
 96 个文件 / 14768 行）。**每次完成一个可验证的改动就提交一次，不要攒一大坨。**
 
 ```powershell
@@ -36,13 +36,18 @@ git status          # 应为空
 
 ### 远端
 
-**目前没有配置任何远端**，代码只在本机。要推到 GitHub / Gitee 需要你先在网站上建一个空仓库，
-然后把地址给出来（或配好凭据），再执行：
+**远端尚未配置**，代码目前只在本机（已确认 github.com 与 gitee.com 在本机都能连通，
+缺的只是你的账号凭据）。要推上去，先在网站上建一个**空仓库**（不要勾 README/LICENSE），
+然后：
 
 ```powershell
 git remote add origin <仓库地址>
-git push -u origin master
+git push -u origin main
 ```
+
+没有保存任何凭据，所以推送时会要求登录 —— 用 Personal Access Token 当密码即可
+（GitHub 需 `repo` 权限；Gitee 同理）。**建议建私有仓库**：仓库里有两份产品文档
+（规则书 v1.0、APK 实施书）。
 
 `.gitignore` 已排除 `node_modules/`、`dist/`、`coverage/`、`.env*`。
 规则书与实施书两个 `.docx` 已随仓库提交（它们是产品规则的来源）。
