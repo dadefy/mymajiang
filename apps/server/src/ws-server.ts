@@ -1,0 +1,480 @@
+import { randomInt } from "node:crypto";
+import {
+  MahjongGame,
+  type ClaimAction,
+  type Suit,
+  type Tile,
+} from "@mianyang-mahjong/rules";
+import type { MatchRoom } from "@mianyang-mahjong/domain";
+import type { AppDependencies } from "./app.js";
+import type { StoredRoundState } from "./game-state-store.js";
+import type { GroupEvent } from "./group-events.js";
+import { WebSocketConnection, WebSocketServer, type WsMessage } from "./ws.js";
+
+interface ActiveMatch {
+  room: MatchRoom;
+  game: MahjongGame;
+  seatsByUser: Map<string, number>;
+  roundNumber: number;
+}
+
+export interface RealtimeOptions {
+  playTimeoutMs?: number;
+  claimTimeoutMs?: number;
+}
+
+/** 每个 active match 的 seat -> connection 映射。 */
+const seatConnections = new Map<ActiveMatch, Map<number, WebSocketConnection>>();
+const connectionsByRoom = new Map<string, Map<string, WebSocketConnection>>();
+
+function roomConnections(roomId: string): Map<string, WebSocketConnection> {
+  let map = connectionsByRoom.get(roomId);
+  if (!map) {
+    map = new Map();
+    connectionsByRoom.set(roomId, map);
+  }
+  return map;
+}
+
+function sendError(connection: WebSocketConnection, message: string): void {
+  connection.send({ type: "error", message });
+}
+
+/** 单个玩家的脱敏视图（含自己的手牌，不含他人手牌）。 */
+function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number): object {
+  const player = game.players[seat]!;
+  return {
+    roomId: room.roomId,
+    roundNumber,
+    seat,
+    phase: game.phase,
+    currentPlayerSeat: game.currentPlayerSeat,
+    tilesLeft: game.tilesLeft,
+    hand: [...player.hand],
+    melds: [...player.melds],
+    missingSuit: player.missingSuit,
+    discards: [...player.discards],
+    won: player.won,
+    players: game.players.map((other) => ({
+      seat: other.seat,
+      handSize: other.handSize,
+      melds: [...other.melds],
+      discards: [...other.discards],
+      won: other.won,
+      missingSuit: other.missingSuit,
+    })),
+    ...(game.result ? { result: game.result } : {}),
+  };
+}
+
+export function createWebSocketServer(
+  dependencies: AppDependencies,
+  port: number,
+  options: RealtimeOptions = {},
+): Promise<WebSocketServer> {
+  const activeMatches = new Map<string, ActiveMatch>();
+  const actionTimers = new Map<ActiveMatch, Map<number, ReturnType<typeof setTimeout>>>();
+  const playTimeoutMs = options.playTimeoutMs ?? 15_000;
+  const claimTimeoutMs = options.claimTimeoutMs ?? 8_000;
+
+  // 群聊订阅：一个连接可以同时订阅多个群，一个群也可以有多个连接。
+  const groupSubscribers = new Map<string, Set<WebSocketConnection>>();
+  const subscriptionsByConnection = new Map<WebSocketConnection, Set<string>>();
+
+  function subscribeToGroup(connection: WebSocketConnection, groupId: string): void {
+    let subscribers = groupSubscribers.get(groupId);
+    if (!subscribers) {
+      subscribers = new Set();
+      groupSubscribers.set(groupId, subscribers);
+    }
+    subscribers.add(connection);
+    let groups = subscriptionsByConnection.get(connection);
+    if (!groups) {
+      groups = new Set();
+      subscriptionsByConnection.set(connection, groups);
+    }
+    groups.add(groupId);
+  }
+
+  function unsubscribeFromGroup(connection: WebSocketConnection, groupId: string): void {
+    groupSubscribers.get(groupId)?.delete(connection);
+    subscriptionsByConnection.get(connection)?.delete(groupId);
+  }
+
+  function unsubscribeAllGroups(connection: WebSocketConnection): void {
+    for (const groupId of subscriptionsByConnection.get(connection) ?? []) {
+      groupSubscribers.get(groupId)?.delete(connection);
+    }
+    subscriptionsByConnection.delete(connection);
+  }
+
+  /**
+   * 把群聊变化推给订阅了该群的在线成员。
+   *
+   * 每次广播都重新确认成员身份，而不是只信订阅那一刻：被移出群的人即便还没来得及退订，
+   * 也不会再收到任何消息。
+   */
+  function broadcastGroupEvent(event: GroupEvent): void {
+    if (event.type === "dissolved") {
+      // 群已经不存在，所有订阅一起作废；复制一份再遍历，边退订边遍历才安全。
+      for (const connection of [...(groupSubscribers.get(event.groupId) ?? [])]) {
+        connection.send({ type: "group-dissolved", groupId: event.groupId });
+        unsubscribeFromGroup(connection, event.groupId);
+      }
+      groupSubscribers.delete(event.groupId);
+      return;
+    }
+    if (event.type === "member-removed") {
+      for (const connection of [...(groupSubscribers.get(event.groupId) ?? [])]) {
+        if (connection.userId !== event.userId) continue;
+        unsubscribeFromGroup(connection, event.groupId);
+        connection.send({ type: "group-removed", groupId: event.groupId });
+      }
+      return;
+    }
+    const group = dependencies.groupService.groups.get(event.groupId);
+    if (!group) return;
+    for (const connection of groupSubscribers.get(event.groupId) ?? []) {
+      if (!connection.userId || !group.members.has(connection.userId)) continue;
+      if (event.type === "message") {
+        connection.send({ type: "group-message", groupId: event.groupId, message: event.message });
+        continue;
+      }
+      if (event.type === "recalled") {
+        connection.send({ type: "group-message-recalled", groupId: event.groupId, message: event.message });
+        continue;
+      }
+      connection.send({
+        type: "group-updated",
+        groupId: event.groupId,
+        ...(event.notice === undefined ? {} : { notice: event.notice }),
+        ...(event.allMuted === undefined ? {} : { allMuted: event.allMuted }),
+      });
+    }
+  }
+
+  // 订阅跟着进程（或测试里的依赖图）一起存活：事件总线本身是按依赖创建的一次性对象。
+  dependencies.groupEvents.subscribe(broadcastGroupEvent);
+
+  function clearActionTimers(active: ActiveMatch): void {
+    for (const timer of actionTimers.get(active)?.values() ?? []) clearTimeout(timer);
+    actionTimers.delete(active);
+  }
+
+  function scheduleAutoActions(active: ActiveMatch): void {
+    const timers = new Map<number, ReturnType<typeof setTimeout>>();
+    const game = active.game;
+    for (const player of game.players) {
+      const actions = game.allowedActions(player.id);
+      if (actions.length === 0) continue;
+      const delay = game.phase === "claiming" ? claimTimeoutMs : playTimeoutMs;
+      const timer = setTimeout(() => {
+        if (active.game !== game || game.allowedActions(player.id).length === 0) return;
+        try {
+          game.autoAct(player.id);
+          void broadcastState(active).catch(() => undefined);
+        } catch {
+          // 状态已由另一操作推进时忽略过期定时器。
+        }
+      }, delay);
+      timer.unref();
+      timers.set(player.seat, timer);
+    }
+    actionTimers.set(active, timers);
+  }
+
+  /**
+   * 保存这一局的快照，供进程重启后接着打。
+   *
+   * 快照含牌墙与全部手牌，只留在服务端。写入走共享写队列，所以 WS 操作本身不等落盘；
+   * REST 请求结束时的 flush 会把队列里积压的快照一并排干。
+   */
+  function saveRoundState(active: ActiveMatch): void {
+    dependencies.gameStateStore?.save(active.room.roomId, active.roundNumber, active.game.serialize());
+  }
+
+  async function broadcastState(active: ActiveMatch): Promise<void> {
+    clearActionTimers(active);
+    const seatMap = seatConnections.get(active);
+    const game = active.game;
+    if (game.phase === "finished" && game.result) {
+      const roundResult = game.result;
+      for (const connection of seatMap?.values() ?? []) {
+        connection.send({
+          type: "round-finished",
+          roundNumber: active.roundNumber,
+          result: roundResult,
+        });
+      }
+      const matchResult = active.room.recordCompletedRound({ ...roundResult, events: [...game.events] });
+      if (matchResult) {
+        for (const player of active.room.players.values()) dependencies.accountStore.saveAccount(player.account);
+        await dependencies.accountStore.flush?.();
+        for (const connection of seatMap?.values() ?? []) {
+          connection.send({ type: "match-finished", result: matchResult });
+        }
+        dependencies.gameStateStore?.clear(active.room.roomId);
+        activeMatches.delete(active.room.roomId);
+        seatConnections.delete(active);
+        return;
+      }
+      active.roundNumber += 1;
+      active.game = new MahjongGame(
+        randomInt(0, 2 ** 31),
+        [...active.seatsByUser.keys()] as [string, string, string, string],
+        roundResult.nextDealerSeat,
+      );
+      await broadcastState(active);
+      return;
+    }
+    for (const [seat, connection] of seatMap ?? []) {
+      const player = game.players[seat]!;
+      connection.send({ type: "game", state: playerSnapshot(game, seat, active.room, active.roundNumber) });
+      connection.send({ type: "actions", actions: game.allowedActions(player.id) });
+    }
+    scheduleAutoActions(active);
+    saveRoundState(active);
+  }
+
+  async function startMatch(room: MatchRoom): Promise<void> {
+    // Seats are owned by the room and fixed in `room.start()`, so the table layout the players see
+    // is the one that gets persisted. The engine still needs them as a dense 0..3 tuple.
+    const seated = [...room.players.values()].sort((left, right) => (left.seat ?? -1) - (right.seat ?? -1));
+    if (seated.length !== 4 || seated.some((player) => player.seat === undefined)) {
+      throw new Error("Every player must have a seat before the match starts");
+    }
+    const seatsByUser = new Map<string, number>();
+    seated.forEach((player) => seatsByUser.set(player.account.userId, player.seat!));
+    const game = new MahjongGame(
+      randomInt(0, 2 ** 31),
+      seated.map((player) => player.account.userId) as [string, string, string, string],
+    );
+    const active: ActiveMatch = { room, game, seatsByUser, roundNumber: room.completedRounds + 1 };
+    activeMatches.set(room.roomId, active);
+
+    const seatMap = new Map<number, WebSocketConnection>();
+    for (const [userId, connection] of roomConnections(room.roomId)) {
+      const seat = seatsByUser.get(userId);
+      if (seat !== undefined) seatMap.set(seat, connection);
+    }
+    seatConnections.set(active, seatMap);
+    for (const player of room.players.values()) dependencies.accountStore.saveAccount(player.account);
+    await dependencies.accountStore.flush?.();
+    await broadcastState(active);
+  }
+
+  /**
+   * 接手一个「状态是 playing、但内存里还没有对局」的房间。
+   *
+   * 出现这种情况要么是服务重启（房间从数据库恢复，引擎随内存一起没了），要么是房主刚通过
+   * REST 开局、还没有人连上来。
+   *
+   * 有存档就接着打；没有存档、存档属于已经打完的上一局、或存档与房间对不上，就开下一局。
+   * 累计分与已完成局数都在房间里，所以开下一局仍然是对的，只是正在打的那一局作废。
+   */
+  async function resumeMatch(room: MatchRoom): Promise<"restored" | "started"> {
+    const stored = await dependencies.gameStateStore?.load(room.roomId);
+    // 只有「正好是接下来要打的那一局」的存档能接上。上一局的存档必须忽略：接上去会把已经
+    // 结算过的分数再算一遍，还会把同一局重复记进战绩。
+    if (stored && stored.roundNumber === room.completedRounds + 1 && adoptStoredRound(room, stored)) {
+      return "restored";
+    }
+    await startMatch(room);
+    return "started";
+  }
+
+  /** 用存档重建引擎并挂进 `activeMatches`。存档不可用或与房间对不上时返回 false。 */
+  function adoptStoredRound(room: MatchRoom, stored: StoredRoundState): boolean {
+    let game: MahjongGame;
+    try {
+      game = MahjongGame.restore(stored.state);
+    } catch {
+      // 存档损坏：当作没有存档，由调用方开下一局。
+      return false;
+    }
+    const seated = [...room.players.values()].sort((left, right) => (left.seat ?? -1) - (right.seat ?? -1));
+    const sameTable = seated.length === 4
+      && seated.every((player, seat) => player.seat === seat && game.players[seat]?.id === player.account.userId);
+    if (!sameTable) return false;
+
+    const seatsByUser = new Map<string, number>();
+    seated.forEach((player) => seatsByUser.set(player.account.userId, player.seat!));
+    const active: ActiveMatch = { room, game, seatsByUser, roundNumber: stored.roundNumber };
+    activeMatches.set(room.roomId, active);
+
+    const seatMap = new Map<number, WebSocketConnection>();
+    for (const [userId, connection] of roomConnections(room.roomId)) {
+      const seat = seatsByUser.get(userId);
+      if (seat !== undefined) seatMap.set(seat, connection);
+    }
+    seatConnections.set(active, seatMap);
+    return true;
+  }
+
+  async function handleMessage(connection: WebSocketConnection, message: WsMessage): Promise<void> {
+    if (message.type === "auth") {
+      const token = message.token as string;
+      // `roomId` 可以省略：只想订阅群聊的连接不需要绑房间。
+      const roomId = message.roomId as string | undefined;
+      if (!token) return sendError(connection, "auth requires a token");
+      let userId: string;
+      try {
+        userId = await dependencies.tokens.verifyUserToken(token);
+      } catch {
+        return sendError(connection, "INVALID_USER_TOKEN");
+      }
+      const account = dependencies.accountStore.findAccountById(userId);
+      if (!account || account.status !== "active") return sendError(connection, "ACCOUNT_NOT_ACTIVE");
+      if (!roomId) {
+        // 只订阅群聊的连接：认证通过就够了，不需要房间。
+        connection.userId = userId;
+        connection.send({ type: "ready", userId });
+        return;
+      }
+      const room = dependencies.roomStore.get(roomId);
+      if (!room) return sendError(connection, "ROOM_NOT_FOUND");
+      if (!room.players.has(userId)) return sendError(connection, "Player is not in the room");
+
+      connection.userId = userId;
+      connection.roomId = roomId;
+      try {
+        room.reconnect(userId);
+      } catch (error) {
+        delete connection.userId;
+        delete connection.roomId;
+        return sendError(connection, error instanceof Error ? error.message : String(error));
+      }
+      roomConnections(roomId).set(userId, connection);
+
+      if (room.status === "playing" && !activeMatches.has(roomId)) {
+        // 服务重启后进行中的对局会走到这里：先试着接手存档，接不上再开下一局。
+        try {
+          // `startMatch` 自己会向所有座位广播状态；接手存档则要继续往下走，把快照发给这个连接。
+          if ((await resumeMatch(room)) === "started") return;
+        } catch (error) {
+          sendError(connection, error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
+      const active = activeMatches.get(roomId);
+      if (active) {
+        const seat = active.seatsByUser.get(userId)!;
+        const seatMap = seatConnections.get(active) ?? new Map();
+        seatMap.set(seat, connection);
+        seatConnections.set(active, seatMap);
+        connection.send({ type: "game", state: playerSnapshot(active.game, seat, room, active.roundNumber) });
+        connection.send({ type: "actions", actions: active.game.allowedActions(active.game.players[seat]!.id) });
+      } else {
+        connection.send({ type: "room", status: room.status, playerCount: room.players.size });
+      }
+      return;
+    }
+
+    if (message.type === "group-subscribe") {
+      if (!connection.userId) return sendError(connection, "Not authenticated");
+      const groupId = message.groupId as string;
+      if (!groupId) return sendError(connection, "group-subscribe requires groupId");
+      const group = dependencies.groupService.groups.get(groupId);
+      if (!group) return sendError(connection, "GROUP_NOT_FOUND");
+      if (!group.members.has(connection.userId)) return sendError(connection, "User is not a group member");
+      subscribeToGroup(connection, groupId);
+      connection.send({ type: "group-subscribed", groupId });
+      return;
+    }
+
+    if (message.type === "group-unsubscribe") {
+      const groupId = message.groupId as string;
+      if (!groupId) return sendError(connection, "group-unsubscribe requires groupId");
+      unsubscribeFromGroup(connection, groupId);
+      connection.send({ type: "group-unsubscribed", groupId });
+      return;
+    }
+
+    if (message.type === "start") {
+      if (!connection.userId || !connection.roomId) return sendError(connection, "Not authenticated");
+      const room = dependencies.roomStore.get(connection.roomId);
+      if (!room) return sendError(connection, "ROOM_NOT_FOUND");
+      if (activeMatches.has(room.roomId)) return sendError(connection, "Match has already started");
+      if (room.status === "waiting") {
+        try {
+          room.start(connection.userId);
+        } catch (error) {
+          return sendError(connection, error instanceof Error ? error.message : String(error));
+        }
+      } else if (room.status !== "playing") {
+        return sendError(connection, "Room is not playable");
+      }
+      try {
+        await startMatch(room);
+      } catch (error) {
+        return sendError(connection, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+
+    if (!connection.userId || !connection.roomId) return sendError(connection, "Not authenticated");
+    const active = activeMatches.get(connection.roomId);
+    if (!active) return sendError(connection, "Match has not started");
+    const game = active.game;
+    const seat = active.seatsByUser.get(connection.userId);
+    if (seat === undefined) return sendError(connection, "Not seated in this match");
+    const player = game.players[seat]!;
+
+    try {
+      switch (message.type) {
+        case "swap":
+          game.submitSwap(player.id, message.tiles as Tile[]);
+          break;
+        case "auto-swap":
+          game.autoSwap(player.id);
+          break;
+        case "missing":
+          game.submitMissing(player.id, message.suit as Suit);
+          break;
+        case "auto-missing":
+          game.autoMissing(player.id);
+          break;
+        case "discard":
+          game.discard(player.id, message.tile as Tile);
+          break;
+        case "claim":
+          game.claim(player.id, message.action as ClaimAction);
+          break;
+        case "self-draw":
+          game.selfDrawWin(player.id);
+          break;
+        case "concealed-kong":
+          game.concealedKong(player.id);
+          break;
+        case "added-kong":
+          game.addedKong(player.id);
+          break;
+        default:
+          return sendError(connection, `Unknown message type: ${message.type}`);
+      }
+    } catch (error) {
+      return sendError(connection, error instanceof Error ? error.message : String(error));
+    }
+
+    await broadcastState(active);
+  }
+
+  const wss = new WebSocketServer({
+    onMessage: handleMessage,
+    onClose(connection) {
+      unsubscribeAllGroups(connection);
+      if (!connection.userId || !connection.roomId) return;
+      const roomMap = roomConnections(connection.roomId);
+      if (roomMap.get(connection.userId) !== connection) return;
+      roomMap.delete(connection.userId);
+      dependencies.roomStore.get(connection.roomId)?.disconnect(connection.userId);
+      const active = activeMatches.get(connection.roomId);
+      if (active) {
+        const seat = active.seatsByUser.get(connection.userId);
+        if (seat !== undefined) seatConnections.get(active)?.delete(seat);
+      }
+    },
+  });
+
+  return wss.listen(port).then(() => wss);
+}

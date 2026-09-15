@@ -1,0 +1,24 @@
+{
+  "name": "@mianyang-mahjong/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "dependencies": {
+    "@mianyang-mahjong/domain": "workspace:*",
+    "@mianyang-mahjong/rules": "workspace:*",
+    "fastify": "5.12.4",
+    "jose": "6.2.12",
+    "pg": "8.16.3",
+    "zod": "4.6.5"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "db:migrate": "node dist/migrate.js",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.5"
+  }
+}

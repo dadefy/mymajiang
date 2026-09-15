@@ -1,0 +1,571 @@
+# 绵阳血战麻将项目进度
+
+> 更新时间：2026-09-15  
+> 当前阶段：服务端核心功能开发，APK 客户端尚未开始  
+> 固定规则版本：`MIANYANG_XZ_1_0`
+
+## 1. 项目目标
+
+开发一款 Android APK 形式的四人绵阳血战麻将应用，包含一次性邀请密钥登录、唯一用户 ID、好友、群聊、房间对局、积分结算及后台管理。内测阶段不用手机号与短信验证码，也没有注册审核。
+
+第一版以功能与开发效率为优先，不做复杂渲染。计划使用 LayaAir 3 + TypeScript 开发 APK 客户端，服务端继续使用 TypeScript。
+
+## 2. 已确认产品要求
+
+### 2.1 账号
+
+- **内测采用一次性邀请密钥**：开发方签发密钥并线下发给内测用户，
+  不使用手机短信验证码，也没有注册申请与人工审核。
+- 一把密钥**只能建立一个账号**，绑定之后不可更改；这由数据库上的 UNIQUE 约束保证。
+- 已绑定的密钥就是该账号的登录凭据，之后用同一把密钥反复登录；
+  因此**密钥丢失等于账号丢失**，换设备也只能靠开发方重新建号。
+- 首次激活时由用户自填昵称与头像；昵称 24 字以内，头像为 URL。
+- 每个账号分配永久唯一的 10 位数字用户 ID。
+- 用户可以通过完整的 10 位用户 ID 精确搜索其他用户。
+- 账号状态包括正常、临时封禁、永久封禁。
+- 初始积分为 0。
+- 账号积分不允许为负数，积分不设上限。
+- 积分不可提现、不可转账，不具备现金价值。
+
+### 2.2 好友与群聊
+
+- 支持好友申请、接受、拒绝、好友列表和删除好友。
+- 只保留原小程序的群聊能力，不开发一对一聊天。
+- 群聊支持文字、图片、语音、表情和房间邀请消息类型。
+- 普通用户默认可以在 2 分钟内撤回自己的消息。
+- 群管理员可以管理群成员、禁言、全员禁言及撤回消息。
+- 当前群人数上限为 200，每个用户最多创建 10 个群。
+- 群支持邀请好友入群、主动退群与解散群（仅群主）。
+
+### 2.3 积分与管理
+
+- 进入麻将对局至少需要 500 积分。
+- 管理员不能在用户正在对局时修改其积分或账号状态。
+- 只有超级管理员可以调整、撤销积分、封禁账号，以及**签发与撤销邀请密钥**。
+- 所有积分调整和账号状态修改必须保留审计记录。
+
+### 2.4 固定麻将规则
+
+规则 ID：`MIANYANG_XZ_1_0`
+
+| 项目 | 已确定规则 |
+| --- | --- |
+| 人数 | 4 人 |
+| 局数 | 8 局 |
+| 牌数 | 108 张，仅万、筒、条 |
+| 封顶 | 4 番 |
+| 飘 | 不飘 |
+| 吃牌 | 不允许 |
+| 一炮多响 | 允许 |
+| 自摸 | 加 1 番 |
+| 点杠花 | 按自摸处理 |
+| 换三张 | 启用 |
+| 定缺 | 启用 |
+| 天地胡 | 启用 |
+| 幺九将对 | 启用 |
+| 门清中张 | 启用 |
+| 及时雨 | 不启用 |
+| 最后四张 | 有胡必胡 |
+| 流局处理 | 查花猪、查大叫、退税 |
+| 对局形式 | 血战到底，三家胡牌后结束 |
+
+## 3. 当前代码结构
+
+```text
+mianyang-mahjong/
+├─ apps/server/              Fastify HTTP 与 WebSocket 服务
+│  ├─ db/migrations/         可追加的版本化数据库迁移
+│  │  ├─ 001_initial.sql     初始结构（编号冻结，勿改）
+│  │  ├─ 002_match_records.sql 房间、房间成员、单局记录
+│  │  ├─ 003_round_state.sql 进行中那一局的引擎状态快照
+│  │  └─ 004_invitation_keys.sql 内测邀请密钥，去掉短信与审核
+│  └─ src/
+│     ├─ app.ts              REST API
+│     ├─ auth.ts             JWT 签发与校验
+│     ├─ invitation-key-codec.ts   邀请密钥的生成、归一化与哈希
+│     ├─ postgres-invitation-key-store.ts 邀请密钥的发放与撤销账目
+│     ├─ database.ts         PostgreSQL 连接池与迁移执行器
+│     ├─ postgres-statements.ts    账号行与积分流水行的共享语句
+│     ├─ postgres-write-queue.ts   共享的有序事务写队列
+│     ├─ postgres-account-store.ts 账号仓库
+│     ├─ group-events.ts     群聊变化事件总线（REST → 实时层）与群管理相关的类型
+│     ├─ postgres-admin-store.ts   积分流水与管理员审计仓库
+│     ├─ postgres-friend-store.ts  好友申请与好友关系仓库
+│     ├─ postgres-group-store.ts   群组、成员与群消息仓库
+│     ├─ postgres-room-store.ts    房间、成员座位与单局记录仓库
+│     ├─ game-state-store.ts       进行中对局快照的能力声明
+│     ├─ postgres-game-state-store.ts 进行中对局快照的读写
+│     ├─ match-history.ts    战绩读取能力声明与记录类型
+│     ├─ postgres-match-history.ts 战绩与单局明细查询
+│     ├─ admin-store.ts      管理员记录持久化能力声明
+│     ├─ ws.ts               零依赖 WebSocket 协议层
+│     ├─ ws-server.ts        实时对局协议与重启续打
+│     └─ main.ts             服务启动入口
+├─ packages/domain/          账号、好友、群聊、房间、积分领域逻辑
+├─ packages/rules/           麻将规则、牌型、番数、对局引擎与状态快照
+├─ apps/client/              客户端业务骨架：协议类型、REST 调用、实时通道、页面流
+└─ docs/PROJECT_STATUS.md    本文档
+```
+
+## 4. 已完成功能
+
+### 4.1 麻将规则引擎
+
+- 固定种子洗牌、108 张牌墙和四人发牌。
+- 换三张、定缺、摸牌、出牌。
+- 碰、直杠、暗杠、补杠和抢杠胡。
+- 点炮胡、自摸胡、一炮多响。
+- 过手胡限制、最后四张有胡必胡。
+- 血战到底及三家胡牌后结束。
+- 流局查花猪、查大叫和退税。
+- 番数封顶和零和积分校验。
+- 玩家亏损最多扣到本场开局积分，不产生负分。
+- 8 局连续推进和庄家轮转。
+- 15 秒行牌超时、8 秒响应超时自动托管。
+
+### 4.2 房间与实时对局
+
+- 创建、加入、退出、准备、开局。
+- 仅房主可以开局，必须四人全部准备。
+- 开局后不允许主动退出房间。
+- 三人同意可以解散正在进行的房间。
+- WebSocket 状态按玩家脱敏，不发送其他玩家手牌。
+- JWT 身份验证，不信任客户端提交的用户 ID。
+- 120 秒断线重连窗口。
+- 修复旧连接关闭时误删除新连接的重连竞态。
+- REST 已开局后，首个 WebSocket 玩家连接可恢复实时对局。
+
+### 4.3 账号与邀请密钥登录
+
+- **入口是开发方签发的一次性邀请密钥**，形如 `MYMJ-7K3M-9QXA-2WET-5ZVB`：
+  - `POST /v1/admin/invitation-keys` 批量签发（超级管理员），**明文只在响应里出现一次**；
+  - `GET /v1/admin/invitation-keys` 只返回前 8 位提示位、备注、是否已激活与是否已撤销；
+  - `POST /v1/admin/invitation-keys/:keyId/revoke` 只能撤销**还没绑定账号**的密钥 ——
+    已绑定的密钥是那个账号唯一的凭据，撤销它等于把用户锁在门外。
+- **首次激活建号**：`POST /v1/auth/activate`，带密钥 + 昵称 + 头像，一次 INSERT 同时写入
+  账号行与 `users.invitation_key_hash`；同一列上有 UNIQUE 约束，重复激活直接被数据库拒绝。
+- **之后凭同一把密钥登录**：`POST /v1/auth/login`，密钥哈希反查账号。
+  密钥有效但还没建号时返回 `409 KEY_ACTIVATION_REQUIRED`，客户端据此先收昵称头像。
+- 明文密钥不落库、不出网：系统里只有 SHA-256 哈希和前 8 位提示位。
+  密钥是 80 bit 随机量，不需要加盐就能做唯一索引。
+- 格式不对返回 `400 KEY_MALFORMED`；不存在或已撤销返回 `401 KEY_INVALID` / `KEY_REVOKED`。
+- 审核通过即建号的旧流程（注册申请、短信验证码、人工审核）已整体移除，
+  见迁移 `004_invitation_keys.sql`。
+- JWT 用户令牌（12 小时）与管理员令牌（2 小时）。
+- 被封禁账号不能用密钥登录、调用用户 API 或连接对局 WebSocket。
+
+### 4.4 好友
+
+- 通过完整用户 ID 精确搜索。
+- 搜索结果仅返回用户 ID、昵称、头像和关系状态。
+- 好友申请、接受、拒绝、待处理列表。
+- 防止添加自己、重复申请和无权处理申请。
+- 好友列表和删除好友。
+
+### 4.5 群聊
+
+- 创建群、通过 8 位群号加入群。
+- 查看群信息和成员。
+- 文字、图片、语音、表情、房间邀请消息数据结构。
+- 消息列表和消息撤回。
+- 群公告、全员禁言、单成员禁言。
+- 设置管理员、移除成员和转让群主。
+
+### 4.6 管理接口
+
+- 邀请密钥批量签发、列表（只有提示位）与撤销，仅超级管理员可用。
+- 用户列表、用户 ID 或昵称搜索、账号状态筛选。
+- 临时封禁、永久封禁和解封。
+- 管理员积分增加或扣减。
+- 积分流水查询和错误调整撤销。
+- 账号状态修改审计查询。
+
+### 4.7 PostgreSQL
+
+- 已安装 `pg` 并实现连接池。
+- 启动时使用 PostgreSQL advisory lock 串行执行所有未应用的迁移（见 4.10）。
+- 提供数据库健康检查，故障时 `/health` 返回 HTTP 503。
+- 生产环境未配置 `DATABASE_URL` 时拒绝启动。
+- 用户账号、邀请密钥、积分流水、好友、群聊、房间与对局状态使用 PostgreSQL 写穿缓存。
+- 服务启动时从数据库恢复账号、密钥账目与社交数据。
+- 封禁、积分调整、开局和最终结算会保存账号状态。
+- 进程退出时关闭 HTTP、WebSocket 和数据库连接。
+
+### 4.8 积分流水与管理员审计持久化
+
+- 新增 `PostgresAdminStore`：`point_ledger` 与 `admin_audit_log` 的仓库实现。
+- 服务启动时读回全部积分流水和管理员审计记录，并恢复进 `PointService` 和
+  `AccountAdministrationService`，因此重启后「撤销判定」和「审计查询」仍然正确。
+- 管理员调整积分或撤销调整时，账号余额与积分流水在**同一个事务**内写入；
+  账号状态变更时，账号状态与审计记录同样在同一个事务内写入。
+- 所有仓库共用一条有序写队列（`PostgresWriteQueue`）：写入顺序与请求顺序一致，
+  多语句变更用 `BEGIN`/`COMMIT` 包裹，任一句失败即整体回滚。
+- HTTP `onSend` 钩子在返回响应前 `flush()` 整条队列；写库失败会转成错误响应，
+  不会出现「接口返回成功但数据没落盘」。
+- 进程收到 `SIGINT`/`SIGTERM` 时会先 flush 队列，再关闭数据库连接。
+- 读取流水时会校验 `delta`、`balance_before`、`balance_after` 是否为安全整数，
+  遇到脏数据直接拒绝启动，而不是静默换算错误余额。
+- 积分流水中的 `match_settlement` 类型已在表结构和类型中预留，但牌局结算尚未写入，
+  见第 8 节 P1。
+
+### 4.9 好友与群聊持久化
+
+- 新增 `PostgresFriendStore`（继承 `FriendService`）与 `PostgresGroupStore`（继承 `GroupService`）：
+  领域规则仍由内存映射裁决，每次变更后向共享写队列排队一条落盘写入。
+- 服务启动时读回全部好友申请、群组、群成员和群消息，社交数据不再随重启丢失。
+- 好友接受时，「申请状态」与「好友关系」在同一个事务内写入 `friend_requests` 与
+  `friendships`，因此不会出现只有关系、没有来源申请的状态。
+  删除好友时先删 `friendships` 再删来源申请，顺序满足外键约束。
+- `friendships` 按 `user_low_id < user_high_id` 排序存储，满足表上的检查约束；
+  它同时是「两人是否为好友」的索引表，当前读取仍走 `friend_requests`，两者由仓库保证一致。
+- 建群时群信息与群主成员记录同事务写入；转让群主时群信息与两个受影响成员的记录同事务写入。
+- 重复入群是幂等的：领域层直接返回，数据库层用 `ON CONFLICT DO NOTHING/UPDATE` 兜底。
+- 群消息只把「撤回」视为可变字段，已存消息的内容与发送者不会被覆盖。
+- 加载时若发现成员或消息引用了不存在的群，直接拒绝启动，而不是静默丢弃。
+- 应用层无需改动：`createInMemoryDependencies` 支持注入社交服务，
+  `main.ts` 在配置了数据库时注入 PostgreSQL 版本，否则回落到内存版本。
+
+### 4.10 房间与牌局记录持久化
+
+- 数据库迁移升级为可追加的版本目录 `apps/server/db/migrations/`：`migrate()` 扫描目录、
+  按文件名升序执行未应用的版本，已有的 `001_initial` 记录保持不变，所以升级不会重放旧结构。
+  以后所有结构变更都必须新增文件，不要再改已上线执行过的迁移。
+- 新增 `002_match_records.sql`：`match_rooms`、`match_room_players`、`match_rounds`，
+  以及 `point_ledger.room_id`（牌局结算流水回指产生它的房间，管理员流水保持为空）。
+- 新增 `PostgresMatchRoom`（继承 `MatchRoom`）：建房、加入、准备、开局、单局结束、
+  解散投票、最终结算都会落盘。`POST /v1/rooms` 通过 `createRoom` 工厂取到会自我记录的房间。
+- **座位由房间统一持有**：`MatchRoom.start()` 按加入顺序密集分配 0..3 并存进 `RoomPlayer.seat`，
+  `ws-server` 直接读取，不再自己按加入时间推算，避免「界面座位」与「落盘座位」不一致。
+- 每局结束记录一条 `match_rounds`：局号、结束原因、赢家座位、下一局庄家、分数变化，
+  以及该局的服务端结算事件（事件无法事后重算，因此随局一起存；回放接口见 P1）。
+- **结算落盘是原子的**：`finalize` 里四名玩家的账号行、房间成员行与四笔
+  `match_settlement` 积分流水在同一个事务里写出，任一句失败整体回滚，
+  不会出现「分数变了但没有流水」。
+- 亏损仍按开局积分封顶，赢家同步缩放到零和；`delta` 为 0 的玩家不写流水行（表上有 `delta <> 0` 约束）。
+- 启动恢复策略：
+  - 记录里状态为 `waiting` 的房间会重建进内存，并把所有 `ready` 清空 —— 重启后没人连着，
+    房主不能带着不在场的玩家开局；清空后的状态会写回数据库。
+  - 记录里状态为 `playing` 的房间同样重建为 `playing`，座位、开局积分与累计分都从库里恢复；
+    正在打的那一局能不能接上由实时层决定（见 4.12）。重建不会触发入场校验，
+    也不会清掉玩家的 `activeMatchId` —— 对局还没结束。
+  - 已结束的房间只留在数据库里作为历史，不载入内存。
+  - 玩家缺失或房间里一个人都不剩时会被标记为解散，而不是让服务启动失败；
+    但引用到不存在的用户属于不可能状态，会直接抛错，不静默丢数据。
+
+### 4.11 战绩与单局明细查询
+
+- 新增 `MatchHistoryReader` 能力接口与 `PostgresMatchHistory` 实现：读取已经落库的
+  `match_rooms` / `match_room_players` / `match_rounds`，不写入，因此不需要写队列。
+- `GET /v1/matches` 返回本人参与过的对局（按结束时间倒序），每场包含结束原因、局数、
+  自己的座位与分数变化，以及全部玩家的座位、原始分与实际上分。
+  玩家昵称在 API 层用账号仓库补齐，客户端不必自己解析用户 ID。
+- `GET /v1/rooms/:roomId/history` 返回某一场的完整单局明细（局号、结束原因、赢家座位、
+  下一局庄家、分数变化、服务端结算事件），只有该场对局的参与者可以读取。
+- 只把「真的打过至少一局」的对局算作战绩：`completed_rounds > 0` 是查询条件的一部分，
+  所以开局前就解散的房间不会出现在战绩里。
+- 已结算的对局一定带完整分数；如果查到的行缺 `raw_delta` / `account_delta`，
+  说明数据损坏，直接抛错而不是当成 0。
+- 战绩是持久化能力：没有配置数据库时两个接口都返回 `501 MATCH_HISTORY_UNAVAILABLE`，
+  而不是假装「你没有打过牌」。
+
+### 4.12 对局状态快照与重启续打
+
+- `packages/rules` 的 `MahjongGame` 新增 `serialize()` / `static restore(state)`：
+  完整保存并恢复一局的所有状态，包括牌墙、四家手牌、副露、弃牌、杠分、换三张/定缺进度、
+  当前阶段与行动方、待响应的那一张牌、已响应集合、事件账本与结算结果。
+- **`serialize()` 含牌墙和全部手牌，是服务端机密，永远不能下发给客户端**；
+  客户端视图仍然只走 `snapshot()` 与 `viewFor()`。测试里专门断言了两者的区别。
+- `restore()` 先校验再恢复：座位、牌值、副露形态、事件计数、结算零和都会被检查；
+  只要还没人胡牌，还必须正好是 108 张牌（有人胡牌后赢家手牌会被清空，因此不再适用）。
+  这类数据来自数据库，宁可拒绝也不要恢复出一局算错的牌。
+- 新增 `GameStateStore` 能力接口与 `PostgresGameStateStore` 实现，落在迁移
+  `003_round_state.sql` 的 `match_round_states`（一房间一行，`state` 为 JSONB）。
+  单独一张表是有意的：这份数据一局之内每次行动都被覆盖，一局结束就丢弃。
+- 实时层在每次状态变化后保存快照，对局结束（打满或解散）时删除。
+  写库走共享队列，所以 WebSocket 操作本身不等落盘；REST 请求结束时的 flush 会一并排干。
+- 重启后第一个玩家连上来时：
+  - 存档正好是「接下来要打的那一局」→ 用 `MahjongGame.restore` 重建引擎接着打；
+  - 没有存档、存档属于已经打完的上一局、存档损坏、或存档里的座位与该房间对不上
+    → 开下一局。房间里的累计分与已完成局数是从库里恢复的，所以开下一局仍然是对的，
+    只是正在打的那一局作废。
+- **关键防线**：只有 `存档局号 === 已完成局数 + 1` 才允许接手。少了这一条，
+  在一局刚结算完、下一局还没保存的瞬间重启，会把已经结算过的分数再算一遍、
+  并且把同一局重复记进战绩。
+- 座位在重建时不再重跑入场校验：「能不能入场」由 `join()` 与 `start()` 把关，
+  重建的是已经在房间里的人 —— 进行中对局的玩家本来就带着 `activeMatchId`。
+
+### 4.13 群聊实时推送
+
+- 新增 `GroupEventBus`（`group-events.ts`）：REST 层写成功之后广播一次，实时层订阅后推给在线成员。
+  用事件总线而不是让 `app.ts` 直接调用 WebSocket 服务，是因为 `app` 比 WebSocket 服务先创建，
+  而且路由层不该知道有没有实时通道。
+- 推送范围只限「内容变化」：新消息、撤回、群公告、全员禁言开关；成员管理走 REST 返回值，
+  只有被移出群的成员会额外收到 `group-removed`，否则他还会继续收到消息。
+- 一个连接可以订阅多个群（`group-subscribe` / `group-unsubscribe`），订阅时校验成员身份；
+  `auth` 的 `roomId` 因此变成可选 —— 只想收群消息的连接不需要绑房间。
+- **每次广播都重新确认成员身份**，而不是只信订阅那一刻：被移出群的人即使还没来得及退订，
+  也不会再收到任何消息。连接断开时清理它的全部订阅。
+- 推送的群消息用与 REST 完全相同的视图：撤回后内容已被替换成「已撤回」，原始内容不出网。
+
+### 4.14 群管理补齐
+
+- 新增 `GET /v1/groups`：我加入的群列表，按「最近有消息」排序（没有消息的用建群时间），
+  每条带上我的角色、成员数、群公告与全员禁言状态。
+- 新增 `POST /v1/groups/:groupId/invite`：邀请好友入群。
+  跨聚合的「只能邀请好友」由路由把邀请人的好友集合查出来交给群服务判断，
+  规则本身仍然写在 `GroupService.inviteMember` 里，可以单独测试；
+  重复邀请同一人按幂等处理，不报错。
+- 新增 `POST /v1/groups/:groupId/leave`：主动退群。群主退出时把群主交给最早加入的剩余成员，
+  最后一人退出时群直接解散（响应里 `dissolved: true`）。
+- 新增 `POST /v1/groups/:groupId/dissolve`：解散群，只有群主可以。
+  落库时先删 `group_messages`、`group_members` 再删 `chat_groups`，顺序满足外键约束；
+  这是硬删除，群里历史消息会一起消失。
+- 群被解散时向所有订阅者推 `group-dissolved` 并作废订阅 ——
+  否则客户端会一直挂着一个已经没有意义的订阅。
+
+## 5. 当前 REST API
+
+### 邀请密钥登录
+
+- `POST /v1/auth/activate`
+- `POST /v1/auth/login`
+
+### 管理员
+
+- `GET /v1/admin/invitation-keys`
+- `POST /v1/admin/invitation-keys`
+- `POST /v1/admin/invitation-keys/:keyId/revoke`
+- `GET /v1/admin/users`
+- `PATCH /v1/admin/users/:userId/status`
+- `GET /v1/admin/audit-log`
+- `POST /v1/admin/users/:userId/points`
+- `GET /v1/admin/users/:userId/points`
+- `POST /v1/admin/users/:userId/points/:ledgerId/reverse`
+
+### 用户与好友
+
+- `GET /v1/users/:userId`
+- `POST /v1/friends/requests`
+- `GET /v1/friends/requests`
+- `POST /v1/friends/requests/:requestId/respond`
+- `GET /v1/friends`
+- `DELETE /v1/friends/:friendId`
+
+### 房间
+
+- `POST /v1/rooms`
+- `GET /v1/rooms/:roomId`
+- `POST /v1/rooms/:roomId/join`
+- `POST /v1/rooms/:roomId/leave`
+- `POST /v1/rooms/:roomId/ready`
+- `POST /v1/rooms/:roomId/start`
+- `POST /v1/rooms/:roomId/dissolve`
+- `POST /v1/rooms/:roomId/dissolve/vote`
+- `GET /v1/rooms/:roomId/history`
+- `GET /v1/matches`
+
+### 群聊
+
+- `POST /v1/groups`
+- `GET /v1/groups`
+- `POST /v1/groups/join`
+- `GET /v1/groups/:groupId`
+- `POST /v1/groups/:groupId/invite`
+- `POST /v1/groups/:groupId/leave`
+- `POST /v1/groups/:groupId/dissolve`
+- `POST /v1/groups/:groupId/messages`
+- `GET /v1/groups/:groupId/messages`
+- `POST /v1/groups/:groupId/messages/:messageId/recall`
+- `POST /v1/groups/:groupId/notice`
+- `POST /v1/groups/:groupId/all-mute`
+- `POST /v1/groups/:groupId/mute`
+- `POST /v1/groups/:groupId/members/:memberId/remove`
+- `POST /v1/groups/:groupId/members/:memberId/admin`
+- `POST /v1/groups/:groupId/transfer`
+
+## 6. WebSocket 协议概览
+
+客户端发送：
+
+- `auth`：提交用户 JWT；`roomId` 可选，省略时表示只订阅群聊、不绑房间。
+- `group-subscribe`、`group-unsubscribe`：订阅 / 退订一个群的实时推送。
+- `start`：房主发起开局。
+- `swap`、`auto-swap`：换三张。
+- `missing`、`auto-missing`：定缺。
+- `discard`：出牌。
+- `claim`：碰、杠、胡或过。
+- `self-draw`：自摸胡。
+- `concealed-kong`：暗杠。
+- `added-kong`：补杠。
+
+服务端发送：
+
+- `ready`：只订阅群聊的连接认证通过（`userId`）。
+- `room`：等待房间状态。
+- `game`：当前玩家的脱敏对局快照。
+- `actions`：当前允许执行的动作。
+- `round-finished`：单局结束。
+- `match-finished`：8 局整场结束。
+- `group-subscribed`、`group-unsubscribed`：订阅结果。
+- `group-message`：群里来了新消息。
+- `group-message-recalled`：消息被撤回（内容已替换为「已撤回」）。
+- `group-updated`：群公告或全员禁言开关变化。
+- `group-removed`：当前连接被移出该群，随即停止推送。
+- `group-dissolved`：群被解散，订阅作废。
+- `error`：认证、状态或规则错误。
+
+## 7. 测试状态
+
+- 当前共有 22 个测试文件、164 项自动化测试。
+- 已覆盖规则计算、完整对局、**对局状态快照与恢复**、**邀请密钥签发/激活/登录**、账号、积分、好友、群聊、房间、管理员审计、HTTP API、WebSocket 协议、重启续打、**群聊实时推送与群管理**，以及 PostgreSQL 账号仓库、邀请密钥账目、积分流水与审计仓库、好友仓库、群组仓库、房间与牌局记录仓库、对局快照仓库、战绩查询和迁移执行器。
+- 其中 `packages/rules/src/game-state.test.ts` 覆盖：牌局**每一个中间状态**都能原样 JSON 往返（12 局逐手校验）、往返后行为一致、导出状态与内部状态互不影响、客户端快照不含牌墙与手牌，以及各类损坏数据（少玩家、重复座位、非法牌值、未知阶段、丢掉牌、计数器对不上）都被拒绝。
+- `apps/server/src/invitation-key-codec.test.ts` 覆盖：密钥格式与归一化、忽略大小写与分隔符后哈希一致、提示位只取前 8 位、连续生成不重复、格式错误抛 `KEY_MALFORMED`。
+- `apps/server/src/postgres-invitation-key-store.test.ts` 覆盖：启动载入、签发与撤销落库、哈希不可被改写、空账目可用。
+- `apps/server/src/postgres-admin-store.test.ts` 覆盖：启动加载流水与审计、脏数据拒绝、余额与流水同事务提交、状态与审计同事务提交、写失败整体回滚，以及多仓库共用写队列时的写入顺序。
+- `apps/server/src/postgres-friend-store.test.ts` 覆盖：加载历史申请、申请落盘、接受时申请与关系同事务、拒绝时不写关系、删好友的删除顺序、写失败回滚。
+- `apps/server/src/postgres-group-store.test.ts` 覆盖：加载群组/成员/消息、孤儿数据拒绝、建群同事务写群与群主、入群/设管理员/禁言/移除成员、转让群主、发消息与撤回、群公告与全员禁言、写失败回滚。
+- `apps/server/src/postgres-room-store.test.ts` 覆盖：建房与开局落盘、座位与开局积分、逐局记录（含结算事件）、结算时余额与四笔流水同事务、结算失败整体回滚、等待中房间恢复并清空准备状态、进行中房间带着座位与累计分恢复且不结算、无可继续房间的关闭与不可能状态的报错。
+- `apps/server/src/postgres-game-state-store.test.ts` 覆盖：快照落盘形状、读回后可原样恢复、无存档返回空、兼容文本型 JSON 列、拒绝非对象存档、对局结束后删除。
+- `apps/server/src/postgres-match-history.test.ts` 覆盖：战绩与玩家映射、只选打过至少一局的对局、缺记录时返回空、旧数据回退结束原因、单局明细与事件、损坏分数与非法 JSON 直接报错。
+- `apps/server/src/database.test.ts` 覆盖迁移按文件名排序、忽略非迁移文件，以及 `001_initial` 始终排在首位。
+- `apps/server/src/app.test.ts` 还验证了 API 确实使用注入的社交服务与管理员仓库，战绩接口的列表、明细、非参与者 403、未知房间 404，以及无数据库时的 501。
+- `apps/server/src/ws-server.test.ts` 还验证了重启后按存档接着打同一局、上一局的存档被忽略改为开下一局，以及群聊推送：群消息/撤回/群公告/全员禁言都会实时送达、非群成员订阅被拒、未认证订阅被拒、被移出群的成员立刻停止收到消息。
+- `apps/server/src/group-events.test.ts` 覆盖事件总线：多订阅者都收到、退订后不再收到、在回调里退订不打乱本次广播。
+- `apps/server/src/app.test.ts` 还覆盖群管理：群列表只含自己加入的群并带角色、只能邀请好友、重复邀请幂等、非群主不能解散、成员退群后群主不变、最后一人退群群解散，以及**邀请密钥全流程**：签发 → 激活建号 → 凭同一把密钥登录、重复激活被拒、撤销后不能登录、明文不出网、非超级管理员不能签发。
+- `apps/client/test/api-client.test.ts` 覆盖 REST 客户端：激活后自动持有令牌、错误码按语义分类（conflict/auth/input/unavailable/server）、网络异常返回 network 而不是抛异常、登出后不再带令牌。
+- `apps/client/test/match-socket.test.ts` 覆盖实时通道：auth 握手带房间、服务端帧到事件的翻译、断线后按退避节奏重连并**重放 auth 与群订阅**、被移出群后不再重放订阅、close 后不再重连。
+- `apps/client/test/flow.test.ts` 覆盖页面流：已激活密钥直接进主页、未激活进资料页、激活失败的文案、建房进房间页并完成握手、实时帧驱动房间页、行牌动作走通道、断线提示与恢复、主页拉取失败留在主页、登出清通道。
+- 最近一次结果：183 项全部通过。
+- TypeScript 规则包、领域包、服务端与客户端核心生产构建通过。
+
+常用命令：
+
+```powershell
+pnpm install
+pnpm test
+pnpm typecheck
+pnpm build
+pnpm --filter @mianyang-mahjong/server db:migrate
+```
+
+## 8. 尚未完成
+
+### P0：上线前必须完成
+
+1. **客户端渲染层（LayaAir）**：业务骨架已在 `apps/client` 完成，
+   剩下的是用 LayaAir 实现 `HttpTransport` / `SocketTransport` 两个适配器，
+   并按 `Screen` 渲染四个页面（密钥登录、资料、主页、房间与牌桌）。
+2. 实现图片和语音上传，接入对象存储。
+3. 增加账号注销、隐私政策和用户协议。
+4. 完成服务器、域名、HTTPS、数据库备份、日志和监控部署。
+
+### P1：核心体验
+
+1. 客户端弱网重试、请求幂等键和重复操作防护（网络层已具备重连，缺的是业务幂等）。
+2. 群聊页面接入实时推送与历史消息拉取（通道已具备，页面待做）。
+3. 战绩查询增加分页游标与按时间范围筛选；当前只有 `limit` 与固定倒序。
+4. 对局快照的写入可以按时间窗口节流；当前每次行动都写一次，
+   靠共享写队列保证顺序（正确性不受影响，但可以省一些写放大）。
+5. 群消息目前启动时全量载入内存，且没有「已读」与未读数；人数与消息量上来后要补。
+6. 解散群是硬删除，成员与历史消息一起消失；如果产品需要保留群历史，得改成软删除。
+
+### P2：安全与运营
+
+1. 管理员登录体系、密码或二次验证，目前只实现管理员 JWT 能力。
+2. 后台管理网页界面，目前只有管理 API。
+3. 防作弊、异常对局检测、接口限流和设备风险控制。
+4. 图片与语音内容审核、举报和黑名单。
+5. 压力测试、真机测试、弱网测试和长时间运行测试。
+6. APP 备案、域名备案、Android 签名和发布流程。
+
+## 9. 已知技术限制
+
+- **密钥丢失等于账号丢失**。邀请密钥是账号唯一的凭据，没有找回流程；
+  用户丢了密钥只能由开发方再建一个新号。需要自助找回就得引入设备令牌或邮箱绑定。
+- 已绑定的密钥不能撤销（撤销等于锁号），停用账号只能走封禁；
+  这意味着「密钥泄露」没有处置手段，只能封号重建。
+- 账号、积分流水、管理员审计、好友、群聊、房间、单局记录与**进行中那一局的引擎状态**都已持久化，
+  重启后可以接着打同一局（见 4.12）。
+- 唯一会丢失的是「重启瞬间正在打的那一手」：快照在每次状态变化后写入，崩溃点之后、
+  下一次行动之前的进度不会被记录，重连时从最后一次保存的状态继续。
+- 战绩与单局明细是纯读取的持久化能力：没有数据库时接口返回 `501`，内存模式下没有历史可查。
+- 战绩列表只支持固定倒序与 `limit`，还没有游标分页或时间范围筛选。
+- 对局快照每次行动写一次；在一局之内是高频覆盖写，量大时应改为按时间窗口节流。
+- 群消息在启动时全量载入内存，与内存版行为保持一致；消息量增长后需要改为分页或按时间窗加载。
+- 群聊实时推送没有离线补发：不在线的成员只能靠 `GET /v1/groups/:groupId/messages` 拉取，
+  还没有「已读」与未读计数。
+- 群成员管理（设管理员、禁言、转让群主、邀请、退群）不走实时推送，只体现在 REST 返回值里；
+  只有被移出群的成员（`group-removed`）和被解散的群（`group-dissolved`）会立刻收到通知，
+  因为这两种情况下连接必须停止接收。
+- 解散群是硬删除：群成员与历史消息一起删掉，没有回收站。
+- 好友关系读取仍以 `friend_requests` 为准，`friendships` 目前只作为一致性索引维护，尚未用于查询。
+- 当前 WebSocket 服务是项目内零依赖实现，只支持所需的文本帧子集，不等同于完整通用 WebSocket 框架。
+- 断线重连只能在当前服务进程存活期间恢复，跨进程由对局快照续打接管。
+- 数据库迁移已是版本目录，新变更必须新增 `db/migrations/005_*.sql` 这类文件；
+  已经上线执行过的迁移禁止再改，`001_initial` 的编号必须保持不动。
+- 尚未使用真实 PostgreSQL 实例执行集成测试，现有数据库仓库测试使用模拟连接池。
+- 登录只靠一把密钥，没有失败次数限制；`KEY_INVALID` 这类错误应该像其他接口一样限流（见 P2-3）。
+- 管理员角色 `review_admin` 原本只负责注册审核，现在已没有任何专属职责，仍保留在类型里待清理。
+- 客户端目前只有**业务骨架**：协议、调用、通道与页面流，没有任何渲染；
+  页面流转的验证完全靠单元测试。渲染层（LayaAir 或调试用 DOM）是下一个大块。
+- 客户端与渲染层之间的缝只有两个接口（`HttpTransport` / `SocketTransportFactory`），
+  但 `src/protocol.ts` 必须与 `apps/server` 的响应形状保持一致 —— 改服务端响应时要同步改。
+
+## 10. 推荐后续开发顺序
+
+1. **LayaAir 渲染层**：实现两个网络适配器，按 `Screen` 渲染四个页面，先不做复杂动画。
+2. **管理后台网页**：复用现有管理 API，先做邀请密钥签发。
+3. **对象存储**：打通图片与语音消息。
+4. **部署、安全与合规**：完成正式联网前准备。
+
+已完成：**积分与审计持久化**（管理员操作现在同时有余额、流水和审计记录，且同事务提交）、
+**好友与群聊持久化**（社交数据重启不丢失）、
+**房间与牌局记录持久化 + 结算写入积分流水**（战绩可查，见 4.10）、
+**战绩与单局明细查询接口**（`GET /v1/matches` 与 `GET /v1/rooms/:roomId/history`，见 4.11）、
+**对局状态快照与重启续打**（重启后接着打同一局，见 4.12）、
+**群聊实时推送**（新消息、撤回、群公告、禁言开关、移出群与解散，见 4.13）、
+**群管理补齐**（群列表、邀请好友、主动退群、解散群，见 4.14）、
+**一次性邀请密钥登录**（去掉短信验证码与人工审核，见 4.3）、
+**客户端业务骨架**（协议镜像、REST 客户端、实时通道与页面流，见 `apps/client/README.md`）。
+
+## 11. 下一位开发者开始工作前
+
+0. **先读 `docs/CONTRIBUTING.md`**：版本控制现状、分工边界、完成的定义，以及
+   给新 AI 协作者可直接粘贴的开场提示词。多人 / 多模型协作时它是第一份要读的文件。
+1. 阅读本文件与 `README.md`。
+2. 不要修改已经确认的 `MIANYANG_XZ_1_0` 规则，除非产品明确提出新规则版本。
+3. 修改共享类型后，先构建 `packages/rules` 和 `packages/domain`，再测试服务端。
+4. 所有积分变化必须保持零和结算、非负余额和完整流水。
+5. 所有用户接口必须校验账号仍为 `active`，不能只验证 JWT。
+6. 不得信任客户端提交的用户 ID、牌、积分或结算结果。
+7. 新数据库变更必须在 `apps/server/db/migrations/` 下新增迁移文件，不要覆盖已经执行过的迁移，
+   也不要改动 `001_initial.sql` 的编号。
+8. 任何改动账号余额或状态的接口，必须让余额/状态与对应的流水/审计行在同一事务提交
+   （参照 `app.ts` 的 `commitAdminMutation`、`PostgresAdminStore` 与 `PostgresMatchRoom.finalize`），
+   不要只写账号行。
+9. 所有 PostgreSQL 仓库必须共用 `main.ts` 里创建的同一条 `PostgresWriteQueue`，
+   落盘由 HTTP `onSend` 的 `flush()` 统一保证，不要在领域层直接 `await` 数据库。
+10. 新增写库的领域服务时，参照 `PostgresFriendStore` / `PostgresGroupStore` / `PostgresMatchRoom`
+    的写法：继承领域服务、覆写每个变更方法、`super` 之后再排队写入，并提供静态 `load()` 预热内存状态；
+    然后把实例注入 `createInMemoryDependencies`，不要在路由里判断是否持久化。
+11. 座位只有一个来源：`MatchRoom.start()` 分配的 `RoomPlayer.seat`。不要在别处按加入时间重算座位，
+    否则界面座位与落盘座位会不一致。
+12. `MahjongGame.serialize()` 含牌墙与全部手牌，是服务端机密；任何下发给客户端的状态都必须走
+    `snapshot()` 或 `viewFor()`。改动对局状态时记得同步 `serialize()` / `loadState()` 与
+    `GameState` 校验，`packages/rules/src/game-state.test.ts` 会逐手校验往返一致性。
+13. 接手存档前必须确认「存档局号 === 已完成局数 + 1」；跳过这一步会把已经结算的分数重算一遍。
+14. 向实时层推送群聊变化只能通过 `dependencies.groupEvents`；广播时必须重新确认成员身份，
+    不要把「订阅过」当成「现在还是成员」。
+15. 修改共享类型后先构建 `packages/rules` 和 `packages/domain`；服务端的 `typecheck` 不检查
+    `*.test.ts`，要检查测试文件得临时加一个 `exclude: []` 的 tsconfig（用完删掉）。
+16. **密钥明文只出现在签发响应里**，任何接口（包括管理接口）都不能返回明文；
+    落库与查找只用 `invitation_key_hash`，格式与哈希都交给 `InvitationKeyCodec`。
+17. **一把密钥只能建立一个账号**由 `users.invitation_key_hash` 的 UNIQUE 约束兜底，
+    不要靠应用层检查替代它。
+18. 客户端的业务代码不碰 DOM / LayaAir：环境差异全部收在 `HttpTransport` 与
+    `SocketTransportFactory` 两个接口里；新增页面状态时改 `apps/client/src/flow.ts` 的 `Screen`，
+    并在 `apps/client/test/flow.test.ts` 里补转移用例。
+19. 改服务端响应形状时，必须同步 `apps/client/src/protocol.ts` ——
+    两端协议漂移要在编译与测试阶段暴露，不要等到联调。
+
+推荐下一项任务：LayaAir 渲染层。先实现两个网络适配器，再把 `Screen` 的四个页面画出来。
