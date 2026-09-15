@@ -7,6 +7,7 @@ import { TokenService } from "./auth.js";
 import { createApp, createInMemoryDependencies } from "./app.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
 import { LocalDiskBlobStorage } from "./local-blob-storage.js";
+import { RATE_LIMITS, type RateLimitRules } from "./rate-limit.js";
 import type { MatchHistoryReader, MatchRoundRecord, MatchSummary } from "./match-history.js";
 
 const blobDirectories: string[] = [];
@@ -29,6 +30,7 @@ function fixture(overrides: {
   groupService?: GroupService;
   matchHistory?: MatchHistoryReader;
   localBlobStorage?: LocalDiskBlobStorage;
+  rateLimitRules?: RateLimitRules;
 } = {}) {
   idCounter = 1234567890;
   const tokens = new TokenService("test-jwt-secret-that-is-longer-than-32-characters");
@@ -53,6 +55,7 @@ function fixture(overrides: {
     ...(overrides.localBlobStorage
       ? { blobStorage: overrides.localBlobStorage, localBlobStorage: overrides.localBlobStorage }
       : {}),
+    ...(overrides.rateLimitRules ? { rateLimitRules: overrides.rateLimitRules } : {}),
   });
   return { app: createApp(dependencies), dependencies, tokens };
 }
@@ -458,6 +461,100 @@ describe("server API", () => {
       url: `/v1/blobs/uploads/${owner.userId}/image/00000000-0000-4000-8000-000000000001?expires=99999999999&signature=forged`,
     });
     expect(forged.statusCode).toBe(403);
+  });
+
+  it("接口限流：认证按 IP、上传与发消息按用户，超限回 429 并带 Retry-After", async () => {
+    // 用很小的额度验证接线，不必真发几十次请求。三个额度各自独立，互不干扰。
+    const rules = {
+      ...RATE_LIMITS,
+      authByIp: { limit: 2, windowMs: 60_000 },
+      uploadByUser: { limit: 2, windowMs: 60_000 },
+      uploadByUserHourly: { limit: 100, windowMs: 3_600_000 },
+      groupMessageByUser: { limit: 2, windowMs: 60_000 },
+    };
+    const storage = await localStorage();
+    const { app, dependencies } = fixture({ localBlobStorage: storage, rateLimitRules: rules });
+    const owner = await createBetaUser(app, dependencies, "限流甲");
+    const authorization = { authorization: `Bearer ${owner.token}` };
+
+    // 1) 未认证接口按 IP：前两次放行，第三次 429。
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { key: "MYMJ-0000-0000-0000-0000" },
+      });
+      expect(allowed.statusCode).not.toBe(429);
+    }
+    const authBlocked = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { key: "MYMJ-0000-0000-0000-0000" },
+    });
+    expect(authBlocked.statusCode).toBe(429);
+    expect(authBlocked.json().code).toBe("RATE_LIMITED");
+    expect(Number(authBlocked.headers["retry-after"])).toBeGreaterThan(0);
+
+    // 2) 上传按用户，且不受上面的 IP 额度影响。
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/v1/uploads",
+        headers: authorization,
+        payload: { kind: "image", contentType: "image/jpeg", byteSize: 4 },
+      });
+      expect(allowed.statusCode).toBe(201);
+    }
+    const uploadBlocked = await app.inject({
+      method: "POST",
+      url: "/v1/uploads",
+      headers: authorization,
+      payload: { kind: "image", contentType: "image/jpeg", byteSize: 4 },
+    });
+    expect(uploadBlocked.statusCode).toBe(429);
+
+    // 3) 发消息按用户。
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: authorization,
+      payload: { name: "限流群" },
+    });
+    const groupId = created.json().groupId as string;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const allowed = await app.inject({
+        method: "POST",
+        url: `/v1/groups/${groupId}/messages`,
+        headers: authorization,
+        payload: { type: "text", content: "第 " + attempt + " 条" },
+      });
+      expect(allowed.statusCode).toBe(201);
+    }
+    const messageBlocked = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: authorization,
+      payload: { type: "text", content: "第三条" },
+    });
+    expect(messageBlocked.statusCode).toBe(429);
+
+    // 4) 另一个用户是独立额度 —— 限流不该误伤邻居。
+    const other = await createBetaUser(app, dependencies, "限流乙");
+    const otherAllowed = await app.inject({
+      method: "POST",
+      url: "/v1/uploads",
+      headers: { authorization: `Bearer ${other.token}` },
+      payload: { kind: "image", contentType: "image/jpeg", byteSize: 4 },
+    });
+    expect(otherAllowed.statusCode).toBe(201);
+
+    // 5) 只读接口不参与限流，被限的用户照样能看列表。
+    const listed = await app.inject({
+      method: "GET",
+      url: "/v1/groups",
+      headers: authorization,
+    });
+    expect(listed.statusCode).toBe(200);
   });
 
   it("注销账号后：令牌立刻失效、密钥既登不进也建不了新号、管理员也复活不了", async () => {

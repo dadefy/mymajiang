@@ -40,6 +40,7 @@ import {
   type UploadKind,
 } from "./blob-storage.js";
 import { LocalDiskBlobStorage } from "./local-blob-storage.js";
+import { RATE_LIMITS, RateLimiter, type RateLimitRule, type RateLimitRules } from "./rate-limit.js";
 
 export interface AppDependencies {
   accountStore: AccountStore;
@@ -78,6 +79,10 @@ export interface AppDependencies {
   /** 本地驱动实例，用来签发与校验 `/v1/blobs/*` 的签名 URL。 */
   localBlobStorage?: LocalDiskBlobStorage;
   createBlobId?: () => string;
+  /** 接口限流。与 `tokens` 一样是核心依赖，`createInMemoryDependencies` 一定会给。 */
+  rateLimiter: RateLimiter;
+  /** 各处额度。做成依赖而不是直接引用常量，测试才能用很小的额度验证接线。 */
+  rateLimitRules: RateLimitRules;
 }
 
 /** 一次激活成功的返回：与登录同一份会话信息，客户端两条路径可以共用解析逻辑。 */
@@ -120,6 +125,12 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) return reply.status(400).send({ code: "INVALID_INPUT", issues: error.issues });
+    if (error instanceof RateLimitedError) {
+      return reply
+        .status(429)
+        .header("Retry-After", String(error.retryAfterSeconds))
+        .send({ code: "RATE_LIMITED", retryAfterSeconds: error.retryAfterSeconds });
+    }
     const code = error instanceof Error ? error.message : String(error);
     if (code === "AUTH_REQUIRED" || code.startsWith("INVALID_ADMIN_TOKEN") || code.startsWith("INVALID_USER_TOKEN")) {
       return reply.status(401).send({ code });
@@ -178,6 +189,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     .send(adminConsoleHtml()));
 
   app.post("/v1/auth/activate", async (request, reply) => {
+    enforceRateLimit(dependencies.rateLimiter, `auth:${request.ip}`, dependencies.rateLimitRules.authByIp);
     const body = z.object({
       key: z.string().min(1),
       nickname: z.string().trim().min(1).max(24),
@@ -191,6 +203,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.post("/v1/auth/login", async (request) => {
+    enforceRateLimit(dependencies.rateLimiter, `auth:${request.ip}`, dependencies.rateLimitRules.authByIp);
     const body = z.object({ key: z.string().min(1) }).parse(request.body);
     const record = dependencies.invitationKeys.resolve(body.key);
     const account = dependencies.accountStore.findAccountByInvitationKeyHash(record.keyHash);
@@ -255,6 +268,9 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
    */
   app.post("/v1/uploads", async (request, reply) => {
     const user = await requireUser(request.headers.authorization, dependencies);
+    // 这是真正的成本风险：单张图最高 5MB，不限流可以把存储账单刷爆。分钟与小时两道都要。
+    enforceRateLimit(dependencies.rateLimiter, `upload:${user.userId}`, dependencies.rateLimitRules.uploadByUser);
+    enforceRateLimit(dependencies.rateLimiter, `upload-hourly:${user.userId}`, dependencies.rateLimitRules.uploadByUserHourly);
     const storage = dependencies.blobStorage;
     if (!storage) throw new Error("STORAGE_UNAVAILABLE");
     const body = z.object({
@@ -636,6 +652,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       voiceSeconds: z.number().int().min(1).max(60).optional(),
     }).parse(request.body);
     const user = await requireUser(request.headers.authorization, dependencies);
+    enforceRateLimit(dependencies.rateLimiter, `group-message:${user.userId}`, dependencies.rateLimitRules.groupMessageByUser);
     // 图片与语音的 content 是对象键。归属与类型都写在键前缀里，所以一次前缀校验就够了 ——
     // 既不必为上传单独建表，也挡住了「引用别人的文件」。
     if (body.type === "image" || body.type === "voice") {
@@ -836,6 +853,20 @@ function wildcardKey(params: unknown): string {
   return typeof star === "string" ? star.replace(/^\/+/, "") : "";
 }
 
+/** 带上建议等待时间的限流错误；错误处理器据此回 429 与 Retry-After。 */
+class RateLimitedError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super("RATE_LIMITED");
+  }
+}
+
+/** 超限就抛错，由统一的错误处理器转成 429。 */
+function enforceRateLimit(limiter: RateLimiter, key: string, rule: RateLimitRule): void {
+  const decision = limiter.check(key, rule);
+  if (decision.allowed) return;
+  throw new RateLimitedError(decision.retryAfterSeconds ?? 1);
+}
+
 function matchSummaryView(match: MatchSummary, dependencies: AppDependencies, viewerId: string) {
   return {
     roomId: match.roomId,
@@ -998,6 +1029,8 @@ export function createInMemoryDependencies(input: {
   blobStorage?: BlobStorage;
   localBlobStorage?: LocalDiskBlobStorage;
   createBlobId?: () => string;
+  rateLimiter?: RateLimiter;
+  rateLimitRules?: RateLimitRules;
 }): AppDependencies & { accountStore: AccountStore } {
   const accountStore = input.accountStore ?? new InMemoryAccountStore();
   const accountAdministration = new AccountAdministrationService(input.createAdminAuditId);
@@ -1036,5 +1069,8 @@ export function createInMemoryDependencies(input: {
     ...(input.blobStorage ? { blobStorage: input.blobStorage } : {}),
     ...(input.localBlobStorage ? { localBlobStorage: input.localBlobStorage } : {}),
     createBlobId: input.createBlobId ?? randomUUID,
+    // 每个 app 自建一个限流器，测试之间因此互不干扰。
+    rateLimiter: input.rateLimiter ?? new RateLimiter(),
+    rateLimitRules: input.rateLimitRules ?? RATE_LIMITS,
   };
 }
