@@ -1,9 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { ADMIN_LOGIN_POLICY, FriendService, GroupService } from "@mianyang-mahjong/domain";
 import { TokenService } from "./auth.js";
 import { createApp, createInMemoryDependencies } from "./app.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
+import { LocalDiskBlobStorage } from "./local-blob-storage.js";
 import type { MatchHistoryReader, MatchRoundRecord, MatchSummary } from "./match-history.js";
+
+const blobDirectories: string[] = [];
+
+/** 建一个落在临时目录里的本地存储：每个用到它的用例自己收尾。 */
+async function localStorage(): Promise<LocalDiskBlobStorage> {
+  const directory = await mkdtemp(join(tmpdir(), "mymj-app-blobs-"));
+  blobDirectories.push(directory);
+  return new LocalDiskBlobStorage(directory, "http://127.0.0.1:3000", "test-jwt-secret-that-is-longer-than-32-characters");
+}
+
+afterEach(async () => {
+  for (const directory of blobDirectories.splice(0)) await rm(directory, { recursive: true, force: true });
+});
 
 let idCounter = 1234567890;
 
@@ -11,6 +28,7 @@ function fixture(overrides: {
   friendService?: FriendService;
   groupService?: GroupService;
   matchHistory?: MatchHistoryReader;
+  localBlobStorage?: LocalDiskBlobStorage;
 } = {}) {
   idCounter = 1234567890;
   const tokens = new TokenService("test-jwt-secret-that-is-longer-than-32-characters");
@@ -27,9 +45,14 @@ function fixture(overrides: {
     createMessageId: () => `message-${idCounter++}`,
     createFriendRequestId: () => `friend-request-${idCounter++}`,
     createAdminAuditId: () => `audit-${idCounter++}`,
+    // 对象键里的随机 id 用递增计数，测试断言才好写。
+    createBlobId: () => `00000000-0000-4000-8000-${String(idCounter++).padStart(12, "0")}`,
     ...(overrides.friendService ? { friendService: overrides.friendService } : {}),
     ...(overrides.groupService ? { groupService: overrides.groupService } : {}),
     ...(overrides.matchHistory ? { matchHistory: overrides.matchHistory } : {}),
+    ...(overrides.localBlobStorage
+      ? { blobStorage: overrides.localBlobStorage, localBlobStorage: overrides.localBlobStorage }
+      : {}),
   });
   return { app: createApp(dependencies), dependencies, tokens };
 }
@@ -306,6 +329,135 @@ describe("server API", () => {
       payload: { adminId: "dev", password: "correct horse battery" },
     });
     expect(stillWorks.statusCode).toBe(201);
+  });
+
+  it("图片消息：签发直传地址 → 上传 → 发消息 → 回读拿到带签名的读取地址", async () => {
+    const storage = await localStorage();
+    const { app, dependencies } = fixture({ localBlobStorage: storage });
+    const owner = await createBetaUser(app, dependencies, "发图的人");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "带图的群" },
+    });
+    const groupId = created.json().groupId as string;
+
+    // 1) 签发直传地址。对象键里带着归属，稍后的消息靠它校验。
+    const issued = await app.inject({
+      method: "POST",
+      url: "/v1/uploads",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { kind: "image", contentType: "image/jpeg", byteSize: 4 },
+    });
+    expect(issued.statusCode).toBe(201);
+    const { objectKey, uploadUrl, method, headers } = issued.json() as {
+      objectKey: string;
+      uploadUrl: string;
+      method: string;
+      headers: Record<string, string>;
+    };
+    expect(objectKey.startsWith(`uploads/${owner.userId}/image/`)).toBe(true);
+    expect(method).toBe("PUT");
+    expect(headers["Content-Type"]).toBe("image/jpeg");
+
+    // 2) 把字节 PUT 到那个地址。走的是本地签名路由，流程与云端预签名直传一致。
+    const target = new URL(uploadUrl);
+    const uploaded = await app.inject({
+      method: "PUT",
+      url: target.pathname + target.search,
+      headers: { "content-type": "image/jpeg" },
+      payload: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    });
+    expect(uploaded.statusCode).toBe(204);
+
+    // 3) 发消息：content 是对象键本身。
+    const sent = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { type: "image", content: objectKey },
+    });
+    expect(sent.statusCode).toBe(201);
+
+    // 4) 下发时已经换成带时效的读取地址 —— 私有桶只能这样读。
+    const readUrl = new URL(sent.json().content as string);
+    expect(readUrl.pathname).toBe(`/v1/blobs/${objectKey}`);
+    expect(readUrl.searchParams.get("signature")).toBeTruthy();
+
+    const fetched = await app.inject({ method: "GET", url: readUrl.pathname + readUrl.search });
+    expect(fetched.statusCode).toBe(200);
+    expect(fetched.headers["content-type"]).toContain("image/jpeg");
+    expect(fetched.rawPayload).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+
+    // 5) 历史消息里同样换成可读地址，而不是把对象键直接暴露出去。
+    const history = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    const listed = history.json().messages.at(-1) as { content: string };
+    expect(listed.content).toContain(`/v1/blobs/${objectKey}`);
+  });
+
+  it("对象存储的各种拒绝：没配存储、跨界引用、类型与大小不合规", async () => {
+    // 没有存储时不假装能传，但群聊本身照常可用。
+    const withoutStorage = fixture();
+    const solo = await createBetaUser(withoutStorage.app, withoutStorage.dependencies, "没存储");
+    const unavailable = await withoutStorage.app.inject({
+      method: "POST",
+      url: "/v1/uploads",
+      headers: { authorization: `Bearer ${solo.token}` },
+      payload: { kind: "image", contentType: "image/jpeg", byteSize: 4 },
+    });
+    expect(unavailable.statusCode).toBe(501);
+    expect(unavailable.json().code).toBe("STORAGE_UNAVAILABLE");
+
+    const storage = await localStorage();
+    const { app, dependencies } = fixture({ localBlobStorage: storage });
+    const owner = await createBetaUser(app, dependencies, "甲");
+    const other = await createBetaUser(app, dependencies, "乙");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "群" },
+    });
+    const groupId = created.json().groupId as string;
+    const authorization = { authorization: `Bearer ${owner.token}` };
+
+    const unsupported = await app.inject({
+      method: "POST",
+      url: "/v1/uploads",
+      headers: authorization,
+      payload: { kind: "image", contentType: "application/pdf", byteSize: 4 },
+    });
+    expect(unsupported.statusCode).toBe(400);
+
+    const tooLarge = await app.inject({
+      method: "POST",
+      url: "/v1/uploads",
+      headers: authorization,
+      payload: { kind: "image", contentType: "image/jpeg", byteSize: 6 * 1024 * 1024 },
+    });
+    expect(tooLarge.statusCode).toBe(400);
+
+    // 引用别人的对象键会被拒 —— 归属写在键前缀里，一次校验就够。
+    const foreign = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: { authorization: `Bearer ${other.token}` },
+      payload: { type: "image", content: `uploads/${owner.userId}/image/00000000-0000-4000-8000-000000000001` },
+    });
+    expect(foreign.statusCode).toBe(403);
+    expect(foreign.json().code).toBe("UPLOAD_NOT_OWNED");
+
+    // 伪造签名（改掉过期时间）读不出来。
+    const forged = await app.inject({
+      method: "GET",
+      url: `/v1/blobs/uploads/${owner.userId}/image/00000000-0000-4000-8000-000000000001?expires=99999999999&signature=forged`,
+    });
+    expect(forged.statusCode).toBe(403);
   });
 
   it("注销账号后：令牌立刻失效、密钥既登不进也建不了新号、管理员也复活不了", async () => {

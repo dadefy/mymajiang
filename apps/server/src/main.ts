@@ -5,6 +5,7 @@ import { TokenService } from "./auth.js";
 import { createWebSocketServer } from "./ws-server.js";
 import { PostgresDatabase } from "./database.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
+import { LocalDiskBlobStorage } from "./local-blob-storage.js";
 import { PostgresAccountStore } from "./postgres-account-store.js";
 import { PostgresAdminAccountStore } from "./postgres-admin-account-store.js";
 import { PostgresAdminStore } from "./postgres-admin-store.js";
@@ -67,6 +68,21 @@ const adminAccountStore = database && writeQueue
   ? await PostgresAdminAccountStore.load(database, writeQueue)
   : undefined;
 
+const host = process.env.HOST ?? "127.0.0.1";
+const port = Number(process.env.PORT ?? 3000);
+
+// 对象存储。`local` 驱动把文件落到磁盘，并用自签名 URL 模拟云端预签名直传 ——
+// 于是整条上传链路在没有云账号时也能跑通与测试；换成云端只需要再写一个驱动。
+const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
+const localBlobStorage = process.env.STORAGE_DRIVER === "local"
+  ? new LocalDiskBlobStorage(
+      process.env.STORAGE_LOCAL_DIR ?? "storage/blobs",
+      publicBaseUrl,
+      process.env.STORAGE_SIGNING_SECRET ?? requiredEnvironment("JWT_SECRET"),
+    )
+  : undefined;
+const blobStorage = localBlobStorage;
+
 const dependencies = createInMemoryDependencies({
   tokens,
   invitationKeyCodec,
@@ -94,6 +110,8 @@ const dependencies = createInMemoryDependencies({
     : {}),
   ...(matchHistory ? { matchHistory } : {}),
   ...(gameStateStore ? { gameStateStore } : {}),
+  ...(blobStorage ? { blobStorage } : {}),
+  ...(localBlobStorage ? { localBlobStorage } : {}),
 });
 
 // 第一个管理员由环境变量引导。只在账号不存在时创建，所以重复启动不会把改过的密码覆盖回去。
@@ -111,8 +129,6 @@ if (process.env.NODE_ENV === "production" && dependencies.adminAuth.listAdmins()
 }
 
 const app = createApp(dependencies);
-const host = process.env.HOST ?? "127.0.0.1";
-const port = Number(process.env.PORT ?? 3000);
 await app.listen({
   host,
   port,

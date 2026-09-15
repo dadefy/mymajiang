@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   AccountService,
@@ -29,6 +30,16 @@ import type { GameStateStore } from "./game-state-store.js";
 import { InMemoryGroupEventBus, type GroupEventBus, type GroupMessageView } from "./group-events.js";
 import type { MatchHistoryReader, MatchRoundRecord, MatchSummary } from "./match-history.js";
 import { ScryptPasswordHasher } from "./password-hasher.js";
+import {
+  buildObjectKey,
+  isOwnedKey,
+  kindOfKey,
+  UPLOAD_LIMITS,
+  UPLOAD_URL_TTL_SECONDS,
+  type BlobStorage,
+  type UploadKind,
+} from "./blob-storage.js";
+import { LocalDiskBlobStorage } from "./local-blob-storage.js";
 
 export interface AppDependencies {
   accountStore: AccountStore;
@@ -57,6 +68,16 @@ export interface AppDependencies {
   matchHistory?: MatchHistoryReader;
   /** Stores the round in flight so a restart can carry on. Only with a database. */
   gameStateStore?: GameStateStore;
+  /**
+   * 图片与语音的对象存储。没配时上传接口返回 501，群聊仍然可用（只是发不了图）。
+   *
+   * 本地驱动额外挂在 `/v1/blobs/*` 上，所以调试时也把它传进来；
+   * 换成云驱动后这两个路由不再被注册。
+   */
+  blobStorage?: BlobStorage;
+  /** 本地驱动实例，用来签发与校验 `/v1/blobs/*` 的签名 URL。 */
+  localBlobStorage?: LocalDiskBlobStorage;
+  createBlobId?: () => string;
 }
 
 /** 一次激活成功的返回：与登录同一份会话信息，客户端两条路径可以共用解析逻辑。 */
@@ -84,6 +105,11 @@ function invitationKeyView(key: InvitationKey, activated: boolean) {
 
 export function createApp(dependencies: AppDependencies): FastifyInstance {
   const app = Fastify({ logger: false });
+
+  // 图片与语音是二进制，不能让 Fastify 按 JSON 解析。声明之后 `request.body` 就是 Buffer。
+  app.addContentTypeParser(/^(image|audio)\/.+/, { parseAs: "buffer" }, (_request, body, done) => {
+    done(null, body);
+  });
 
   app.addHook("onSend", async (request, reply, payload) => {
     if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && reply.statusCode < 400) {
@@ -116,6 +142,19 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     if (code === "MATCH_HISTORY_FORBIDDEN") return reply.status(403).send({ code });
     // History is a persistence feature; without a database there is nothing to read.
     if (code === "MATCH_HISTORY_UNAVAILABLE") return reply.status(501).send({ code });
+    // 没配对象存储时不假装上传成功，也不让群聊整体崩掉：只有发图片/语音不可用。
+    if (code === "STORAGE_UNAVAILABLE") return reply.status(501).send({ code });
+    if (code === "STORAGE_SIGNATURE_INVALID") return reply.status(403).send({ code });
+    if (code === "OBJECT_NOT_FOUND") return reply.status(404).send({ code });
+    if (code === "INVALID_OBJECT_KEY") return reply.status(400).send({ code: "INVALID_INPUT", message: code });
+    if (code === "UPLOAD_TOO_LARGE") return reply.status(400).send({ code: "INVALID_INPUT", message: code });
+    if (code.startsWith("Unsupported content type")) {
+      return reply.status(400).send({ code: "INVALID_INPUT", message: code });
+    }
+    if (code.includes("exceeds the") && code.includes("limit")) {
+      return reply.status(400).send({ code: "INVALID_INPUT", message: code });
+    }
+    if (code === "UPLOAD_NOT_OWNED") return reply.status(403).send({ code });
     // 密钥有效但还没建过账号：客户端要据此决定下一步是收昵称头像。
     if (code === "KEY_ACTIVATION_REQUIRED") return reply.status(409).send({ code });
     return reply.status(409).send({ code: "DOMAIN_CONFLICT", message: code });
@@ -207,6 +246,81 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     await dependencies.adminAccountStore?.flush?.();
     return reply.status(204).send();
   });
+
+  /**
+   * 签发一个图片或语音的直传地址。
+   *
+   * 类型与大小在**签发时**就校验掉：客户端拿到的地址已经绑定了内容类型，
+   * 换类型上传会被存储端拒绝，所以不必指望客户端自觉。
+   */
+  app.post("/v1/uploads", async (request, reply) => {
+    const user = await requireUser(request.headers.authorization, dependencies);
+    const storage = dependencies.blobStorage;
+    if (!storage) throw new Error("STORAGE_UNAVAILABLE");
+    const body = z.object({
+      kind: z.enum(["image", "voice"]),
+      contentType: z.string().min(1).max(100),
+      byteSize: z.number().int().positive(),
+    }).parse(request.body);
+
+    const limits = UPLOAD_LIMITS[body.kind];
+    if (!(limits.contentTypes as readonly string[]).includes(body.contentType)) {
+      throw new Error(`Unsupported content type for ${body.kind}: ${body.contentType}`);
+    }
+    if (body.byteSize > limits.maximumBytes) {
+      throw new Error(`${body.kind} exceeds the ${Math.floor(limits.maximumBytes / 1024 / 1024)} MB limit`);
+    }
+
+    const objectKey = buildObjectKey(user.userId, body.kind, (dependencies.createBlobId ?? randomUUID)());
+    const presigned = await storage.presignUpload({ key: objectKey, contentType: body.contentType });
+    return reply.status(201).send({
+      objectKey,
+      uploadUrl: presigned.url,
+      method: presigned.method,
+      headers: presigned.headers,
+      expiresInSeconds: UPLOAD_URL_TTL_SECONDS,
+    });
+  });
+
+  // 只有本地驱动才需要这两个路由：云上由存储服务自己接收直传与读取。
+  const localBlobs = dependencies.localBlobStorage;
+  if (localBlobs) {
+    app.put("/v1/blobs/*", async (request, reply) => {
+      const key = wildcardKey(request.params);
+      const query = z.object({
+        expires: z.string(),
+        contentType: z.string(),
+        signature: z.string(),
+      }).parse(request.query);
+      if (!localBlobs.verify({ method: "PUT", key, ...query })) {
+        throw new Error("STORAGE_SIGNATURE_INVALID");
+      }
+      // Fastify 默认按 JSON 解析；图片与语音是二进制，必须显式声明解析器。
+      const body = Buffer.isBuffer(request.body) ? request.body : Buffer.from(JSON.stringify(request.body ?? ""));
+      const limits = UPLOAD_LIMITS[kindOfKey(key)!];
+      if (body.length > limits.maximumBytes) throw new Error("UPLOAD_TOO_LARGE");
+      await localBlobs.put(key, body, query.contentType);
+      return reply.status(204).send();
+    });
+
+    app.get("/v1/blobs/*", async (request, reply) => {
+      const key = wildcardKey(request.params);
+      const query = z.object({
+        expires: z.string(),
+        signature: z.string(),
+      }).parse(request.query);
+      if (!localBlobs.verify({ method: "GET", key, contentType: "", ...query })) {
+        throw new Error("STORAGE_SIGNATURE_INVALID");
+      }
+      const object = await localBlobs.get(key);
+      if (!object) throw new Error("OBJECT_NOT_FOUND");
+      return reply
+        // 内容不可变（键里带随机 id），但仍然是私有资源，不要让中间缓存长期留存。
+        .header("Cache-Control", "private, max-age=300")
+        .type(object.contentType)
+        .send(object.body);
+    });
+  }
 
   app.get("/v1/admin/invitation-keys", async (request) => {
     const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
@@ -522,6 +636,11 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       voiceSeconds: z.number().int().min(1).max(60).optional(),
     }).parse(request.body);
     const user = await requireUser(request.headers.authorization, dependencies);
+    // 图片与语音的 content 是对象键。归属与类型都写在键前缀里，所以一次前缀校验就够了 ——
+    // 既不必为上传单独建表，也挡住了「引用别人的文件」。
+    if (body.type === "image" || body.type === "voice") {
+      if (!isOwnedKey(body.content, user.userId, body.type)) throw new Error("UPLOAD_NOT_OWNED");
+    }
     const message = dependencies.groupService.sendMessage({
       groupId: params.groupId,
       sender: user,
@@ -529,7 +648,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       content: body.content,
       ...(body.voiceSeconds === undefined ? {} : { voiceSeconds: body.voiceSeconds }),
     });
-    const view = groupMessageView(message);
+    const view = await groupMessageView(message, dependencies);
     dependencies.groupEvents.publish({ type: "message", groupId: params.groupId, message: view });
     return reply.status(201).send(view);
   });
@@ -540,14 +659,17 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const user = await requireUser(request.headers.authorization, dependencies);
     const group = requireGroupMember(dependencies.groupService, params.groupId, user.userId);
     const messages = group.messages.slice(-(query.limit ?? 100));
-    return { groupId: group.groupId, messages: messages.map(groupMessageView) };
+    return {
+      groupId: group.groupId,
+      messages: await Promise.all(messages.map((message) => groupMessageView(message, dependencies))),
+    };
   });
 
   app.post("/v1/groups/:groupId/messages/:messageId/recall", async (request) => {
     const params = z.object({ groupId: z.string().min(1), messageId: z.string().min(1) }).parse(request.params);
     const user = await requireUser(request.headers.authorization, dependencies);
     const message = dependencies.groupService.recall(params.groupId, user.userId, params.messageId);
-    const view = groupMessageView(message);
+    const view = await groupMessageView(message, dependencies);
     dependencies.groupEvents.publish({ type: "recalled", groupId: params.groupId, message: view });
     return view;
   });
@@ -708,6 +830,12 @@ function requireMatchHistory(dependencies: AppDependencies): MatchHistoryReader 
   return dependencies.matchHistory;
 }
 
+/** 取通配路由捕获到的对象键，并去掉前导斜杠。 */
+function wildcardKey(params: unknown): string {
+  const star = (params as { "*"?: unknown })["*"];
+  return typeof star === "string" ? star.replace(/^\/+/, "") : "";
+}
+
 function matchSummaryView(match: MatchSummary, dependencies: AppDependencies, viewerId: string) {
   return {
     roomId: match.roomId,
@@ -779,13 +907,27 @@ function groupSummaryView(group: ChatGroup, viewerId: string) {
   };
 }
 
-function groupMessageView(message: StoredGroupMessage): GroupMessageView {
+/**
+ * 群消息的对外视图。
+ *
+ * 图片与语音在库里存的是对象键，这里换成**带时效的读取地址** —— 私有桶只能这样读。
+ * 换出来的地址只在几十秒的窗口里有效，所以客户端应当直接用，不要持久化。
+ */
+async function groupMessageView(message: StoredGroupMessage, dependencies: AppDependencies): Promise<GroupMessageView> {
+  const recalled = message.recalledAt !== undefined;
+  const blobKind = kindOfKey(message.content);
+  const needsSignedUrl = !recalled && blobKind !== undefined && dependencies.blobStorage !== undefined;
+  const content = recalled
+    ? "[消息已撤回]"
+    : needsSignedUrl
+      ? await dependencies.blobStorage!.presignDownload(message.content)
+      : message.content;
   return {
     messageId: message.messageId,
     senderId: message.senderId,
     sentAt: message.sentAt,
     type: message.type,
-    content: message.recalledAt ? "[消息已撤回]" : message.content,
+    content,
     ...(message.voiceSeconds === undefined ? {} : { voiceSeconds: message.voiceSeconds }),
     recalledAt: message.recalledAt ?? null,
   };
@@ -853,6 +995,9 @@ export function createInMemoryDependencies(input: {
   createRoom?: (roomId: string, owner: UserAccount) => MatchRoom;
   matchHistory?: MatchHistoryReader;
   gameStateStore?: GameStateStore;
+  blobStorage?: BlobStorage;
+  localBlobStorage?: LocalDiskBlobStorage;
+  createBlobId?: () => string;
 }): AppDependencies & { accountStore: AccountStore } {
   const accountStore = input.accountStore ?? new InMemoryAccountStore();
   const accountAdministration = new AccountAdministrationService(input.createAdminAuditId);
@@ -888,5 +1033,8 @@ export function createInMemoryDependencies(input: {
     ...(input.createRoom ? { createRoom: input.createRoom } : {}),
     ...(input.matchHistory ? { matchHistory: input.matchHistory } : {}),
     ...(input.gameStateStore ? { gameStateStore: input.gameStateStore } : {}),
+    ...(input.blobStorage ? { blobStorage: input.blobStorage } : {}),
+    ...(input.localBlobStorage ? { localBlobStorage: input.localBlobStorage } : {}),
+    createBlobId: input.createBlobId ?? randomUUID,
   };
 }
