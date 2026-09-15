@@ -30,8 +30,10 @@ git status          # 应为空
 
 两个环境上的坑：
 
-- 本机 `git` 不在 PATH 里，用完整路径
-  `C:\Users\Administrator\.workbuddy\binaries\PortableGit\versions\1.2.0\cmd\git.exe`。
+- 本机 `git` 不在 PATH 里。**要用真正的 git 本体**，而不是 `cmd\git.exe` 这个 wrapper：
+  `C:\Users\Administrator\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git.exe`
+  （wrapper 找不到 `git-remote-https`，push 会报 `remote-https is not a git command`）。
+  用本体时还要把 `GIT_EXEC_PATH` 指到同一个 `mingw64\bin` 目录。
 - 提交信息是 UTF-8 中文，**用 `-F 消息文件` 提交**，不要用 `-m`（PowerShell 传中文会乱码）。
   文件要用无 BOM 的 UTF-8 写。
 
