@@ -75,7 +75,7 @@ describe("group chat", () => {
     })).toThrow("between 1 and 60 seconds");
   });
 
-  it("allows the sender to recall within two minutes", () => {
+  it("allows the sender to recall within two minutes", async () => {
     const service = serviceAt([
       "2026-09-15T00:00:00.000Z",
       "2026-09-15T00:00:10.000Z",
@@ -84,7 +84,26 @@ describe("group chat", () => {
     const owner = account("owner");
     const group = service.createGroup(owner, "群");
     const message = service.sendMessage({ groupId: group.groupId, sender: owner, type: "text", content: "可撤回" });
-    expect(service.recall(group.groupId, owner.userId, message.messageId).recalledAt).toBeDefined();
+    expect((await service.recall(group.groupId, owner.userId, message.messageId)).recalledAt).toBeDefined();
+  });
+
+  it("paginates group messages with a before cursor", async () => {
+    const service = serviceAt(["2026-09-15T00:00:00.000Z", "2026-09-15T00:00:01.000Z", "2026-09-15T00:00:02.000Z", "2026-09-15T00:00:03.000Z", "2026-09-15T00:00:04.000Z", "2026-09-15T00:00:05.000Z"]);
+    const owner = account("owner");
+    const group = service.createGroup(owner, "群");
+    for (let i = 0; i < 5; i++) {
+      service.sendMessage({ groupId: group.groupId, sender: owner, type: "text", content: `第 ${i} 条` });
+    }
+    const first = await service.getMessages(group.groupId, { limit: 2 });
+    expect(first.messages.map((m) => m.content)).toEqual(["第 4 条", "第 3 条"]);
+    expect(first.nextCursor).toBeDefined();
+
+    const older = await service.getMessages(group.groupId, { limit: 2, before: first.nextCursor });
+    expect(older.messages.map((m) => m.content)).toEqual(["第 2 条", "第 1 条"]);
+
+    const oldest = await service.getMessages(group.groupId, { limit: 2, before: older.nextCursor });
+    expect(oldest.messages.map((m) => m.content)).toEqual(["第 0 条"]);
+    expect(oldest.nextCursor).toBeUndefined();
   });
 
   it("lists only my groups, most recently active first", () => {

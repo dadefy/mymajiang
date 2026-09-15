@@ -672,20 +672,27 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/groups/:groupId/messages", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }).parse(request.query);
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      before: z.string().optional(),
+    }).parse(request.query);
     const user = await requireUser(request.headers.authorization, dependencies);
     const group = requireGroupMember(dependencies.groupService, params.groupId, user.userId);
-    const messages = group.messages.slice(-(query.limit ?? 100));
+    const page = await dependencies.groupService.getMessages(params.groupId, {
+      ...(query.limit === undefined ? {} : { limit: query.limit }),
+      ...(query.before === undefined ? {} : { before: query.before }),
+    });
     return {
       groupId: group.groupId,
-      messages: await Promise.all(messages.map((message) => groupMessageView(message, dependencies))),
+      messages: await Promise.all(page.messages.map((message) => groupMessageView(message, dependencies))),
+      nextCursor: page.nextCursor ?? null,
     };
   });
 
   app.post("/v1/groups/:groupId/messages/:messageId/recall", async (request) => {
     const params = z.object({ groupId: z.string().min(1), messageId: z.string().min(1) }).parse(request.params);
     const user = await requireUser(request.headers.authorization, dependencies);
-    const message = dependencies.groupService.recall(params.groupId, user.userId, params.messageId);
+    const message = await dependencies.groupService.recall(params.groupId, user.userId, params.messageId);
     const view = await groupMessageView(message, dependencies);
     dependencies.groupEvents.publish({ type: "recalled", groupId: params.groupId, message: view });
     return view;
@@ -934,7 +941,7 @@ function groupSummaryView(group: ChatGroup, viewerId: string) {
     role: group.members.get(viewerId)?.role ?? "member",
     createdAt: group.createdAt,
     // 群列表按「最近有消息」排序，客户端也据此显示最后活跃时间。
-    lastMessageAt: group.messages.at(-1)?.sentAt ?? null,
+    lastMessageAt: group.lastMessageAt ?? group.messages.at(-1)?.sentAt ?? null,
   };
 }
 

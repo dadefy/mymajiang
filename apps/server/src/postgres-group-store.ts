@@ -2,12 +2,18 @@ import { randomInt, randomUUID } from "node:crypto";
 import {
   GroupService,
   type ChatGroup,
+  type GetMessagesOptions,
   type GroupMember,
   type GroupMessageType,
   type GroupRole,
   type InviteMemberInput,
+  type MessagePage,
   type StoredGroupMessage,
   type UserAccount,
+  decodeMessageCursor,
+  encodeMessageCursor,
+  DEFAULT_MESSAGE_PAGE_SIZE,
+  MAX_MESSAGE_PAGE_SIZE,
 } from "@mianyang-mahjong/domain";
 import type { PostgresDatabase } from "./database.js";
 import { PostgresWriteQueue, type SqlStatement } from "./postgres-write-queue.js";
@@ -82,6 +88,9 @@ const DEFAULT_GENERATORS: GroupIdGenerators = {
   createMessageId: randomUUID,
 };
 
+/** 内存里最多保留每个群最近这么多条消息：支撑最近活跃排序与就近撤回，同时避免无限增长。 */
+const RECENT_MESSAGE_CACHE_SIZE = 500;
+
 /**
  * Chat groups, members and messages backed by PostgreSQL.
  *
@@ -89,25 +98,29 @@ const DEFAULT_GENERATORS: GroupIdGenerators = {
  * write on the shared write queue. Group settings and the membership row they affect are written in
  * one transaction, so a group can never claim a role it does not have in `group_members`.
  *
- * Every message ever sent is loaded back at startup to keep behaviour identical to the in-memory
- * service. Bounding that load is tracked as follow-up work.
+ * 群消息不再随启动全量载入（见 B3）：`load()` 只取每群最后一条消息的时间用于列表排序，
+ * 历史消息按需通过 `getMessages` 走键集分页从数据库读取。内存里只保留最近一小段作为就近缓存，
+ * 足够支撑「最近活跃」排序与刚发出消息的实时撤回；更旧的消息撤回时由 `recall` 从库里取回。
  */
 export class PostgresGroupStore extends GroupService {
-  private constructor(private readonly queue: PostgresWriteQueue, generators: GroupIdGenerators) {
+  private constructor(
+    private readonly queue: PostgresWriteQueue,
+    private readonly database: PostgresDatabase,
+    generators: GroupIdGenerators,
+  ) {
     super(generators.createGroupId, generators.createGroupNo, generators.createMessageId);
   }
 
-  /** Loads persisted groups, members and messages. Pass the queue shared with the other repositories. */
+  /** Loads persisted groups, members and per-group last-message time. Pass the queue shared with the other repositories. */
   static async load(
     database: PostgresDatabase,
     queue: PostgresWriteQueue = new PostgresWriteQueue(database),
     generators: GroupIdGenerators = DEFAULT_GENERATORS,
   ): Promise<PostgresGroupStore> {
-    const store = new PostgresGroupStore(queue, generators);
-    const [groups, members, messages] = await Promise.all([
+    const store = new PostgresGroupStore(queue, database, generators);
+    const [groups, members] = await Promise.all([
       database.pool.query<GroupRow>("SELECT * FROM chat_groups ORDER BY created_at ASC, group_id ASC"),
       database.pool.query<MemberRow>("SELECT * FROM group_members ORDER BY joined_at ASC, user_id ASC"),
-      database.pool.query<MessageRow>("SELECT * FROM group_messages ORDER BY sent_at ASC, message_id ASC"),
     ]);
 
     for (const row of groups.rows) {
@@ -135,20 +148,14 @@ export class PostgresGroupStore extends GroupService {
         ...(row.muted_until ? { mutedUntil: row.muted_until } : {}),
       });
     }
-    for (const row of messages.rows) {
+
+    // 只取每群最后一条消息时间，用于群列表排序。消息正文不载入，避免消息量大时启动变慢。
+    const lastMessageTimes = await database.pool.query<{ group_id: string; last_sent_at: Date | null }>(
+      "SELECT group_id, MAX(sent_at) AS last_sent_at FROM group_messages GROUP BY group_id",
+    );
+    for (const row of lastMessageTimes.rows) {
       const group = store.groups.get(row.group_id);
-      if (!group) throw new Error(`group_messages references unknown group ${row.group_id}`);
-      group.messages.push({
-        messageId: row.message_id,
-        groupId: row.group_id,
-        senderId: row.sender_id.trim(),
-        sentAt: row.sent_at,
-        type: row.message_type,
-        content: row.content,
-        ...(row.voice_seconds === null ? {} : { voiceSeconds: row.voice_seconds }),
-        ...(row.recalled_at ? { recalledAt: row.recalled_at } : {}),
-        ...(row.recalled_by ? { recalledBy: row.recalled_by } : {}),
-      });
+      if (group && row.last_sent_at) group.lastMessageAt = row.last_sent_at;
     }
     return store;
   }
@@ -243,12 +250,78 @@ export class PostgresGroupStore extends GroupService {
     voiceSeconds?: number;
   }): StoredGroupMessage {
     const message = super.sendMessage(input);
+    // 内存只留最近一段，避免长会话把内存撑大；更旧的消息靠 getMessages 从库里翻。
+    const cached = this.groups.get(message.groupId)?.messages;
+    if (cached && cached.length > RECENT_MESSAGE_CACHE_SIZE) {
+      cached.splice(0, cached.length - RECENT_MESSAGE_CACHE_SIZE);
+    }
     this.queue.enqueue(UPSERT_MESSAGE_SQL, messageParameters(message));
     return message;
   }
 
-  override recall(groupId: string, actorId: string, messageId: string, userRecallEnabled = true): StoredGroupMessage {
-    const message = super.recall(groupId, actorId, messageId, userRecallEnabled);
+  /**
+   * 历史翻页：键集分页取 `sent_at DESC, message_id DESC`，游标之外的消息按 `before` 继续往前。
+   * 最新一页额外合并本进程发出、可能尚未落库的消息，避免刚发的消息在翻页时短暂消失。
+   */
+  override async getMessages(groupId: string, options: GetMessagesOptions = {}): Promise<MessagePage> {
+    const group = this.groups.get(groupId);
+    if (!group) throw new Error("Group not found");
+    const limit = Math.min(Math.max(options.limit ?? DEFAULT_MESSAGE_PAGE_SIZE, 1), MAX_MESSAGE_PAGE_SIZE);
+    const params: unknown[] = [groupId];
+    let where = "group_id = $1";
+    if (options.before) {
+      const cursor = decodeMessageCursor(options.before);
+      const sentAtIndex = params.length + 1;
+      const idIndex = params.length + 2;
+      // 行值比较：(sent_at, message_id) < (游标) 即「比游标更旧」，与 DESC 排序一致。
+      where += ` AND (sent_at, message_id) < ($${sentAtIndex}::timestamptz, $${idIndex}::text)`;
+      params.push(new Date(cursor.sentAt), cursor.messageId);
+    }
+    params.push(limit + 1);
+    const rows = await this.database.pool.query<MessageRow>(
+      `SELECT * FROM group_messages WHERE ${where} ORDER BY sent_at DESC, message_id DESC LIMIT $${params.length}`,
+      params,
+    );
+    const dbMessages = rows.rows.map(rowToMessage);
+
+    let all = dbMessages;
+    if (!options.before) {
+      const persisted = new Set(dbMessages.map((message) => message.messageId));
+      const live = group.messages.filter((message) => !persisted.has(message.messageId));
+      all = [...live, ...dbMessages].sort((left, right) => {
+        const byTime = right.sentAt.getTime() - left.sentAt.getTime();
+        if (byTime !== 0) return byTime;
+        if (right.messageId < left.messageId) return -1;
+        if (right.messageId > left.messageId) return 1;
+        return 0;
+      });
+    }
+    const hasMore = all.length > limit;
+    const page = all.slice(0, limit);
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last
+      ? encodeMessageCursor({ sentAt: last.sentAt.toISOString(), messageId: last.messageId })
+      : undefined;
+    // exactOptionalPropertyTypes：可选属性不能显式传 undefined。
+    return nextCursor === undefined ? { messages: page } : { messages: page, nextCursor };
+  }
+
+  /**
+   * 撤回一条消息。若消息已在本进程内存（近期发送或已加载），直接走父类逻辑；
+   * 否则先从库里取回再撤回，确保「管理员撤回很早的消息」这类旧消息也能正确撤回。
+   */
+  override async recall(groupId: string, actorId: string, messageId: string, userRecallEnabled = true): Promise<StoredGroupMessage> {
+    const group = this.groups.get(groupId);
+    if (!group) throw new Error("Group not found");
+    if (!group.messages.some((message) => message.messageId === messageId)) {
+      const rows = await this.database.pool.query<MessageRow>(
+        "SELECT * FROM group_messages WHERE group_id = $1 AND message_id = $2",
+        [groupId, messageId],
+      );
+      if (rows.rows.length === 0) throw new Error("Message not found");
+      group.messages.push(rowToMessage(rows.rows[0]!));
+    }
+    const message = await super.recall(groupId, actorId, messageId, userRecallEnabled);
     this.queue.enqueue(UPSERT_MESSAGE_SQL, messageParameters(message));
     return message;
   }
@@ -289,6 +362,21 @@ function groupParameters(group: ChatGroup): readonly unknown[] {
 
 function memberParameters(groupId: string, member: GroupMember): readonly unknown[] {
   return [groupId, member.userId, member.role, member.mutedUntil ?? null, member.joinedAt];
+}
+
+/** 把数据库行还原成领域消息对象；与启动时载入的逻辑保持一致。 */
+function rowToMessage(row: MessageRow): StoredGroupMessage {
+  return {
+    messageId: row.message_id,
+    groupId: row.group_id,
+    senderId: row.sender_id.trim(),
+    sentAt: row.sent_at,
+    type: row.message_type,
+    content: row.content,
+    ...(row.voice_seconds === null ? {} : { voiceSeconds: row.voice_seconds }),
+    ...(row.recalled_at ? { recalledAt: row.recalled_at } : {}),
+    ...(row.recalled_by ? { recalledBy: row.recalled_by } : {}),
+  };
 }
 
 function messageParameters(message: StoredGroupMessage): readonly unknown[] {

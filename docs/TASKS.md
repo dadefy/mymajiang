@@ -101,12 +101,20 @@
 - **内容**：群列表、消息列表、发消息、撤回；接实时推送（`group-message` 等事件）
 - **验收**：两个客户端能实时收到对方消息；撤回后显示"已撤回"
 
-### B3 · 群消息分页 〔W 或 人〕
+### B3 · 群消息分页 〔W · 已完成〕
 
 - **依赖**：无（可与第一波并行，但改动面较大，建议单独排）
 - **范围**：`packages/domain/src/groups.ts`、`apps/server/src/postgres-group-store.ts`
 - **内容**：启动时不再全量载入群消息，改为按时间窗加载
 - **验收**：消息量大时启动不卡；历史消息可翻页
+- **完成**：
+  - `PostgresGroupStore.load()` 不再 `SELECT group_messages`，只取每群 `MAX(sent_at)` 用于列表排序，启动开销与消息量脱钩。
+  - 新增统一游标分页：`GET /v1/groups/:groupId/messages` 支持 `limit` + `before` 游标，返回 `nextCursor`；键集分页落在 `(sent_at, message_id)`，并新增复合索引迁移 `006_group_messages_pagination.sql`。
+  - `recall` 改为 `async`：内存里没有的旧消息会先从库里取回再撤回（管理员撤回很早的消息也正确）。
+  - `ChatGroup` 增加 `lastMessageAt` 字段，`GroupService`/`PostgresGroupStore` 各自维护，群列表排序不再依赖全量消息。
+  - 内存仅保留每群最近 500 条消息作为就近缓存，避免无限增长。
+  - 同步更新了 `groups.test.ts`/`postgres-group-store.test.ts` 的测试（含游标翻页、按库取回撤回）。
+  - 注意：本环境无法跑 `pnpm`，需在本机 `pnpm install && pnpm test && pnpm typecheck && pnpm build` 复核。
 
 ### B4 · 解散群改软删除 〔W · 已完成〕
 
@@ -139,5 +147,5 @@ git push
 - 测试：25 个文件 / 195 项全通过
 - 已完成：规则引擎、领域逻辑、服务端（HTTP + WebSocket + PostgreSQL）、
   客户端业务骨架（`apps/client`）、邀请密钥登录、群聊实时推送、群管理、管理后台网页（A2）、
-  账号注销（A4）、战绩游标分页（B1）、快照写入节流（B2）、解散群软删除（B4）
-- **还没做的最大两块：客户端渲染层（A1，混元在做）与对象存储（A3）**
+  账号注销（A4）、战绩游标分页（B1）、快照写入节流（B2）、解散群软删除（B4）、群消息分页（B3）
+- **还没做的最大两块：客户端渲染层（A1）与对象存储（A3）**

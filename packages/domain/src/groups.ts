@@ -40,6 +40,13 @@ export interface ChatGroup {
    * 也不能再进人、发言或做任何管理操作。保留成员行的意义在于历史消息仍可被原成员读到。
    */
   dissolvedAt?: Date;
+  /**
+   * 群内最后一条消息的发送时间，用于群列表排序。
+   *
+   * 与 `messages` 分开存：PostgreSQL 版不在启动时把全部消息载入内存，
+   * 所以不能用 `messages.at(-1)` 推断；这里单独记录，量级是「每群一个时间戳」。
+   */
+  lastMessageAt?: Date;
 }
 
 export interface InviteMemberInput {
@@ -53,6 +60,56 @@ export interface InviteMemberInput {
    * 这样规则本身可以被单独测试。
    */
   friendIds: ReadonlySet<string>;
+}
+
+/** 群消息翻页的默认与上限；与 `/v1/matches` 的游标分页保持一致的分页尺寸约定。 */
+export const DEFAULT_MESSAGE_PAGE_SIZE = 50;
+export const MAX_MESSAGE_PAGE_SIZE = 200;
+
+/**
+ * 群消息翻页的不透明游标。编码了排序键（`sentAt` + `messageId`），
+ * 这样「下一页」不受中间插入/删除影响，也不会重复或漏掉。
+ */
+export interface MessageCursor {
+  /** ISO 8601 字符串，即消息的 `sentAt`。 */
+  sentAt: string;
+  messageId: string;
+}
+
+const MESSAGE_CURSOR_MARKER = "g1:";
+
+export function encodeMessageCursor(cursor: MessageCursor): string {
+  return MESSAGE_CURSOR_MARKER + Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+export function decodeMessageCursor(value: string): MessageCursor {
+  if (typeof value !== "string" || !value.startsWith(MESSAGE_CURSOR_MARKER)) throw new Error("INVALID_CURSOR");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(value.slice(MESSAGE_CURSOR_MARKER.length), "base64url").toString("utf8"));
+  } catch {
+    throw new Error("INVALID_CURSOR");
+  }
+  if (
+    typeof parsed !== "object" || parsed === null ||
+    typeof (parsed as { sentAt?: unknown }).sentAt !== "string" ||
+    typeof (parsed as { messageId?: unknown }).messageId !== "string"
+  ) {
+    throw new Error("INVALID_CURSOR");
+  }
+  return parsed as MessageCursor;
+}
+
+export interface GetMessagesOptions {
+  limit?: number;
+  /** 上一页返回的 `nextCursor`；提供时返回比它更旧的消息。 */
+  before?: string;
+}
+
+export interface MessagePage {
+  messages: StoredGroupMessage[];
+  /** 翻到更旧一页的游标；已是最后一页时为 `undefined`。 */
+  nextCursor?: string;
 }
 
 export class GroupService {
@@ -242,10 +299,15 @@ export class GroupService {
       ...(input.voiceSeconds === undefined ? {} : { voiceSeconds: input.voiceSeconds }),
     };
     group.messages.push(message);
+    group.lastMessageAt = message.sentAt;
     return message;
   }
 
-  recall(groupId: string, actorId: string, messageId: string, userRecallEnabled = true): StoredGroupMessage {
+  /**
+   * 撤回一条消息。同步实现（内存版）直接在本进程的消息数组里定位；
+   * PostgreSQL 版会按需从数据库取回不在内存的旧消息，因此整个方法定为 `async`。
+   */
+  async recall(groupId: string, actorId: string, messageId: string, userRecallEnabled = true): Promise<StoredGroupMessage> {
     const group = this.requireLiveGroup(groupId);
     const member = this.requireMember(group, actorId);
     const message = group.messages.find((candidate) => candidate.messageId === messageId);
@@ -263,6 +325,31 @@ export class GroupService {
     const recalled = recallMessage(message, actorId, now) as StoredGroupMessage;
     Object.assign(message, recalled);
     return message;
+  }
+
+  /**
+   * 拉取群消息（用于历史翻页）。内存版直接对 `messages` 数组做游标分页；
+   * PostgreSQL 版由子类覆盖为键集分页查询。
+   */
+  async getMessages(groupId: string, options: GetMessagesOptions = {}): Promise<MessagePage> {
+    const group = this.requireGroup(groupId);
+    const limit = Math.min(Math.max(options.limit ?? DEFAULT_MESSAGE_PAGE_SIZE, 1), MAX_MESSAGE_PAGE_SIZE);
+    const sorted = [...group.messages].sort(messageByNewest);
+    let start = 0;
+    if (options.before) {
+      const cursor = decodeMessageCursor(options.before);
+      const index = sorted.findIndex((message) => message.messageId === cursor.messageId);
+      // 游标消息已被裁剪出内存时，从最旧处继续往前翻，避免卡住。
+      start = index >= 0 ? index + 1 : sorted.length;
+    }
+    const page = sorted.slice(start, start + limit);
+    const hasMore = start + limit < sorted.length;
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last
+      ? encodeMessageCursor({ sentAt: last.sentAt.toISOString(), messageId: last.messageId })
+      : undefined;
+    // tsconfig 开了 exactOptionalPropertyTypes，可选属性不能显式传 undefined。
+    return nextCursor === undefined ? { messages: page } : { messages: page, nextCursor };
   }
 
   private assertActive(account: UserAccount): void {
@@ -304,8 +391,17 @@ export function isDissolved(group: ChatGroup): boolean {
   return group.dissolvedAt !== undefined;
 }
 
-/** 群列表排序依据：最后一条消息的时间；还没有消息就用建群时间。 */
+/** 群列表排序依据：最后一条消息的时间（单独记录的 `lastMessageAt`）；还没有消息就用建群时间。 */
 function lastActivityAt(group: ChatGroup): number {
-  return group.messages.at(-1)?.sentAt.getTime() ?? group.createdAt.getTime();
+  return (group.lastMessageAt ?? group.createdAt).getTime();
+}
+
+/** 群消息按「最新在前」排序：`sentAt` 倒序，`sentAt` 相同时用 `messageId` 兜底。 */
+function messageByNewest(left: StoredGroupMessage, right: StoredGroupMessage): number {
+  const byTime = right.sentAt.getTime() - left.sentAt.getTime();
+  if (byTime !== 0) return byTime;
+  if (right.messageId < left.messageId) return -1;
+  if (right.messageId > left.messageId) return 1;
+  return 0;
 }
 

@@ -79,7 +79,7 @@ function account(userId: string, nickname: string): UserAccount {
 }
 
 describe("PostgresGroupStore", () => {
-  it("rebuilds groups, members and messages from storage", async () => {
+  it("rebuilds groups and members from storage without preloading every message", async () => {
     const { database } = fakeDatabase({
       groups: [
         {
@@ -144,12 +144,16 @@ describe("PostgresGroupStore", () => {
       role: "admin",
       mutedUntil: new Date("2026-09-15T05:00:00.000Z"),
     });
-    expect(group.messages).toHaveLength(2);
-    expect(group.messages[0]).toMatchObject({ type: "voice", voiceSeconds: 12 });
-    expect(group.messages[1]).toMatchObject({ recalledBy: "1234567890", recalledAt: new Date("2026-09-15T03:01:00.000Z") });
+    // B3：启动不再全量载入消息，历史消息按需从数据库读取。
+    expect(group.messages).toHaveLength(0);
+
+    const page = await store.getMessages("group-1");
+    expect(page.messages).toHaveLength(2);
+    expect(page.messages[0]).toMatchObject({ type: "text", recalledBy: "1234567890", recalledAt: new Date("2026-09-15T03:01:00.000Z") });
+    expect(page.messages[1]).toMatchObject({ type: "voice", voiceSeconds: 12 });
   });
 
-  it("rejects rows that reference an unknown group", async () => {
+  it("ignores message rows at startup and reads history on demand", async () => {
     const { database } = fakeDatabase({
       groups: [
         {
@@ -177,7 +181,9 @@ describe("PostgresGroupStore", () => {
       ],
     });
 
-    await expect(PostgresGroupStore.load(database)).rejects.toThrow("unknown group");
+    // 启动不再读取消息，指向未知群的孤儿消息行不会让启动失败。
+    const store = await PostgresGroupStore.load(database);
+    expect(store.groups.get("group-1")).toBeDefined();
   });
 
   it("writes the group and its owner membership in one transaction", async () => {
@@ -310,12 +316,92 @@ describe("PostgresGroupStore", () => {
     ]);
 
     timeline.length = 0;
-    store.recall(group.groupId, owner.userId, message.messageId);
+    await store.recall(group.groupId, owner.userId, message.messageId);
     await store.flush();
     const recallParams = parametersOf(timeline, "insert:group_messages");
     expect(recallParams[4]).toBe("大家好");
     expect(recallParams[7]).toEqual(expect.any(Date));
     expect(recallParams[8]).toBe("1234567890");
+  });
+
+  it("reads group message history from the database newest-first with a next cursor", async () => {
+    const messages = Array.from({ length: 5 }, (_, i) => ({
+      message_id: `message-${i}`,
+      group_id: "group-1",
+      sender_id: "1234567890",
+      message_type: "text",
+      content: `第 ${i} 条`,
+      voice_seconds: null,
+      sent_at: new Date(`2026-09-15T0${i}:00:00.000Z`),
+      recalled_at: null,
+      recalled_by: null,
+    }));
+    const { database } = fakeDatabase({
+      groups: [
+        {
+          group_id: "group-1",
+          group_no: "12345678",
+          name: "测试群",
+          owner_id: "1234567890",
+          notice: "",
+          all_muted: false,
+          created_at: new Date("2026-09-15T00:00:00.000Z"),
+        },
+      ],
+      messages,
+    });
+    const store = await PostgresGroupStore.load(database);
+
+    const page = await store.getMessages("group-1", { limit: 2 });
+    // 05:00 最新，04:00 次之。游标编码可解，形状正确。
+    expect(page.messages.map((m) => m.messageId)).toEqual(["message-4", "message-3"]);
+    expect(page.nextCursor).toMatch(/^g1:/);
+  });
+
+  it("recalls a message loaded from the database when it is not in memory", async () => {
+    const { database } = fakeDatabase({
+      groups: [
+        {
+          group_id: "group-1",
+          group_no: "12345678",
+          name: "测试群",
+          owner_id: "1234567890",
+          notice: "",
+          all_muted: false,
+          created_at: new Date("2026-09-15T00:00:00.000Z"),
+        },
+      ],
+      members: [
+        {
+          group_id: "group-1",
+          user_id: "1234567890",
+          role: "owner",
+          muted_until: null,
+          joined_at: new Date("2026-09-15T00:00:00.000Z"),
+        },
+      ],
+      messages: [
+        {
+          message_id: "message-old",
+          group_id: "group-1",
+          sender_id: "1234567890",
+          message_type: "text",
+          content: "很久以前的消息",
+          voice_seconds: null,
+          sent_at: new Date("2026-09-15T00:00:00.000Z"),
+          recalled_at: null,
+          recalled_by: null,
+        },
+      ],
+    });
+    const store = await PostgresGroupStore.load(database);
+    // 启动未预载，内存里没有这条消息。
+    expect(store.groups.get("group-1")!.messages).toHaveLength(0);
+
+    // 撤回时由 recall 从库里取回；owner 撤回不受时间窗限制。
+    const recalled = await store.recall("group-1", "1234567890", "message-old");
+    expect(recalled.recalledAt).toBeDefined();
+    expect(recalled.recalledBy).toBe("1234567890");
   });
 
   it("persists group notice and all-mute switches", async () => {
