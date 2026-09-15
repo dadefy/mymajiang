@@ -152,7 +152,7 @@ describe("group chat", () => {
     expect(isDissolved(service.groups.get(group.groupId)!)).toBe(true);
   });
 
-  it("keeps a dissolved group's messages but refuses every further write", () => {
+  it("keeps a dissolved group's messages but refuses every further write", async () => {
     const service = serviceAt(["2026-09-15T00:00:00.000Z", "2026-09-15T00:00:01.000Z"]);
     const owner = account("owner");
     const member = account("member");
@@ -179,8 +179,8 @@ describe("group chat", () => {
       invitee: account("friend"),
       friendIds: new Set(["friend"]),
     })).toThrow("Group has been dissolved");
-    expect(() => service.recall(group.groupId, "owner", group.messages[0]!.messageId))
-      .toThrow("Group has been dissolved");
+    await expect(service.recall(group.groupId, "owner", group.messages[0]!.messageId))
+      .rejects.toThrow("Group has been dissolved");
   });
 
   it("cannot be rejoined by its number once dissolved, and dissolving twice is refused", () => {

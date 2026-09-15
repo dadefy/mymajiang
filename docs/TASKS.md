@@ -115,7 +115,8 @@
 - **完成**：
   - `PostgresGroupStore.load()` 不再 `SELECT group_messages`，只取每群 `MAX(sent_at)` 用于列表排序，启动开销与消息量脱钩。
   - 统一游标分页：`GET /v1/groups/:groupId/messages` 支持 `limit` + `before` 游标，返回 `nextCursor`；
-    键集分页落在 `(sent_at, message_id)`，并新增复合索引迁移 `006_group_messages_pagination.sql`。
+    键集分页落在 `(sent_at, message_id)`，并新增复合索引迁移 `007_group_messages_pagination.sql`
+    （原编号 006 与 `006_admin_accounts.sql` 撞号，合并时改为 007）。
   - `recall` 改为 `async`：内存里没有的旧消息先从库里取回再撤回（管理员撤回很早的消息也正确）。
   - `ChatGroup` 增加 `lastMessageAt`，`GroupService`/`PostgresGroupStore` 各自维护，群列表排序不再依赖全量消息。
   - 内存仅保留每群最近 500 条消息作为就近缓存，避免无限增长。
@@ -149,7 +150,7 @@ git push
 ## 当前状态（2026-09-16）
 
 - 远端：`https://github.com/dadefy/mymajiang.git`（**私有**），分支 `main`
-- 测试：30 个文件 / 244 项（另一环境验证 238 项；B3 合入新增 6 项，合并后本机全量复核）
+- 测试：30 个文件 / 241 项全通过（B3/A1 合并后本机实测）
 - 已完成：规则引擎、领域逻辑、服务端（HTTP + WebSocket + PostgreSQL）、
   客户端业务骨架（`apps/client`）、邀请密钥登录、群聊实时推送、群管理、管理后台网页（A2）、
   账号注销（A4）、战绩游标分页（B1）、快照写入节流（B2）、解散群软删除（B4）、群消息分页（B3）、
