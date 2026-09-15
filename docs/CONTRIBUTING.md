@@ -18,15 +18,42 @@
 
 ## 2. 版本控制
 
-`mianyang-mahjong` 已有自己的 git 仓库（初始提交 `db0cbd0`，分支 `main`，
-96 个文件 / 14768 行）。**每次完成一个可验证的改动就提交一次，不要攒一大坨。**
+`mianyang-mahjong` 已有自己的 git 仓库（分支 `main`）。
+**每次完成一个可验证的改动就提交一次，不要攒一大坨。**
 
 ```powershell
 cd mianyang-mahjong
-git add -A
-git commit -m "简述改了什么、为什么"
-git status          # 应为空
+git status                    # 先看清楚有哪些改动
+git add <你自己改的路径...>     # 只加自己的文件，见下
+git commit -F 消息文件
+git status                    # 应为空
 ```
+
+### ⚠️ 不要用 `git add -A` / `git add .`
+
+**这个仓库只有一个工作区，多个协作者共用。** `git add -A` 会把别人**还没提交**的改动
+一起扫进你的提交里 —— 这不是假设，本项目真的发生过：一次「B1 战绩分页」的提交
+带进了 103 个 `apps/apk` 下的文件（另一个人正在做的 LayaAir 工程），
+提交信息里一个字都没提，事后只能靠 `git log --name-only` 才查出来。
+
+正确做法：
+
+```powershell
+git status                          # 确认改动清单
+git add packages/domain/src/groups.ts apps/server/src/postgres-group-store.ts
+git status                          # 再确认一次，只应有你要提交的文件
+```
+
+提交前如果看到不认识的改动，**停下来问一句**，不要顺手提交。
+
+### 不要提交生成物与第三方文件
+
+`.gitignore` 已排除 `node_modules/`、`dist/`、`coverage/`、`.env*`；
+`apps/apk/.gitignore` 另外排除了 `library/`、`local/`、`release/`、`temp/`、`bin/js/bundles`。
+
+引擎自带的类型文件（`apps/apk/engine/types/*.d.ts`，单文件两万多行）目前**进了仓库**，
+仓库 `.git` 合计 2.1 MB 尚可接受；但若再引入别的引擎或 SDK 资源，先确认是不是生成物，
+能 gitignore 就别提交。
 
 两个环境上的坑：
 
