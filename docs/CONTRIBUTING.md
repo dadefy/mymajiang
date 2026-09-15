@@ -36,18 +36,23 @@ git status          # 应为空
 
 ### 远端
 
-**远端尚未配置**，代码目前只在本机（已确认 github.com 与 gitee.com 在本机都能连通，
-缺的只是你的账号凭据）。要推上去，先在网站上建一个**空仓库**（不要勾 README/LICENSE），
-然后：
+- 远端：`origin = https://github.com/dadefy/mymajiang.git`
+- 默认分支：`main`
+- **该仓库目前是公开的**，README 与全部源码任何人可见。
 
 ```powershell
-git remote add origin <仓库地址>
-git push -u origin main
+git push -u origin main      # 首次
+git push                     # 之后
+git pull --rebase            # 开始干活前先同步
 ```
 
-没有保存任何凭据，所以推送时会要求登录 —— 用 Personal Access Token 当密码即可
-（GitHub 需 `repo` 权限；Gitee 同理）。**建议建私有仓库**：仓库里有两份产品文档
-（规则书 v1.0、APK 实施书）。
+推送需要 Personal Access Token 当密码（GitHub 设置里生成，勾 `repo`）。
+
+> ⚠️ **公开仓库，不要把产品文档提交进去。**
+> 目前仓库里已经有两份：
+> `绵阳血战麻将游戏规则_v1.0.docx`、`四川血战麻将APK_AI开发实施书.docx`。
+> 最省事的处理是去 Settings → Danger Zone → **Change visibility → Private**，
+> 那样历史里的文件也一并不可见，不需要改历史。
 
 `.gitignore` 已排除 `node_modules/`、`dist/`、`coverage/`、`.env*`。
 规则书与实施书两个 `.docx` 已随仓库提交（它们是产品规则的来源）。
