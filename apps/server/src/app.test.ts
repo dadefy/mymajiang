@@ -64,6 +64,18 @@ describe("server API", () => {
     expect(response.json()).toEqual({ status: "ok" });
   });
 
+  it("serves the administrator console with restrictive browser headers", async () => {
+    const { app } = fixture();
+    const response = await app.inject({ method: "GET", url: "/admin" });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-frame-options"]).toBe("DENY");
+    expect(response.body).toContain("绵阳麻将管理后台");
+    expect(response.body).toContain("/v1/admin/invitation-keys");
+    expect(response.body).toContain("/v1/admin/audit-log");
+  });
+
   it("reports database health when persistence is configured", async () => {
     const healthy = fixture();
     healthy.dependencies.database = { async ping() {} };

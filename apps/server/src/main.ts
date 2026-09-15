@@ -90,10 +90,17 @@ const dependencies = createInMemoryDependencies({
   ...(gameStateStore ? { gameStateStore } : {}),
 });
 const app = createApp(dependencies);
+const host = process.env.HOST ?? "127.0.0.1";
+const port = Number(process.env.PORT ?? 3000);
 await app.listen({
-  host: process.env.HOST ?? "127.0.0.1",
-  port: Number(process.env.PORT ?? 3000),
+  host,
+  port,
 });
+if (process.env.NODE_ENV !== "production") {
+  const adminToken = await tokens.issueAdminToken(process.env.DEV_ADMIN_ID ?? "local-developer", "super_admin");
+  const adminHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+  process.stdout.write(`[development admin] http://${adminHost}:${port}/admin\n[token] ${adminToken}\n`);
+}
 const wss = await createWebSocketServer(dependencies, Number(process.env.WS_PORT ?? 3001));
 process.stdout.write(`[websocket] listening on ${process.env.WS_PORT ?? 3001}\n`);
 

@@ -19,6 +19,7 @@ import {
   type UserAccount,
 } from "@mianyang-mahjong/domain";
 import { TokenService, bearerToken } from "./auth.js";
+import { adminConsoleHtml } from "./admin-console.js";
 import type { AdminStore } from "./admin-store.js";
 import type { GameStateStore } from "./game-state-store.js";
 import { InMemoryGroupEventBus, type GroupEventBus, type GroupMessageView } from "./group-events.js";
@@ -113,6 +114,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       return reply.status(503).send({ status: "degraded", database: "unavailable" });
     }
   });
+
+  app.get("/admin", async (_request, reply) => reply
+    .header("Cache-Control", "no-store")
+    .header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+    .header("X-Frame-Options", "DENY")
+    .type("text/html; charset=utf-8")
+    .send(adminConsoleHtml()));
 
   app.post("/v1/auth/activate", async (request, reply) => {
     const body = z.object({
