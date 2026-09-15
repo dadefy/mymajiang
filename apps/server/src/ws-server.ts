@@ -16,11 +16,17 @@ interface ActiveMatch {
   game: MahjongGame;
   seatsByUser: Map<string, number>;
   roundNumber: number;
+  /** 快照节流：上次真正落盘的时间；undefined 表示还没写过。 */
+  lastSavedAt?: number;
+  /** 快照节流：距上次落盘之后状态又变过，尚未写盘。 */
+  stateDirty?: boolean;
 }
 
 export interface RealtimeOptions {
   playTimeoutMs?: number;
   claimTimeoutMs?: number;
+  /** 快照落盘的最小间隔（毫秒）。同一时间窗内的多次行动合并成一次写；默认 2000。 */
+  saveIntervalMs?: number;
 }
 
 /** 每个 active match 的 seat -> connection 映射。 */
@@ -74,8 +80,12 @@ export function createWebSocketServer(
 ): Promise<WebSocketServer> {
   const activeMatches = new Map<string, ActiveMatch>();
   const actionTimers = new Map<ActiveMatch, Map<number, ReturnType<typeof setTimeout>>>();
+  /** 快照节流：每个进行中对局的"延迟落盘"定时器，到点把最新状态写一次。 */
+  const saveTimers = new Map<ActiveMatch, ReturnType<typeof setTimeout>>();
   const playTimeoutMs = options.playTimeoutMs ?? 15_000;
   const claimTimeoutMs = options.claimTimeoutMs ?? 8_000;
+  /** 快照落盘的最小间隔；一个时间窗内的多次行动合并成一次写。 */
+  const SAVE_INTERVAL_MS = options.saveIntervalMs ?? 2_000;
 
   // 群聊订阅：一个连接可以同时订阅多个群，一个群也可以有多个连接。
   const groupSubscribers = new Map<string, Set<WebSocketConnection>>();
@@ -188,9 +198,53 @@ export function createWebSocketServer(
    *
    * 快照含牌墙与全部手牌，只留在服务端。写入走共享写队列，所以 WS 操作本身不等落盘；
    * REST 请求结束时的 flush 会把队列里积压的快照一并排干。
+   *
+   * 节流：每次行动都写盘是几十次/局的写放大，而快照只在「进程崩溃」那一刻才被读到。
+   * 所以按时间窗合并 —— 距上次落盘不足 {@link SAVE_INTERVAL_MS} 就只标脏，由延迟定时器
+   * 到点补写；最后一把手最迟一个时间窗后也会落盘，重启不会丢超过这一步的进度。
    */
   function saveRoundState(active: ActiveMatch): void {
-    dependencies.gameStateStore?.save(active.room.roomId, active.roundNumber, active.game.serialize());
+    const store = dependencies.gameStateStore;
+    if (!store) return;
+    const now = Date.now();
+    active.stateDirty = true;
+    const elapsed = active.lastSavedAt === undefined ? Infinity : now - active.lastSavedAt;
+    if (elapsed >= SAVE_INTERVAL_MS) {
+      flushRoundState(active);
+      return;
+    }
+    if (!saveTimers.has(active)) {
+      const timer = setTimeout(() => {
+        saveTimers.delete(active);
+        if (active.stateDirty) flushRoundState(active);
+      }, SAVE_INTERVAL_MS - elapsed);
+      timer.unref();
+      saveTimers.set(active, timer);
+    }
+  }
+
+  /** 立即把当前状态写盘，并清掉节流状态。对局结束等「必须落盘」的时刻用它。 */
+  function flushRoundState(active: ActiveMatch): void {
+    const store = dependencies.gameStateStore;
+    if (!store) return;
+    const pending = saveTimers.get(active);
+    if (pending) {
+      clearTimeout(pending);
+      saveTimers.delete(active);
+    }
+    active.stateDirty = false;
+    active.lastSavedAt = Date.now();
+    store.save(active.room.roomId, active.roundNumber, active.game.serialize());
+  }
+
+  /** 取消进行中对局的延迟落盘定时器；对局结束时调用，避免定时器写进一个已结束的对局。 */
+  function cancelSaveTimer(active: ActiveMatch): void {
+    const pending = saveTimers.get(active);
+    if (pending) {
+      clearTimeout(pending);
+      saveTimers.delete(active);
+    }
+    active.stateDirty = false;
   }
 
   async function broadcastState(active: ActiveMatch): Promise<void> {
@@ -214,11 +268,14 @@ export function createWebSocketServer(
           connection.send({ type: "match-finished", result: matchResult });
         }
         dependencies.gameStateStore?.clear(active.room.roomId);
+        cancelSaveTimer(active);
         activeMatches.delete(active.room.roomId);
         seatConnections.delete(active);
         return;
       }
       active.roundNumber += 1;
+      // 旧局已结算，其存档不再有意义；取消悬挂的延迟写，交给新局重新安排。
+      cancelSaveTimer(active);
       active.game = new MahjongGame(
         randomInt(0, 2 ** 31),
         [...active.seatsByUser.keys()] as [string, string, string, string],

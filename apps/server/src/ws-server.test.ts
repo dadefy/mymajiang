@@ -337,6 +337,53 @@ describe("WebSocket 对局", () => {
     });
     client.close();
   });
+
+  it("快照写入按时间窗节流：窗口内的多次行动只写一次", async () => {
+    const { dependencies, tokens } = fixture();
+    const port = 3750 + Math.floor(Math.random() * 100);
+    const saves: Array<{ roomId: string; roundNumber: number }> = [];
+    dependencies.gameStateStore = {
+      save(roomId, roundNumber) {
+        saves.push({ roomId, roundNumber });
+      },
+      clear() {},
+      async load() {
+        return undefined;
+      },
+    };
+
+    // 节流窗口设得很大，测试期间所有行动都落在同一个窗口里，只有第一次会落盘。
+    const wss = await createWebSocketServer(dependencies, port, { saveIntervalMs: 60_000 });
+    wssInstances.push(wss);
+
+    const userIds = ["owner", "p1", "p2", "p3"].map((name) => createBetaUser(dependencies, name));
+    const room = makeRoom(dependencies, userIds);
+    const clients: TestClient[] = [];
+    for (const id of userIds) {
+      const client = new TestClient();
+      await client.connect(port);
+      client.send({ type: "auth", token: await tokens.issueUserToken(id), roomId: room.roomId });
+      await expect(client.next()).resolves.toMatchObject({ type: "room" });
+      clients.push(client);
+    }
+
+    // 开局：首次广播会落盘一次。
+    clients[0]!.send({ type: "start" });
+    await Promise.all(clients.map((c) => c.next()));
+    expect(saves.length).toBe(1);
+
+    // 四人换三张 + 定缺：这些状态变化都发生在同一时间窗内，不应再触发落盘。
+    for (const client of clients) client.send({ type: "auto-swap" });
+    await Promise.all(clients.map((c) => c.next()));
+    for (const client of clients) client.send({ type: "auto-missing" });
+    await Promise.all(clients.map((c) => c.next()));
+    expect(saves.length).toBe(1);
+
+    // 落盘的始终是同一个房间、同一局（开局后 roundNumber 未变）。
+    expect(saves[0]).toEqual({ roomId: room.roomId, roundNumber: 1 });
+
+    for (const client of clients) client.close();
+  }, 30000);
 });
 
 describe("WebSocket 群聊推送", () => {
