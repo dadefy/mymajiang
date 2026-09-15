@@ -15,24 +15,37 @@
 `PROJECT_STATUS.md` 是**唯一的事实来源**。规格与代码冲突时，改代码，不要改规格——
 除非讨论后确认是规格要变（变规格必须同步更新本文档和 README）。
 
-## 2. 版本控制（当前是缺口）
+## 2. 版本控制
 
-`mianyang-mahjong` 目录**没有自己的 `.git`**；上层 `Codex` 仓库是空仓库（0 次提交）。
-也就是说目前**没有任何提交历史**，删错文件无法回滚。
-
-开始协作前必须先做一次：
+`mianyang-mahjong` 已有自己的 git 仓库（初始提交 `db0cbd0`，分支 `master`，
+96 个文件 / 14768 行）。**每次完成一个可验证的改动就提交一次，不要攒一大坨。**
 
 ```powershell
 cd mianyang-mahjong
-git init
 git add -A
-git commit -m "初始提交：服务端、规则/领域包与客户端业务骨架"
+git commit -m "简述改了什么、为什么"
+git status          # 应为空
 ```
 
-之后每次完成一个可验证的改动就提交一次，不要攒一大坨。
+两个环境上的坑：
 
-> 注：本机 `git` 不在 PATH 里，可用完整路径
-> `C:\Users\Administrator\.workbuddy\binaries\PortableGit\versions\1.2.0\cmd\git.exe`。
+- 本机 `git` 不在 PATH 里，用完整路径
+  `C:\Users\Administrator\.workbuddy\binaries\PortableGit\versions\1.2.0\cmd\git.exe`。
+- 提交信息是 UTF-8 中文，**用 `-F 消息文件` 提交**，不要用 `-m`（PowerShell 传中文会乱码）。
+  文件要用无 BOM 的 UTF-8 写。
+
+### 远端
+
+**目前没有配置任何远端**，代码只在本机。要推到 GitHub / Gitee 需要你先在网站上建一个空仓库，
+然后把地址给出来（或配好凭据），再执行：
+
+```powershell
+git remote add origin <仓库地址>
+git push -u origin master
+```
+
+`.gitignore` 已排除 `node_modules/`、`dist/`、`coverage/`、`.env*`。
+规则书与实施书两个 `.docx` 已随仓库提交（它们是产品规则的来源）。
 
 ## 3. 分工：按包切，不要按功能切
 
