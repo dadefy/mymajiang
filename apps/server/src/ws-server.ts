@@ -428,6 +428,16 @@ export function createWebSocketServer(
       return;
     }
 
+    // 认证只在握手时做过一次，而账号可能在牌局中途被封禁或注销。
+    // 每次操作都重新确认一次，否则「立即生效」只是句空话 —— socket 开着的人还能接着打。
+    if (!connection.userId) return sendError(connection, "Not authenticated");
+    const actor = dependencies.accountStore.findAccountById(connection.userId);
+    if (!actor || actor.status !== "active") {
+      sendError(connection, "ACCOUNT_NOT_ACTIVE");
+      connection.close();
+      return;
+    }
+
     if (message.type === "group-subscribe") {
       if (!connection.userId) return sendError(connection, "Not authenticated");
       const groupId = message.groupId as string;

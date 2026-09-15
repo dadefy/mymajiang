@@ -184,6 +184,74 @@ describe("server API", () => {
     expect(locked.json().message).toBe("KEY_ALREADY_ACTIVATED");
   });
 
+  it("注销账号后：令牌立刻失效、密钥既登不进也建不了新号、管理员也复活不了", async () => {
+    const { app, dependencies } = fixture();
+    // 自己发一把密钥，这样能拿到明文，才能验证「注销后这把密钥彻底作废」。
+    const key = dependencies.invitationKeys.issue({ count: 1, note: "注销测试", actorId: "developer" })[0]!.key;
+    const activated = await app.inject({
+      method: "POST",
+      url: "/v1/auth/activate",
+      payload: { key, nickname: "要注销的人", avatarUrl: "https://example.invalid/a.png" },
+    });
+    expect(activated.statusCode).toBe(201);
+    const token = activated.json().token as string;
+    const userId = activated.json().userId as string;
+
+    // 注销前一切正常。
+    expect((await app.inject({
+      method: "GET",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${token}` },
+    })).statusCode).toBe(200);
+
+    const deleted = await app.inject({
+      method: "POST",
+      url: "/v1/account/delete",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    // 1) 已经签发出去的令牌立刻失效 —— 不用等它过期。
+    const afterDelete = await app.inject({
+      method: "GET",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(afterDelete.statusCode).toBe(403);
+    expect(afterDelete.json().code).toBe("ACCOUNT_NOT_ACTIVE");
+
+    // 2) 账号被匿名化；积分与战绩保留（那是别的玩家的对局记录，也有财务属性）。
+    const account = dependencies.accountStore.findAccountById(userId)!;
+    expect(account.status).toBe("deleted");
+    expect(account.nickname).toBe("已注销用户");
+    expect(account.avatarUrl).toBe("");
+
+    // 3) 同一把密钥登不进来。
+    const login = await app.inject({ method: "POST", url: "/v1/auth/login", payload: { key } });
+    expect(login.statusCode).toBe(403);
+    expect(login.json().code).toBe("ACCOUNT_NOT_ACTIVE");
+
+    // 4) 也不能拿去重新注册 —— 哈希还绑在已注销的账号上，UNIQUE 约束挡下。
+    const reuse = await app.inject({
+      method: "POST",
+      url: "/v1/auth/activate",
+      payload: { key, nickname: "换个号重来", avatarUrl: "https://example.invalid/b.png" },
+    });
+    expect(reuse.statusCode).toBe(409);
+    expect(reuse.json().message).toBe("KEY_ALREADY_ACTIVATED");
+
+    // 5) 管理员不能把它改回 active —— 注销不可逆。
+    const adminToken = await dependencies.tokens.issueAdminToken("developer", "super_admin");
+    const revive = await app.inject({
+      method: "PATCH",
+      url: `/v1/admin/users/${userId}/status`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { status: "active", reason: "恢复" },
+    });
+    expect(revive.statusCode).toBe(409);
+    expect(revive.json().message).toBe("Account status cannot be managed");
+  });
+
   it("密钥不存在或格式不对时给出明确错误", async () => {
     const { app, tokens } = fixture();
     const adminToken = await tokens.issueAdminToken("developer", "super_admin");

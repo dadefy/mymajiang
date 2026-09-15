@@ -122,6 +122,18 @@ export class ApiClient {
     return result;
   }
 
+  /**
+   * 注销账号。立即生效且不可撤销。
+   *
+   * 成功后本地令牌也一并丢掉 —— 服务端已经把账号标成 `deleted`，这个令牌再也用不了，
+   * 留着只会让界面以为还登着。
+   */
+  async deleteAccount(): Promise<ApiResult<null>> {
+    const result = await this.call<null>({ method: "POST", path: "/v1/account/delete" });
+    if (result.ok) this.bearer = undefined;
+    return result;
+  }
+
   /** 精确搜索：返回用户资料与两人的关系状态。 */
   user(userId: string): Promise<ApiResult<PublicUser>> {
     return this.call({ method: "GET", path: `/v1/users/${encodeURIComponent(userId)}` });

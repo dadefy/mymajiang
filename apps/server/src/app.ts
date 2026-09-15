@@ -148,6 +148,19 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     };
   });
 
+  /**
+   * 注销账号。用户自己发起，立即生效且不可撤销。
+   *
+   * 只改账号本身（状态 + 匿名化），不碰积分与战绩 —— 见 `AccountService.deleteAccount`。
+   * 注销之后同一个令牌立刻失效（`requireUser` 会拒绝非 active 状态），邀请密钥也一并作废。
+   */
+  app.post("/v1/account/delete", async (request, reply) => {
+    const user = await requireUser(request.headers.authorization, dependencies);
+    dependencies.accountService.deleteAccount(user);
+    await dependencies.accountStore.flush?.();
+    return reply.status(204).send();
+  });
+
   app.get("/v1/admin/invitation-keys", async (request) => {
     const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
     requireSuperAdmin(admin);

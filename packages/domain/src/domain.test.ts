@@ -77,6 +77,45 @@ describe("invitation key activation", () => {
     expect(store.accounts.size).toBe(1);
   });
 
+  it("注销账号：状态转 deleted、昵称与头像匿名化，但密钥仍绑着、记录仍留着", () => {
+    const keys = invitationService();
+    const issued = keys.service.issue({ count: 1, note: "", actorId: "developer" })[0]!;
+    const store = new InMemoryAccountStore();
+    const accounts = new AccountService(store, keys.service, () => "1234567890");
+    const account = accounts.activateWithKey({ key: issued.key, nickname: "张三", avatarUrl: "https://example.invalid/a.png" });
+    account.points = 500;
+    const keyHash = account.invitationKeyHash;
+
+    accounts.deleteAccount(account);
+
+    expect(account.status).toBe("deleted");
+    expect(account.nickname).toBe("已注销用户");
+    expect(account.avatarUrl).toBe("");
+    // 积分是财务记录，注销不动它。
+    expect(account.points).toBe(500);
+    // 密钥哈希留着 —— 这就是「注销后密钥作废」的实现：它仍绑在这个已注销的账号上。
+    expect(account.invitationKeyHash).toBe(keyHash);
+    expect(store.findAccountByInvitationKeyHash(keyHash!)).toBe(account);
+
+    // 于是这把密钥既建不出新账号……
+    expect(() => accounts.activateWithKey({ key: issued.key, nickname: "新的人", avatarUrl: "b" }))
+      .toThrow("KEY_ALREADY_ACTIVATED");
+    // ……也不能被再注销一次。
+    expect(() => accounts.deleteAccount(account)).toThrow("already deleted");
+  });
+
+  it("牌局进行中不能注销账号", () => {
+    const keys = invitationService();
+    const issued = keys.service.issue({ count: 1, note: "", actorId: "developer" })[0]!;
+    const store = new InMemoryAccountStore();
+    const accounts = new AccountService(store, keys.service, () => "1234567890");
+    const account = accounts.activateWithKey({ key: issued.key, nickname: "张三", avatarUrl: "a" });
+
+    account.activeMatchId = "11111111-1111-1111-1111-111111111111";
+    expect(() => accounts.deleteAccount(account)).toThrow("active match");
+    expect(account.status).toBe("active");
+  });
+
   it("拒绝格式不对、未知与已撤销的密钥", () => {
     const keys = invitationService();
 

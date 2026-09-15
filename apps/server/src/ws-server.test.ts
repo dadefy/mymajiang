@@ -314,6 +314,34 @@ describe("WebSocket 对局", () => {
     client.close();
   });
 
+  it("账号在连接期间被停用（封禁或注销）后，下一次操作就被踢下线", async () => {
+    const { dependencies, tokens } = fixture();
+    const port = 3800 + Math.floor(Math.random() * 100);
+    const wss = await createWebSocketServer(dependencies, port);
+    wssInstances.push(wss);
+
+    const userIds = ["owner", "p1", "p2", "p3"].map((name) => createBetaUser(dependencies, name));
+    const room = makeRoom(dependencies, userIds);
+
+    const client = new TestClient();
+    await client.connect(port);
+    client.send({ type: "auth", token: await tokens.issueUserToken(userIds[0]!), roomId: room.roomId });
+    await expect(client.next()).resolves.toMatchObject({ type: "room" });
+
+    // 他还连着的时候账号被停用。认证只在握手时做过一次，所以这一步必须靠
+    // 「每次操作重新确认状态」才能立刻生效 —— 否则 socket 开着的人可以一直用下去。
+    dependencies.accountAdministration.changeStatus(
+      dependencies.accountStore.findAccountById(userIds[0]!)!,
+      { adminId: "admin", role: "super_admin" },
+      "permanently_banned",
+      "违规",
+    );
+
+    client.send({ type: "start" });
+    await expect(client.next()).resolves.toMatchObject({ type: "error", message: "ACCOUNT_NOT_ACTIVE" });
+    client.close();
+  }, 30000);
+
   it("忽略属于上一局的存档，改为开下一局", async () => {
     const { dependencies, tokens } = fixture();
     const port = 3700 + Math.floor(Math.random() * 100);
