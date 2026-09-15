@@ -6,5 +6,11 @@
   "right": 0,
   "top": 0,
   "bottom": 0,
-  "name": "Scene2D"
+  "name": "Scene2D",
+  "components": [
+    {
+      "_$id": "main_boot",
+      "_$type": "Main"
+    }
+  ]
 }

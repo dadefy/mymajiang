@@ -23,7 +23,7 @@
 
 ## 第一波：可立即并行，互不冲突
 
-### A1 · LayaAir 客户端渲染层 〔H〕
+### A1 · LayaAir 客户端渲染层 〔H → W 接手 · 骨架已完成〕
 
 - **范围**：新建 `apps/apk/`（LayaAir 工程），**只依赖 `@mianyang-mahjong/client`**
 - **内容**：
@@ -32,6 +32,11 @@
 - **依赖**：需要本机装有 LayaAir 环境（我没有，所以这任务归 H）
 - **验收**：能用真实邀请密钥登录，进主页看到群列表与战绩；建房后进入房间页，收到实时牌局状态
 - **注意**：牌桌交互（换三张/定缺/出牌）先不做，见 D1
+- **完成**（骨架级）：两个适配器（`src/laya-transports.ts`，先前已就位）+
+  四个页面（`src/ui/`：密钥登录、资料、主页、房间）+ `Main.ts` 启动装配 +
+  场景挂载（`Scene.ls` 组件形式）。等待期房间状态由房间页轮询刷新（页面流暂不推全量快照）；
+  结算浮层、战绩与群列表展示齐备。牌局区域只展示脱敏快照与允许动作，交互归 D1。
+  **真机 + 真实服务端走通验收流程才算最终闭环**（本机没有 LayaAir IDE，只做了类型检查）。
 
 ### A2 · 管理后台网页 〔W · 已完成〕
 
@@ -109,12 +114,12 @@
 - **验收**：消息量大时启动不卡；历史消息可翻页
 - **完成**：
   - `PostgresGroupStore.load()` 不再 `SELECT group_messages`，只取每群 `MAX(sent_at)` 用于列表排序，启动开销与消息量脱钩。
-  - 新增统一游标分页：`GET /v1/groups/:groupId/messages` 支持 `limit` + `before` 游标，返回 `nextCursor`；键集分页落在 `(sent_at, message_id)`，并新增复合索引迁移 `006_group_messages_pagination.sql`。
-  - `recall` 改为 `async`：内存里没有的旧消息会先从库里取回再撤回（管理员撤回很早的消息也正确）。
-  - `ChatGroup` 增加 `lastMessageAt` 字段，`GroupService`/`PostgresGroupStore` 各自维护，群列表排序不再依赖全量消息。
+  - 统一游标分页：`GET /v1/groups/:groupId/messages` 支持 `limit` + `before` 游标，返回 `nextCursor`；
+    键集分页落在 `(sent_at, message_id)`，并新增复合索引迁移 `006_group_messages_pagination.sql`。
+  - `recall` 改为 `async`：内存里没有的旧消息先从库里取回再撤回（管理员撤回很早的消息也正确）。
+  - `ChatGroup` 增加 `lastMessageAt`，`GroupService`/`PostgresGroupStore` 各自维护，群列表排序不再依赖全量消息。
   - 内存仅保留每群最近 500 条消息作为就近缓存，避免无限增长。
-  - 同步更新了 `groups.test.ts`/`postgres-group-store.test.ts` 的测试（含游标翻页、按库取回撤回）。
-  - 注意：本环境无法跑 `pnpm`，需在本机 `pnpm install && pnpm test && pnpm typecheck && pnpm build` 复核。
+  - 复核时修复：3 处 `exactOptionalPropertyTypes` 类型错误与 1 处测试漏种群成员。
 
 ### B4 · 解散群改软删除 〔W · 已完成〕
 
@@ -133,7 +138,7 @@
 git pull --rebase        # 开工前先同步
 # ... 干活 ...
 pnpm test && pnpm typecheck && pnpm build    # 三条全绿
-git add -A && git commit -m "..."
+git add <你自己的文件...> && git commit -F 消息文件    # 只加自己的文件，见 CONTRIBUTING
 git push
 ```
 
@@ -141,11 +146,13 @@ git push
 - 同一目录撞车了，先沟通再动，不要互相覆盖
 - 规格有分歧时以 `docs/PROJECT_STATUS.md` 为准；确实要改规格，先更新文档再改代码
 
-## 当前状态（2026-09-15）
+## 当前状态（2026-09-16）
 
 - 远端：`https://github.com/dadefy/mymajiang.git`（**私有**），分支 `main`
-- 测试：25 个文件 / 195 项全通过
+- 测试：30 个文件 / 244 项（另一环境验证 238 项；B3 合入新增 6 项，合并后本机全量复核）
 - 已完成：规则引擎、领域逻辑、服务端（HTTP + WebSocket + PostgreSQL）、
   客户端业务骨架（`apps/client`）、邀请密钥登录、群聊实时推送、群管理、管理后台网页（A2）、
-  账号注销（A4）、战绩游标分页（B1）、快照写入节流（B2）、解散群软删除（B4）、群消息分页（B3）
-- **还没做的最大两块：客户端渲染层（A1）与对象存储（A3）**
+  账号注销（A4）、战绩游标分页（B1）、快照写入节流（B2）、解散群软删除（B4）、群消息分页（B3）、
+  管理员账号体系与接口限流（P2-1/P2-2）、对象存储链路（P0-2）、
+  客户端渲染层骨架（A1，待真机验收）
+- **还没做的最大两块：牌桌交互与群聊页面（D1/D2，在 A1 骨架上继续）与对象存储的客户端上传界面（A3）**

@@ -21,7 +21,6 @@
   "include": [
     "./assets",
     "./src",
-    "./engine",
-    "../../packages/client-placeholder"
+    "./engine"
   ]
 }

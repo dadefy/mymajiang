@@ -1,7 +1,7 @@
 # 绵阳血战麻将项目进度
 
-> 更新时间：2026-09-15  
-> 当前阶段：服务端核心功能开发，APK 客户端尚未开始  
+> 更新时间：2026-09-16  
+> 当前阶段：服务端功能完备，APK 渲染层骨架完成（待真机验收）  
 > 固定规则版本：`MIANYANG_XZ_1_0`
 
 ## 1. 项目目标
@@ -80,7 +80,8 @@ mianyang-mahjong/
 │  │  ├─ 003_round_state.sql 进行中那一局的引擎状态快照
 │  │  ├─ 004_invitation_keys.sql 内测邀请密钥，去掉短信与审核
 │  │  ├─ 005_group_soft_delete.sql 解散群改为软删除（dissolved_at）
-│  │  └─ 006_admin_accounts.sql 管理员账号与密码哈希
+│  │  ├─ 006_admin_accounts.sql 管理员账号与密码哈希
+│  │  └─ 007_group_messages_pagination.sql 群消息键集分页索引
 │  └─ src/
 │     ├─ app.ts              REST API
 │     ├─ auth.ts             JWT 签发与校验
@@ -445,6 +446,36 @@ mianyang-mahjong/
 - 与**管理员登录的失败锁定是两套东西**：那个是「密码试错」的针对性防护（锁账号），
   这个是「别把接口打爆」的通用闸门。两者并存。
 
+### 4.21 群消息分页
+
+- 迁移 `007_group_messages_pagination.sql` 给 `group_messages` 加 `(group_id, sent_at DESC, message_id DESC)` 复合索引
+  （原编号 006 与 `006_admin_accounts.sql` 撞号，已改为 007；该迁移此前未在任何环境执行过，改名安全）。
+- `PostgresGroupStore.load()` 不再 `SELECT group_messages`，启动只取每群 `MAX(sent_at)` 用于群列表排序，
+  启动开销与历史消息量脱钩；内存仅保留每群最近 500 条作为就近缓存。
+- `GET /v1/groups/:groupId/messages` 支持统一游标分页：`limit` + `before` 游标，返回 `nextCursor`；
+  键集分页落在 `(sent_at, message_id)`，内存版对缓存数组做同样的游标分页，两端语义一致。
+- `recall` 改为 `async`：内存里没有的旧消息先从库里取回再撤回，管理员撤回很早的消息也正确。
+- `ChatGroup` 增加 `lastMessageAt`，`GroupService` / `PostgresGroupStore` 各自维护，
+  群列表「按最近活跃排序」不再依赖全量消息。
+
+### 4.22 客户端渲染层骨架（A1）
+
+- `apps/apk` 是 LayaAir 3.4 工程，**只依赖 `@mianyang-mahjong/client`**：
+  - 网络适配器 `src/laya-transports.ts`：用引擎的 `Laya.HttpRequest` / `Laya.Socket`
+    实现 `HttpTransport` 与 `SocketTransportFactory` 两个缝；
+  - 渲染入口 `src/Main.ts`：配置舞台（750×1334 竖屏、SHOWALL 等比缩放居中）、
+    组装 ApiClient + ClientFlow、把 `Screen` 交给 `ScreenHost`；
+  - 四个页面在 `src/ui/`：密钥登录、资料、主页（我的信息 / 建房进房 / 群列表 / 战绩）、
+    房间（成员与准备状态 / 牌局快照展示 / 单局结算浮层）。
+- 第一版全部用颜色块 + 文字搭建（`src/ui/widgets.ts`），不依赖皮肤资源，也不做动画；
+  页面只订阅 `Screen` 与调用 `ClientFlow`，不持有业务状态。
+- 房间页在等待期每 2.5 秒轮询一次房间快照：页面流只在进房时拉一次快照，
+  成员加入 / 准备变化目前不会推全量状态（socket 只有 `status` / `playerCount`）。
+- **还没有的**：换三张、定缺、出牌、碰杠胡等牌桌交互（D1，页面先展示允许的动作集合）；
+  群聊页面（D2）；真机与真实服务端的联调验收。
+- 启动场景 `assets/Scene.ls` 以组件形式挂载 `Main`（`_$type: "Main"`）；
+  若 IDE 打开后组件丢失，把 `src/Main.ts` 拖到场景根节点即可。
+
 ## 5. 当前 REST API
 
 ### 邀请密钥登录
@@ -506,7 +537,7 @@ mianyang-mahjong/
 - `POST /v1/groups/:groupId/leave`
 - `POST /v1/groups/:groupId/dissolve`
 - `POST /v1/groups/:groupId/messages`
-- `GET /v1/groups/:groupId/messages`
+- `GET /v1/groups/:groupId/messages` — 支持 `limit` + `before` 游标，返回 `nextCursor`（见 4.17）
 - `POST /v1/groups/:groupId/messages/:messageId/recall`
 - `POST /v1/groups/:groupId/notice`
 - `POST /v1/groups/:groupId/all-mute`
@@ -548,7 +579,7 @@ mianyang-mahjong/
 
 ## 7. 测试状态
 
-- 当前共有 30 个测试文件、238 项自动化测试。
+- 当前共有 30 个测试文件、244 项自动化测试（另一环境验证 238 项；B3 合入新增 6 项，合并后本机全量复核）。
 - 已覆盖规则计算、完整对局、**对局状态快照与恢复**、**邀请密钥签发/激活/登录**、账号、积分、好友、群聊、房间、管理员审计、HTTP API、WebSocket 协议、重启续打、**群聊实时推送与群管理**，以及 PostgreSQL 账号仓库、邀请密钥账目、积分流水与审计仓库、好友仓库、群组仓库、房间与牌局记录仓库、对局快照仓库、战绩查询和迁移执行器。
 - 其中 `packages/rules/src/game-state.test.ts` 覆盖：牌局**每一个中间状态**都能原样 JSON 往返（12 局逐手校验）、往返后行为一致、导出状态与内部状态互不影响、客户端快照不含牌墙与手牌，以及各类损坏数据（少玩家、重复座位、非法牌值、未知阶段、丢掉牌、计数器对不上）都被拒绝。
 - `apps/server/src/invitation-key-codec.test.ts` 覆盖：密钥格式与归一化、忽略大小写与分隔符后哈希一致、提示位只取前 8 位、连续生成不重复、格式错误抛 `KEY_MALFORMED`。
@@ -565,6 +596,7 @@ mianyang-mahjong/
 - `apps/server/src/local-blob-storage.test.ts` 覆盖本地对象存储：写入读回、缺失返回 undefined、上传签名绑定方法/键/内容类型、读取签名不能用于覆盖写、伪造或改动的签名一律拒绝、过期签名拒绝、越界的对象键被拒、签名密钥过短时拒绝构造。
 - `apps/server/src/app.test.ts` 还覆盖图片消息全链路：签发直传 → 上传 → 发消息 → 回读时拿到带签名的读取地址并能取回原字节；没配存储时返回 501 而群聊仍可用；不支持的类型、超限大小、引用他人对象键、伪造签名分别被拒。
 - `apps/server/src/password-hasher.test.ts` 覆盖 scrypt 实现：校验自产哈希、拒绝错误密码、同一密码两次哈希因随机盐而不同、哈希串自描述参数且不含明文、各类损坏/异种哈希串一律返回 false 而不是抛异常。
+- `packages/domain/src/groups.test.ts` 与 `apps/server/src/postgres-group-store.test.ts` 还覆盖**群消息分页（B3，见 4.21）**：游标翻页不重不漏、`nextCursor` 形状、按库取回不在内存的旧消息再撤回。
 - `apps/server/src/postgres-room-store.test.ts` 覆盖：建房与开局落盘、座位与开局积分、逐局记录（含结算事件）、结算时余额与四笔流水同事务、结算失败整体回滚、等待中房间恢复并清空准备状态、进行中房间带着座位与累计分恢复且不结算、无可继续房间的关闭与不可能状态的报错。
 - `apps/server/src/postgres-game-state-store.test.ts` 覆盖：快照落盘形状、读回后可原样恢复、无存档返回空、兼容文本型 JSON 列、拒绝非对象存档、对局结束后删除。
 - `apps/server/src/postgres-match-history.test.ts` 覆盖：战绩与玩家映射、只选打过至少一局的对局、缺记录时返回空、旧数据回退结束原因、单局明细与事件、损坏分数与非法 JSON 直接报错。
@@ -577,7 +609,7 @@ mianyang-mahjong/
 - `apps/client/test/match-socket.test.ts` 覆盖实时通道：auth 握手带房间、服务端帧到事件的翻译、断线后按退避节奏重连并**重放 auth 与群订阅**、被移出群后不再重放订阅、close 后不再重连。
 - `apps/client/test/flow.test.ts` 覆盖页面流：已激活密钥直接进主页、未激活进资料页、激活失败的文案、建房进房间页并完成握手、实时帧驱动房间页、行牌动作走通道、断线提示与恢复、主页拉取失败留在主页、登出清通道。
 - `apps/server/src/postgres-match-history.test.ts` 覆盖战绩游标分页：按 `finalized_at + room_id` 键集翻页不重不漏、翻页查询带游标两个键、拒绝伪造/损坏的游标。
-- 最近一次结果：238 项全部通过。
+- 最近一次结果：另一环境 238 项全部通过；B3/A1 合并后本机全量复核通过（见提交记录）。
 - TypeScript 规则包、领域包、服务端与客户端核心生产构建通过。
 
 常用命令：
@@ -594,9 +626,8 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 
 ### P0：上线前必须完成
 
-1. **客户端渲染层（LayaAir）**：业务骨架已在 `apps/client` 完成，
-   剩下的是用 LayaAir 实现 `HttpTransport` / `SocketTransport` 两个适配器，
-   并按 `Screen` 渲染四个页面（密钥登录、资料、主页、房间与牌桌）。
+1. **客户端渲染层骨架已完成（A1，见 4.22）**：两个网络适配器与四个页面都已实现；
+   剩下的是真机/真服务端联调验收，以及其上的牌桌交互（D1）与群聊页面（D2）。
 2. 图片和语音上传已完成：服务端链路（见 4.18）与**腾讯云 COS 云驱动**都已跑通并对着真实桶验证。
    剩下的是**客户端上传界面**（属于渲染层）。
 3. 账号注销已完成（见 4.16）；隐私政策与用户协议文本仍待准备。
@@ -608,7 +639,7 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 2. 群聊页面接入实时推送与历史消息拉取（通道已具备，页面待做）。
 3. 战绩查询的游标分页已完成（B1）；按时间范围筛选仍未做。
 4. 对局快照的写入节流已完成（B2）：按 2 秒时间窗合并写盘，最后一手由延迟定时器兜底落盘。
-5. 群消息目前启动时全量载入内存，且没有「已读」与未读数；人数与消息量上来后要补。
+5. 群消息分页已完成（B3，见 4.21）；「已读」与未读数仍待补。
 6. 解散群已改为软删除（B4）：群记录、成员与历史消息都保留，只有群主能解散，解散后原成员仍可读历史。
 
 ### P2：安全与运营
@@ -639,7 +670,8 @@ pnpm --filter @mianyang-mahjong/server db:migrate
   不重不漏）；还没有按时间范围筛选。
 - 对局快照按 2 秒时间窗节流写盘：窗口内的多次行动合并成一次写，最后一手由延迟定时器兜底落盘，
   重启最多丢一个时间窗内的进度。
-- 群消息在启动时全量载入内存，与内存版行为保持一致；消息量增长后需要改为分页或按时间窗加载。
+- 群消息按群保留最近 500 条就近缓存（B3，见 4.21），更早的消息走键集分页实时查询；
+  「已读」与未读数还没有。
 - 群聊实时推送没有离线补发：不在线的成员只能靠 `GET /v1/groups/:groupId/messages` 拉取，
   还没有「已读」与未读计数。
 - 群成员管理（设管理员、禁言、转让群主、邀请、退群）不走实时推送，只体现在 REST 返回值里；
@@ -651,7 +683,7 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 - 好友关系读取仍以 `friend_requests` 为准，`friendships` 目前只作为一致性索引维护，尚未用于查询。
 - 当前 WebSocket 服务是项目内零依赖实现，只支持所需的文本帧子集，不等同于完整通用 WebSocket 框架。
 - 断线重连只能在当前服务进程存活期间恢复，跨进程由对局快照续打接管。
-- 数据库迁移已是版本目录，新变更必须新增 `db/migrations/005_*.sql` 这类文件；
+- 数据库迁移已是版本目录，新变更必须新增 `db/migrations/007_*.sql` 这类文件；
   已经上线执行过的迁移禁止再改，`001_initial` 的编号必须保持不动。
 - 尚未使用真实 PostgreSQL 实例执行集成测试，现有数据库仓库测试使用模拟连接池。
 - 登录只靠一把密钥，没有失败次数限制；`KEY_INVALID` 这类错误应该像其他接口一样限流（见 P2-3）。
@@ -676,14 +708,19 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 - 限流额度是**写死的常量**（见 `rate-limit.ts` 的 `RATE_LIMITS`），没有按套餐或用户等级区分；
   目前也没有管理端查看/封禁某个 key 的入口。
 - 管理员角色 `review_admin` 原本只负责注册审核，现在已没有任何专属职责，仍保留在类型里待清理。
-- 客户端目前只有**业务骨架**：协议、调用、通道与页面流，没有任何渲染；
-  页面流转的验证完全靠单元测试。渲染层（LayaAir 或调试用 DOM）是下一个大块。
-- 客户端与渲染层之间的缝只有两个接口（`HttpTransport` / `SocketTransportFactory`），
+- 客户端的**渲染层骨架**（LayaAir 四页面）已就位但还没有真机验收；
+  牌桌交互（D1）与群聊页面（D2）尚未开始，页面流转的既有验证仍靠单元测试。
+- 渲染层与业务层之间的缝只有两个接口（`HttpTransport` / `SocketTransportFactory`），
   但 `src/protocol.ts` 必须与 `apps/server` 的响应形状保持一致 —— 改服务端响应时要同步改。
+- 渲染层目前按 `Screen` 全量重建列表/牌局区域，量小没有问题；
+  若以后牌局帧率成为瓶颈，再做按节点的增量更新。
+- 页面流只在进房时拉一次房间快照，等待期的成员变化靠房间页轮询（见 4.18）；
+  如果以后要做「谁准备了立刻亮灯」，应在 `ClientFlow` 补 `refreshRoom()` 并复用 `room` 帧。
 
 ## 10. 推荐后续开发顺序
 
-1. **LayaAir 渲染层**：实现两个网络适配器，按 `Screen` 渲染四个页面，先不做复杂动画。
+1. **D1 牌桌交互 / D2 群聊页面**：在 A1 渲染层骨架上继续，
+   实现换三张、定缺、摸打、碰杠胡与结算弹窗，以及群列表、消息与实时推送。
 2. **对象存储**：打通图片与语音消息。
 3. **部署、安全与合规**：完成正式联网前准备。
 
@@ -695,7 +732,10 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 **群聊实时推送**（新消息、撤回、群公告、禁言开关、移出群与解散，见 4.13）、
 **群管理补齐**（群列表、邀请好友、主动退群、解散群，见 4.14）、
 **一次性邀请密钥登录**（去掉短信验证码与人工审核，见 4.3）、
-**客户端业务骨架**（协议镜像、REST 客户端、实时通道与页面流，见 `apps/client/README.md`）。
+**解散群软删除**（见 4.15）、**账号注销**（见 4.16）、
+**群消息分页**（见 4.17）、
+**客户端业务骨架**（协议镜像、REST 客户端、实时通道与页面流，见 `apps/client/README.md`）、
+**客户端渲染层骨架**（两个适配器与四个页面，见 4.18）。
 
 ## 11. 下一位开发者开始工作前
 
@@ -736,5 +776,8 @@ pnpm --filter @mianyang-mahjong/server db:migrate
     并在 `apps/client/test/flow.test.ts` 里补转移用例。
 19. 改服务端响应形状时，必须同步 `apps/client/src/protocol.ts` ——
     两端协议漂移要在编译与测试阶段暴露，不要等到联调。
+20. `apps/apk` 的渲染代码只订阅 `Screen` 与调用 `ClientFlow`，页面用 750×1334 设计分辨率
+    纯色块布局，不引入皮肤资源；等待期房间状态靠房间页轮询（见 4.18）。
+    场景里 `Main` 组件如果丢失，把 `src/Main.ts` 拖到场景根节点即可。
 
-推荐下一项任务：LayaAir 渲染层。先实现两个网络适配器，再把 `Screen` 的四个页面画出来。
+推荐下一项任务：D1 牌桌交互与 D2 群聊页面（都在 A1 渲染层骨架上继续），随后接对象存储。

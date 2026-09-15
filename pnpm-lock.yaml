@@ -18,6 +18,12 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@24.13.4)
 
+  apps/apk:
+    dependencies:
+      '@mianyang-mahjong/client':
+        specifier: workspace:*
+        version: link:../client
+
   apps/client: {}
 
   apps/server:
