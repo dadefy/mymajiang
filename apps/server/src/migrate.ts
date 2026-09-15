@@ -1,4 +1,7 @@
 import { PostgresDatabase } from "./database.js";
+import { loadEnvironment } from "./load-environment.js";
+
+loadEnvironment();
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) throw new Error("DATABASE_URL is required");

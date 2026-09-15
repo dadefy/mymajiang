@@ -5,6 +5,7 @@ import { TokenService } from "./auth.js";
 import { createWebSocketServer } from "./ws-server.js";
 import { PostgresDatabase } from "./database.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
+import { CosBlobStorage } from "./cos-blob-storage.js";
 import { LocalDiskBlobStorage } from "./local-blob-storage.js";
 import { PostgresAccountStore } from "./postgres-account-store.js";
 import { PostgresAdminAccountStore } from "./postgres-admin-account-store.js";
@@ -16,6 +17,10 @@ import { PostgresInvitationKeyStore } from "./postgres-invitation-key-store.js";
 import { PostgresMatchHistory } from "./postgres-match-history.js";
 import { PostgresRoomStore } from "./postgres-room-store.js";
 import { PostgresWriteQueue } from "./postgres-write-queue.js";
+import { loadEnvironment } from "./load-environment.js";
+
+// 必须最先执行：下面所有 process.env 读取都依赖它。
+loadEnvironment();
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -71,8 +76,9 @@ const adminAccountStore = database && writeQueue
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3000);
 
-// 对象存储。`local` 驱动把文件落到磁盘，并用自签名 URL 模拟云端预签名直传 ——
-// 于是整条上传链路在没有云账号时也能跑通与测试；换成云端只需要再写一个驱动。
+// 对象存储。两种驱动：
+//   * `local` —— 文件落磁盘，用自签名 URL 模拟云端预签名直传，不需要云账号；
+//   * `cos`   —— 腾讯云 COS。桶上开默认加密即可，预签名直传会自动加密，代码不用管。
 const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
 const localBlobStorage = process.env.STORAGE_DRIVER === "local"
   ? new LocalDiskBlobStorage(
@@ -81,7 +87,15 @@ const localBlobStorage = process.env.STORAGE_DRIVER === "local"
       process.env.STORAGE_SIGNING_SECRET ?? requiredEnvironment("JWT_SECRET"),
     )
   : undefined;
-const blobStorage = localBlobStorage;
+const cosBlobStorage = process.env.STORAGE_DRIVER === "cos"
+  ? new CosBlobStorage({
+      secretId: requiredEnvironment("COS_SECRET_ID"),
+      secretKey: requiredEnvironment("COS_SECRET_KEY"),
+      bucket: requiredEnvironment("COS_BUCKET"),
+      region: requiredEnvironment("COS_REGION"),
+    })
+  : undefined;
+const blobStorage = cosBlobStorage ?? localBlobStorage;
 
 const dependencies = createInMemoryDependencies({
   tokens,
