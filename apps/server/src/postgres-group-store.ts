@@ -20,6 +20,7 @@ interface GroupRow {
   notice: string;
   all_muted: boolean;
   created_at: Date;
+  dissolved_at: Date | null;
 }
 
 interface MemberRow {
@@ -49,11 +50,12 @@ export interface GroupIdGenerators {
 }
 
 const UPSERT_GROUP_SQL = `INSERT INTO chat_groups (
-    group_id, group_no, name, owner_id, notice, all_muted, created_at
-  ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+    group_id, group_no, name, owner_id, notice, all_muted, created_at, dissolved_at
+  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
   ON CONFLICT (group_id) DO UPDATE SET
     name = EXCLUDED.name, owner_id = EXCLUDED.owner_id,
-    notice = EXCLUDED.notice, all_muted = EXCLUDED.all_muted`;
+    notice = EXCLUDED.notice, all_muted = EXCLUDED.all_muted,
+    dissolved_at = EXCLUDED.dissolved_at`;
 
 const UPSERT_MEMBER_SQL = `INSERT INTO group_members (
     group_id, user_id, role, muted_until, joined_at
@@ -63,10 +65,8 @@ const UPSERT_MEMBER_SQL = `INSERT INTO group_members (
 
 const DELETE_MEMBER_SQL = `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`;
 
-// 群成员与群消息都有外键指向群，解散时必须先删子行再接删群本身。
-const DELETE_GROUP_MESSAGES_SQL = `DELETE FROM group_messages WHERE group_id = $1`;
-const DELETE_GROUP_MEMBERS_SQL = `DELETE FROM group_members WHERE group_id = $1`;
-const DELETE_GROUP_SQL = `DELETE FROM chat_groups WHERE group_id = $1`;
+// 解散是软删除：群、成员与消息都留在库里，只把 dissolved_at 打上时间戳，
+// 历史消息因此仍可被原成员读回。没有任何一条「解散」路径会再删行。
 
 // Only the recall fields are mutable; content and sender are immutable once stored.
 const UPSERT_MESSAGE_SQL = `INSERT INTO group_messages (
@@ -121,6 +121,7 @@ export class PostgresGroupStore extends GroupService {
         members: new Map<string, GroupMember>(),
         messages: [],
         createdAt: row.created_at,
+        ...(row.dissolved_at ? { dissolvedAt: row.dissolved_at } : {}),
       });
     }
     for (const row of members.rows) {
@@ -182,7 +183,8 @@ export class PostgresGroupStore extends GroupService {
   override leaveGroup(groupId: string, userId: string): ChatGroup | undefined {
     const group = super.leaveGroup(groupId, userId);
     if (!group) {
-      this.queue.enqueueTransaction(deleteGroupStatements(groupId));
+      // 最后一人退群 → 群软解散，写时间戳而不是删行。
+      this.saveGroup(groupId);
       return undefined;
     }
     const statements: SqlStatement[] = [
@@ -199,7 +201,7 @@ export class PostgresGroupStore extends GroupService {
 
   override dissolveGroup(groupId: string, actorId: string): void {
     super.dissolveGroup(groupId, actorId);
-    this.queue.enqueueTransaction(deleteGroupStatements(groupId));
+    this.saveGroup(groupId);
   }
 
   override transferOwnership(groupId: string, actorId: string, memberId: string): void {
@@ -273,7 +275,16 @@ export class PostgresGroupStore extends GroupService {
 }
 
 function groupParameters(group: ChatGroup): readonly unknown[] {
-  return [group.groupId, group.groupNo, group.name, group.ownerId, group.notice, group.allMuted, group.createdAt];
+  return [
+    group.groupId,
+    group.groupNo,
+    group.name,
+    group.ownerId,
+    group.notice,
+    group.allMuted,
+    group.createdAt,
+    group.dissolvedAt ?? null,
+  ];
 }
 
 function memberParameters(groupId: string, member: GroupMember): readonly unknown[] {
@@ -299,13 +310,4 @@ function memberOf(group: ChatGroup, userId: string): GroupMember {
   const member = group.members.get(userId);
   if (!member) throw new Error(`Member ${userId} is missing from group ${group.groupId}`);
   return member;
-}
-
-/** 解散一个群：先清子表再删群本身，顺序满足外键约束。 */
-function deleteGroupStatements(groupId: string): SqlStatement[] {
-  return [
-    { sql: DELETE_GROUP_MESSAGES_SQL, parameters: [groupId] },
-    { sql: DELETE_GROUP_MEMBERS_SQL, parameters: [groupId] },
-    { sql: DELETE_GROUP_SQL, parameters: [groupId] },
-  ];
 }

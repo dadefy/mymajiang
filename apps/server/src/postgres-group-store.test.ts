@@ -196,6 +196,7 @@ describe("PostgresGroupStore", () => {
       "",
       false,
       expect.any(Date),
+      null,
     ]);
     expect(parametersOf(timeline, "insert:group_members")).toEqual([
       group.groupId,
@@ -416,7 +417,7 @@ describe("PostgresGroupStore", () => {
     ]);
   });
 
-  it("requires deleting the child rows before the group itself", async () => {
+  it("dissolves a group by stamping dissolved_at instead of deleting its rows", async () => {
     const { database, timeline } = fakeDatabase();
     const store = await PostgresGroupStore.load(database, undefined, generators());
     const owner = account("1234567890", "甲");
@@ -427,17 +428,12 @@ describe("PostgresGroupStore", () => {
     store.dissolveGroup(group.groupId, owner.userId);
     await store.flush();
 
-    // 外键指向群，所以群成员与群消息必须先删。
-    expect(writes(timeline)).toEqual([
-      "BEGIN",
-      "delete:group_messages",
-      "delete:group_members",
-      "delete:chat_groups",
-      "COMMIT",
-    ]);
+    // 软删除：只写回一行群记录（带 dissolved_at），成员与消息一概不动。
+    expect(writes(timeline)).toEqual(["insert:chat_groups"]);
+    expect(parametersOf(timeline, "insert:chat_groups")[7]).toBeInstanceOf(Date);
   });
 
-  it("clears the child rows when the last member walks out", async () => {
+  it("stamps dissolved_at when the last member walks out", async () => {
     const { database, timeline } = fakeDatabase();
     const store = await PostgresGroupStore.load(database, undefined, generators());
     const owner = account("1234567890", "甲");
@@ -448,12 +444,37 @@ describe("PostgresGroupStore", () => {
     expect(store.leaveGroup(group.groupId, owner.userId)).toBeUndefined();
     await store.flush();
 
-    expect(writes(timeline)).toEqual([
-      "BEGIN",
-      "delete:group_messages",
-      "delete:group_members",
-      "delete:chat_groups",
-      "COMMIT",
-    ]);
+    expect(writes(timeline)).toEqual(["insert:chat_groups"]);
+    expect(parametersOf(timeline, "insert:chat_groups")[7]).toBeInstanceOf(Date);
+  });
+
+  it("loads dissolved_at back so a restart does not resurrect a dissolved group", async () => {
+    const dissolvedAt = new Date("2026-09-15T02:00:00.000Z");
+    const { database } = fakeDatabase({
+      groups: [{
+        group_id: "group-1",
+        group_no: "12345678",
+        name: "散了的群",
+        owner_id: "1234567890",
+        notice: "",
+        all_muted: false,
+        created_at: new Date("2026-09-15T00:00:00.000Z"),
+        dissolved_at: dissolvedAt,
+      }],
+      members: [{
+        group_id: "group-1",
+        user_id: "1234567890",
+        role: "owner",
+        muted_until: null,
+        joined_at: new Date("2026-09-15T00:00:00.000Z"),
+      }],
+    });
+
+    const store = await PostgresGroupStore.load(database, undefined, generators());
+    const group = store.groups.get("group-1")!;
+
+    expect(group.dissolvedAt).toEqual(dissolvedAt);
+    // 重启后照样进不了列表 —— 这条断言正是「软删除不能漏成复活」的防线。
+    expect(store.listFor("1234567890")).toEqual([]);
   });
 });

@@ -830,6 +830,70 @@ describe("server API", () => {
     expect(after.json().groups).toEqual([]);
   });
 
+  it("keeps a dissolved group's messages readable by its former members", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "散伙群主");
+    const member = await createBetaUser(app, dependencies, "散伙群员");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "会散的群" },
+    });
+    const groupId = created.json().groupId as string;
+    const groupNo = created.json().groupNo as string;
+    await app.inject({
+      method: "POST",
+      url: "/v1/groups/join",
+      headers: { authorization: `Bearer ${member.token}` },
+      payload: { groupNo },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { type: "text", content: "散伙前的最后一句" },
+    });
+
+    const dissolved = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/dissolve`,
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    expect(dissolved.statusCode).toBe(204);
+
+    // 软删除的全部意义：群没了，话还留着 —— 原成员仍能读回历史。
+    const history = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: { authorization: `Bearer ${member.token}` },
+    });
+    expect(history.statusCode).toBe(200);
+    expect(history.json().messages.map((message: { content: string }) => message.content))
+      .toEqual(["散伙前的最后一句"]);
+
+    // 但群里已经发不出话了。
+    const rejected = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { type: "text", content: "还能说话吗" },
+    });
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json().message).toBe("Group has been dissolved");
+
+    // 原群号也不能再被加入。
+    const outsider = await createBetaUser(app, dependencies, "局外人");
+    const rejoin = await app.inject({
+      method: "POST",
+      url: "/v1/groups/join",
+      headers: { authorization: `Bearer ${outsider.token}` },
+      payload: { groupNo },
+    });
+    expect(rejoin.statusCode).toBe(409);
+  });
+
   it("dissolves a group once its last member leaves", async () => {
     const { app, dependencies, tokens } = fixture();
     const owner = await createBetaUser(app, dependencies, "独守群主");

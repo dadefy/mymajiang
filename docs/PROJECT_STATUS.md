@@ -78,7 +78,8 @@ mianyang-mahjong/
 │  │  ├─ 001_initial.sql     初始结构（编号冻结，勿改）
 │  │  ├─ 002_match_records.sql 房间、房间成员、单局记录
 │  │  ├─ 003_round_state.sql 进行中那一局的引擎状态快照
-│  │  └─ 004_invitation_keys.sql 内测邀请密钥，去掉短信与审核
+│  │  ├─ 004_invitation_keys.sql 内测邀请密钥，去掉短信与审核
+│  │  └─ 005_group_soft_delete.sql 解散群改为软删除（dissolved_at）
 │  └─ src/
 │     ├─ app.ts              REST API
 │     ├─ auth.ts             JWT 签发与校验
@@ -319,11 +320,21 @@ mianyang-mahjong/
   重复邀请同一人按幂等处理，不报错。
 - 新增 `POST /v1/groups/:groupId/leave`：主动退群。群主退出时把群主交给最早加入的剩余成员，
   最后一人退出时群直接解散（响应里 `dissolved: true`）。
-- 新增 `POST /v1/groups/:groupId/dissolve`：解散群，只有群主可以。
-  落库时先删 `group_messages`、`group_members` 再删 `chat_groups`，顺序满足外键约束；
-  这是硬删除，群里历史消息会一起消失。
+- 新增 `POST /v1/groups/:groupId/dissolve`：解散群，只有群主可以。**软删除**（见 4.15）。
 - 群被解散时向所有订阅者推 `group-dissolved` 并作废订阅 ——
   否则客户端会一直挂着一个已经没有意义的订阅。
+
+### 4.15 解散群改为软删除
+
+- 迁移 `005_group_soft_delete.sql` 给 `chat_groups` 加 `dissolved_at TIMESTAMPTZ`（可空）。
+- `dissolveGroup` 不再删任何行，只打时间戳；`leaveGroup` 的最后一人退出同样如此。
+  **群、成员、历史消息全部留在库里**，解散前在群里的人仍能通过
+  `GET /v1/groups/:groupId/messages` 读回历史（该接口只要求「是群成员」）。
+- 但对外这个群就是死的：`listFor` 不再返回它，`joinByGroupNo` 查号进不去，
+  发言 / 撤回 / 改公告 / 设管理员 / 禁言 / 移人 / 邀请 / 退群一律被
+  `requireLiveGroup` 拒绝（错误信息 `Group has been dissolved`）。
+- **写入口一律走 `requireLiveGroup`** 是这次的关键：软删除最典型的漏法就是
+  「群记录还在 → 解散之后还能继续用」。领域层有一组专门的测试钉住这条。
 
 ## 5. 当前 REST API
 
@@ -418,14 +429,15 @@ mianyang-mahjong/
 
 ## 7. 测试状态
 
-- 当前共有 25 个测试文件、184 项自动化测试。
+- 当前共有 25 个测试文件、191 项自动化测试。
 - 已覆盖规则计算、完整对局、**对局状态快照与恢复**、**邀请密钥签发/激活/登录**、账号、积分、好友、群聊、房间、管理员审计、HTTP API、WebSocket 协议、重启续打、**群聊实时推送与群管理**，以及 PostgreSQL 账号仓库、邀请密钥账目、积分流水与审计仓库、好友仓库、群组仓库、房间与牌局记录仓库、对局快照仓库、战绩查询和迁移执行器。
 - 其中 `packages/rules/src/game-state.test.ts` 覆盖：牌局**每一个中间状态**都能原样 JSON 往返（12 局逐手校验）、往返后行为一致、导出状态与内部状态互不影响、客户端快照不含牌墙与手牌，以及各类损坏数据（少玩家、重复座位、非法牌值、未知阶段、丢掉牌、计数器对不上）都被拒绝。
 - `apps/server/src/invitation-key-codec.test.ts` 覆盖：密钥格式与归一化、忽略大小写与分隔符后哈希一致、提示位只取前 8 位、连续生成不重复、格式错误抛 `KEY_MALFORMED`。
 - `apps/server/src/postgres-invitation-key-store.test.ts` 覆盖：启动载入、签发与撤销落库、哈希不可被改写、空账目可用。
 - `apps/server/src/postgres-admin-store.test.ts` 覆盖：启动加载流水与审计、脏数据拒绝、余额与流水同事务提交、状态与审计同事务提交、写失败整体回滚，以及多仓库共用写队列时的写入顺序。
 - `apps/server/src/postgres-friend-store.test.ts` 覆盖：加载历史申请、申请落盘、接受时申请与关系同事务、拒绝时不写关系、删好友的删除顺序、写失败回滚。
-- `apps/server/src/postgres-group-store.test.ts` 覆盖：加载群组/成员/消息、孤儿数据拒绝、建群同事务写群与群主、入群/设管理员/禁言/移除成员、转让群主、发消息与撤回、群公告与全员禁言、写失败回滚。
+- `apps/server/src/postgres-group-store.test.ts` 覆盖：加载群组/成员/消息、孤儿数据拒绝、建群同事务写群与群主、入群/设管理员/禁言/移除成员、转让群主、发消息与撤回、群公告与全员禁言、写失败回滚，以及**解散与最后一人退群都是写 `dissolved_at` 而不是删行**、重启后已解散的群不会复活。
+- `packages/domain/src/groups.test.ts` 还覆盖软删除的语义：解散后历史消息与成员都还在、但发言/改公告/禁言/移人/邀请/撤回/退群全部被拒、查号进不去、重复解散被拒。
 - `apps/server/src/postgres-room-store.test.ts` 覆盖：建房与开局落盘、座位与开局积分、逐局记录（含结算事件）、结算时余额与四笔流水同事务、结算失败整体回滚、等待中房间恢复并清空准备状态、进行中房间带着座位与累计分恢复且不结算、无可继续房间的关闭与不可能状态的报错。
 - `apps/server/src/postgres-game-state-store.test.ts` 覆盖：快照落盘形状、读回后可原样恢复、无存档返回空、兼容文本型 JSON 列、拒绝非对象存档、对局结束后删除。
 - `apps/server/src/postgres-match-history.test.ts` 覆盖：战绩与玩家映射、只选打过至少一局的对局、缺记录时返回空、旧数据回退结束原因、单局明细与事件、损坏分数与非法 JSON 直接报错。
@@ -433,12 +445,12 @@ mianyang-mahjong/
 - `apps/server/src/app.test.ts` 还验证了 API 确实使用注入的社交服务与管理员仓库，战绩接口的列表、明细、非参与者 403、未知房间 404，以及无数据库时的 501。
 - `apps/server/src/ws-server.test.ts` 还验证了重启后按存档接着打同一局、上一局的存档被忽略改为开下一局，以及群聊推送：群消息/撤回/群公告/全员禁言都会实时送达、非群成员订阅被拒、未认证订阅被拒、被移出群的成员立刻停止收到消息。
 - `apps/server/src/group-events.test.ts` 覆盖事件总线：多订阅者都收到、退订后不再收到、在回调里退订不打乱本次广播。
-- `apps/server/src/app.test.ts` 还覆盖群管理：群列表只含自己加入的群并带角色、只能邀请好友、重复邀请幂等、非群主不能解散、成员退群后群主不变、最后一人退群群解散，以及**邀请密钥全流程**：签发 → 激活建号 → 凭同一把密钥登录、重复激活被拒、撤销后不能登录、明文不出网、非超级管理员不能签发。
+- `apps/server/src/app.test.ts` 还覆盖群管理：群列表只含自己加入的群并带角色、只能邀请好友、重复邀请幂等、非群主不能解散、成员退群后群主不变、最后一人退群群解散、**解散后原成员仍能读回历史消息而发言被拒**，以及**邀请密钥全流程**：签发 → 激活建号 → 凭同一把密钥登录、重复激活被拒、撤销后不能登录、明文不出网、非超级管理员不能签发。
 - `apps/client/test/api-client.test.ts` 覆盖 REST 客户端：激活后自动持有令牌、错误码按语义分类（conflict/auth/input/unavailable/server）、网络异常返回 network 而不是抛异常、登出后不再带令牌。
 - `apps/client/test/match-socket.test.ts` 覆盖实时通道：auth 握手带房间、服务端帧到事件的翻译、断线后按退避节奏重连并**重放 auth 与群订阅**、被移出群后不再重放订阅、close 后不再重连。
 - `apps/client/test/flow.test.ts` 覆盖页面流：已激活密钥直接进主页、未激活进资料页、激活失败的文案、建房进房间页并完成握手、实时帧驱动房间页、行牌动作走通道、断线提示与恢复、主页拉取失败留在主页、登出清通道。
 - `apps/server/src/postgres-match-history.test.ts` 覆盖战绩游标分页：按 `finalized_at + room_id` 键集翻页不重不漏、翻页查询带游标两个键、拒绝伪造/损坏的游标。
-- 最近一次结果：187 项全部通过。
+- 最近一次结果：191 项全部通过。
 - TypeScript 规则包、领域包、服务端与客户端核心生产构建通过。
 
 常用命令：
@@ -469,7 +481,7 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 3. 战绩查询的游标分页已完成（B1）；按时间范围筛选仍未做。
 4. 对局快照的写入节流已完成（B2）：按 2 秒时间窗合并写盘，最后一手由延迟定时器兜底落盘。
 5. 群消息目前启动时全量载入内存，且没有「已读」与未读数；人数与消息量上来后要补。
-6. 解散群是硬删除，成员与历史消息一起消失；如果产品需要保留群历史，得改成软删除。
+6. 解散群已改为软删除（B4）：群记录、成员与历史消息都保留，只有群主能解散，解散后原成员仍可读历史。
 
 ### P2：安全与运营
 
@@ -500,7 +512,9 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 - 群成员管理（设管理员、禁言、转让群主、邀请、退群）不走实时推送，只体现在 REST 返回值里；
   只有被移出群的成员（`group-removed`）和被解散的群（`group-dissolved`）会立刻收到通知，
   因为这两种情况下连接必须停止接收。
-- 解散群是硬删除：群成员与历史消息一起删掉，没有回收站。
+- 解散群是软删除（`chat_groups.dissolved_at`）：群记录、成员与历史消息都留在库里，
+  解散前在群里的人仍能读回消息；解散后群从所有列表消失、且拒绝一切写操作。
+  代价是库里会累积已解散的群，将来若数据量大需要一个清理策略。
 - 好友关系读取仍以 `friend_requests` 为准，`friendships` 目前只作为一致性索引维护，尚未用于查询。
 - 当前 WebSocket 服务是项目内零依赖实现，只支持所需的文本帧子集，不等同于完整通用 WebSocket 框架。
 - 断线重连只能在当前服务进程存活期间恢复，跨进程由对局快照续打接管。

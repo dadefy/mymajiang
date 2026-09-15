@@ -33,6 +33,13 @@ export interface ChatGroup {
   members: Map<string, GroupMember>;
   messages: StoredGroupMessage[];
   createdAt: Date;
+  /**
+   * 解散时间；`undefined` 表示群还在。
+   *
+   * 解散是软删除：群、成员与消息都留在原处，只是从这一刻起不再出现在群列表里，
+   * 也不能再进人、发言或做任何管理操作。保留成员行的意义在于历史消息仍可被原成员读到。
+   */
+  dissolvedAt?: Date;
 }
 
 export interface InviteMemberInput {
@@ -84,7 +91,8 @@ export class GroupService {
 
   joinByGroupNo(account: UserAccount, groupNo: string): ChatGroup {
     this.assertActive(account);
-    const group = [...this.groups.values()].find((candidate) => candidate.groupNo === groupNo);
+    // 已解散的群查号进不去：对外它就是不存在的。
+    const group = [...this.groups.values()].find((candidate) => candidate.groupNo === groupNo && !isDissolved(candidate));
     if (!group) throw new Error("Group not found");
     if (group.members.has(account.userId)) return group;
     if (group.members.size >= GROUP_LIMITS.maximumMembers) throw new Error("Group is full");
@@ -92,10 +100,10 @@ export class GroupService {
     return group;
   }
 
-  /** 我加入的群，最近有消息的排前面；没有消息的按建群时间。 */
+  /** 我加入的群，最近有消息的排前面；没有消息的按建群时间。已解散的群不在其中。 */
   listFor(userId: string): ChatGroup[] {
     return [...this.groups.values()]
-      .filter((group) => group.members.has(userId))
+      .filter((group) => !isDissolved(group) && group.members.has(userId))
       .sort((left, right) => {
         const difference = lastActivityAt(right) - lastActivityAt(left);
         return difference !== 0 ? difference : right.createdAt.getTime() - left.createdAt.getTime();
@@ -105,14 +113,15 @@ export class GroupService {
   /**
    * 主动退群。
    *
-   * 群主退出时把群主交给最早加入的剩余成员；最后一人退出时群直接解散，返回 `undefined`。
+   * 群主退出时把群主交给最早加入的剩余成员；最后一人退出时群解散，返回 `undefined`。
    */
   leaveGroup(groupId: string, userId: string): ChatGroup | undefined {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     this.requireMember(group, userId);
     group.members.delete(userId);
     if (group.members.size === 0) {
-      this.groups.delete(group.groupId);
+      // 空群没有存在的意义，但同样是软删除：留个时间戳，消息仍可追溯到。
+      group.dissolvedAt = this.now();
       return undefined;
     }
     if (group.ownerId === userId) {
@@ -124,11 +133,16 @@ export class GroupService {
     return group;
   }
 
-  /** 解散群。只有群主可以，成员与消息随群一起消失。 */
+  /**
+   * 解散群。只有群主可以。
+   *
+   * 软删除：不删任何行，只记下解散时间。群从此不出现在任何人的群列表里，
+   * 也不能再进人、发言或做管理操作；但原来的成员仍能读回历史消息。
+   */
   dissolveGroup(groupId: string, actorId: string): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     if (actorId !== group.ownerId) throw new Error("Only the group owner can dissolve a group");
-    this.groups.delete(group.groupId);
+    group.dissolvedAt = this.now();
   }
 
   /**
@@ -138,7 +152,7 @@ export class GroupService {
    */
   inviteMember(input: InviteMemberInput): GroupMember {
     this.assertActive(input.invitee);
-    const group = this.requireGroup(input.groupId);
+    const group = this.requireLiveGroup(input.groupId);
     this.requireMember(group, input.actorId);
     if (!input.friendIds.has(input.invitee.userId)) throw new Error("Only friends can be invited");
     const existing = group.members.get(input.invitee.userId);
@@ -150,7 +164,7 @@ export class GroupService {
   }
 
   setAdministrator(groupId: string, actorId: string, memberId: string, enabled: boolean): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     if (actorId !== group.ownerId) throw new Error("Only the group owner can manage administrators");
     if (memberId === group.ownerId) throw new Error("Owner role cannot be changed");
     const member = this.requireMember(group, memberId);
@@ -158,7 +172,7 @@ export class GroupService {
   }
 
   transferOwnership(groupId: string, actorId: string, memberId: string): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     if (actorId !== group.ownerId) throw new Error("Only the group owner can transfer ownership");
     const nextOwner = this.requireMember(group, memberId);
     const currentOwner = this.requireMember(group, actorId);
@@ -168,13 +182,13 @@ export class GroupService {
   }
 
   setAllMuted(groupId: string, actorId: string, enabled: boolean): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     this.assertManager(group, actorId);
     group.allMuted = enabled;
   }
 
   muteMember(groupId: string, actorId: string, memberId: string, until: Date): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     this.assertManager(group, actorId);
     const target = this.requireMember(group, memberId);
     if (target.role === "owner") throw new Error("Group owner cannot be muted");
@@ -182,7 +196,7 @@ export class GroupService {
   }
 
   removeMember(groupId: string, actorId: string, memberId: string): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     this.assertManager(group, actorId);
     const actor = this.requireMember(group, actorId);
     const target = this.requireMember(group, memberId);
@@ -192,7 +206,7 @@ export class GroupService {
   }
 
   updateNotice(groupId: string, actorId: string, notice: string): void {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     this.assertManager(group, actorId);
     group.notice = notice.trim();
   }
@@ -205,7 +219,7 @@ export class GroupService {
     voiceSeconds?: number;
   }): StoredGroupMessage {
     this.assertActive(input.sender);
-    const group = this.requireGroup(input.groupId);
+    const group = this.requireLiveGroup(input.groupId);
     const member = this.requireMember(group, input.sender.userId);
     const now = this.now();
     const isManager = member.role === "owner" || member.role === "admin";
@@ -232,7 +246,7 @@ export class GroupService {
   }
 
   recall(groupId: string, actorId: string, messageId: string, userRecallEnabled = true): StoredGroupMessage {
-    const group = this.requireGroup(groupId);
+    const group = this.requireLiveGroup(groupId);
     const member = this.requireMember(group, actorId);
     const message = group.messages.find((candidate) => candidate.messageId === messageId);
     if (!message) throw new Error("Message not found");
@@ -261,6 +275,18 @@ export class GroupService {
     return group;
   }
 
+  /**
+   * 取一个「还在」的群，供所有写操作使用。
+   *
+   * 已解散的群仍然留在 `groups` 里（为了保留历史），所以每个写入口都必须显式挡住它，
+   * 否则解散之后还能继续发言、改公告、拉人 —— 软删除就会漏成「解散了但还能用」。
+   */
+  private requireLiveGroup(groupId: string): ChatGroup {
+    const group = this.requireGroup(groupId);
+    if (isDissolved(group)) throw new Error("Group has been dissolved");
+    return group;
+  }
+
   private requireMember(group: ChatGroup, userId: string): GroupMember {
     const member = group.members.get(userId);
     if (!member) throw new Error("User is not a group member");
@@ -271,6 +297,11 @@ export class GroupService {
     const role = this.requireMember(group, userId).role;
     if (role !== "owner" && role !== "admin") throw new Error("Group manager permission is required");
   }
+}
+
+/** 群是否已解散。软删除之后群记录还在，所以这个判断必须由调用方显式做。 */
+export function isDissolved(group: ChatGroup): boolean {
+  return group.dissolvedAt !== undefined;
 }
 
 /** 群列表排序依据：最后一条消息的时间；还没有消息就用建群时间。 */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GroupService, type UserAccount } from "./index.js";
+import { GroupService, isDissolved, type UserAccount } from "./index.js";
 
 function account(userId: string, status: UserAccount["status"] = "active"): UserAccount {
   return {
@@ -118,7 +118,9 @@ describe("group chat", () => {
     expect(afterLeave?.members.get("member")?.role).toBe("owner");
 
     expect(service.leaveGroup(group.groupId, "member")).toBeUndefined();
-    expect(service.groups.size).toBe(0);
+    // 软删除：群记录还在，只是被标成已解散。
+    expect(isDissolved(service.groups.get(group.groupId)!)).toBe(true);
+    expect(service.listFor(owner.userId)).toEqual([]);
   });
 
   it("only the owner may dissolve a group", () => {
@@ -128,7 +130,51 @@ describe("group chat", () => {
 
     expect(() => service.dissolveGroup(group.groupId, "member")).toThrow("Only the group owner");
     service.dissolveGroup(group.groupId, "owner");
-    expect(service.groups.size).toBe(0);
+    expect(isDissolved(service.groups.get(group.groupId)!)).toBe(true);
+  });
+
+  it("keeps a dissolved group's messages but refuses every further write", () => {
+    const service = serviceAt(["2026-09-15T00:00:00.000Z", "2026-09-15T00:00:01.000Z"]);
+    const owner = account("owner");
+    const member = account("member");
+    const group = service.createGroup(owner, "群");
+    service.joinByGroupNo(member, group.groupNo);
+    service.sendMessage({ groupId: group.groupId, sender: owner, type: "text", content: "散伙前最后一句" });
+
+    service.dissolveGroup(group.groupId, "owner");
+
+    // 历史留得住 —— 这就是软删除的全部意义。
+    expect(group.messages.map((message) => message.content)).toEqual(["散伙前最后一句"]);
+    expect(group.members.size).toBe(2);
+
+    // 但解散之后这个群对外就是死的：发言、改公告、拉人、管理、退群全部拒绝。
+    expect(() => service.sendMessage({ groupId: group.groupId, sender: owner, type: "text", content: "还能说话吗" }))
+      .toThrow("Group has been dissolved");
+    expect(() => service.updateNotice(group.groupId, "owner", "新公告")).toThrow("Group has been dissolved");
+    expect(() => service.setAllMuted(group.groupId, "owner", true)).toThrow("Group has been dissolved");
+    expect(() => service.removeMember(group.groupId, "owner", "member")).toThrow("Group has been dissolved");
+    expect(() => service.leaveGroup(group.groupId, "owner")).toThrow("Group has been dissolved");
+    expect(() => service.inviteMember({
+      groupId: group.groupId,
+      actorId: "owner",
+      invitee: account("friend"),
+      friendIds: new Set(["friend"]),
+    })).toThrow("Group has been dissolved");
+    expect(() => service.recall(group.groupId, "owner", group.messages[0]!.messageId))
+      .toThrow("Group has been dissolved");
+  });
+
+  it("cannot be rejoined by its number once dissolved, and dissolving twice is refused", () => {
+    const service = serviceAt(["2026-09-15T00:00:00.000Z"]);
+    const owner = account("owner");
+    const group = service.createGroup(owner, "群");
+    const groupNo = group.groupNo;
+
+    service.dissolveGroup(group.groupId, "owner");
+
+    // 对外它就是不存在的：查号进不去，也进不了第二次。
+    expect(() => service.joinByGroupNo(account("新人"), groupNo)).toThrow("Group not found");
+    expect(() => service.dissolveGroup(group.groupId, "owner")).toThrow("Group has been dissolved");
   });
 
   it("allows inviting friends only, and treats a repeat invite as a no-op", () => {

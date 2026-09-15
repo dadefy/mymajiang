@@ -126,7 +126,8 @@ export function createWebSocketServer(
    */
   function broadcastGroupEvent(event: GroupEvent): void {
     if (event.type === "dissolved") {
-      // 群已经不存在，所有订阅一起作废；复制一份再遍历，边退订边遍历才安全。
+      // 群已解散（软删除，记录还在但对外不再存在），所有订阅一起作废；
+      // 复制一份再遍历，边退订边遍历才安全。
       for (const connection of [...(groupSubscribers.get(event.groupId) ?? [])]) {
         connection.send({ type: "group-dissolved", groupId: event.groupId });
         unsubscribeFromGroup(connection, event.groupId);
