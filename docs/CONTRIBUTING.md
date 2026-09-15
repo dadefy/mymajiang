@@ -38,7 +38,7 @@ git status          # 应为空
 
 - 远端：`origin = https://github.com/dadefy/mymajiang.git`
 - 默认分支：`main`
-- **该仓库目前是公开的**，README 与全部源码任何人可见。
+- **该仓库是私有的**（2026-09-15 由公开转为私有），未授权访问返回 404。
 
 ```powershell
 git push -u origin main      # 首次
@@ -48,11 +48,13 @@ git pull --rebase            # 开始干活前先同步
 
 推送需要 Personal Access Token 当密码（GitHub 设置里生成，勾 `repo`）。
 
-> ⚠️ **公开仓库，不要把产品文档提交进去。**
-> 目前仓库里已经有两份：
-> `绵阳血战麻将游戏规则_v1.0.docx`、`四川血战麻将APK_AI开发实施书.docx`。
-> 最省事的处理是去 Settings → Danger Zone → **Change visibility → Private**，
-> 那样历史里的文件也一并不可见，不需要改历史。
+> 仓库里包含两份产品文档（`绵阳血战麻将游戏规则_v1.0.docx`、
+> `四川血战麻将APK_AI开发实施书.docx`）。它们之所以安全，是因为**仓库是私有的**——
+> 一旦有人把它转成公开，这两份文档会立刻变为全网可见，而且历史提交里也留着，
+> 改回私有之前的那段时间内可能已被抓取。所以：**不要把它转成公开**。
+>
+> 另外，私有不等于可以随便提交密钥：真实密钥仍然只放 `.env`（已被 gitignore），
+> 一旦误提交进历史，改私有也救不回来。
 
 `.gitignore` 已排除 `node_modules/`、`dist/`、`coverage/`、`.env*`。
 规则书与实施书两个 `.docx` 已随仓库提交（它们是产品规则的来源）。
