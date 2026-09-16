@@ -3,7 +3,7 @@ import { containsMissingSuit, isSevenPairs, isStandardWin } from "./hand.js";
 import { calculateFan, paymentForFan } from "./scoring.js";
 import { assertTile, countTiles, createTile, tileRank, tileSuit } from "./tiles.js";
 import { assertZeroSum, mergeDeltas } from "./settlement.js";
-import type { DeclaredMeld, ScoreDelta, Suit, Tile, WinContext } from "./types.js";
+import type { DeclaredMeld, FanItem, FanResult, ScoreDelta, Suit, Tile, WinContext, WinDetail, WinMethod } from "./types.js";
 
 export type GamePhase = "swapping" | "missing" | "playing" | "claiming" | "finished";
 
@@ -45,6 +45,13 @@ export interface RoundResult {
   deltas: ScoreDelta[];
   winnerSeats: number[];
   nextDealerSeat: number;
+  /**
+   * 每位赢家的明细：胡牌类型（番型）与是谁点的炮。
+   *
+   * 按**胡牌先后**排列（血战到底一局可能有三家胡），客户端结算界面直接照着列。
+   * 流局时为空数组。
+   */
+  wins: WinDetail[];
 }
 
 /** 杠分收入明细，流局退税时按此逐笔退回。 */
@@ -73,6 +80,16 @@ export interface GamePlayerState {
   swapTiles: Tile[] | null;
   won: boolean;
   winFan: number;
+  /**
+   * 胡牌明细，用于结算界面显示「胡了什么牌型 / 谁点的炮」。
+   * 全部可选：老快照里没有这些字段，恢复时按「没胡」处理。
+   */
+  winItems?: FanItem[];
+  winRawFan?: number;
+  winMethod?: WinMethod | null;
+  winFromSeat?: number | null;
+  winFromTile?: Tile | null;
+  winPayment?: number;
   declinedFan: number | null;
   drawCount: number;
 }
@@ -202,6 +219,18 @@ export class PlayerState {
   swapTiles: Tile[] | null = null;
   won = false;
   winFan = 0;
+  /** 胡牌时的番型明细（中文名 + 番数），结算界面显示「胡了什么牌型」用。 */
+  winItems: FanItem[] = [];
+  /** 各番相加、未封顶的番数。 */
+  winRawFan = 0;
+  /** 自摸还是点炮。没胡时为 null。 */
+  winMethod: WinMethod | null = null;
+  /** 点炮者的座位；自摸为 null。 */
+  winFromSeat: number | null = null;
+  /** 胡的那张牌来自别人时给牌值；自摸为 null。 */
+  winFromTile: Tile | null = null;
+  /** 每家付多少分。 */
+  winPayment = 0;
   /** 过手胡：放弃点炮胡后记录被拒的最高番数。 */
   declinedFan: number | null = null;
   /** 已完成的摸牌次数（庄家起手 14 张记为 1 次）。 */
@@ -260,6 +289,12 @@ export class PlayerState {
       swapTiles: this.swapTiles ? [...this.swapTiles] : null,
       won: this.won,
       winFan: this.winFan,
+      winItems: this.winItems.map((item) => ({ ...item })),
+      winRawFan: this.winRawFan,
+      winMethod: this.winMethod,
+      winFromSeat: this.winFromSeat,
+      winFromTile: this.winFromTile,
+      winPayment: this.winPayment,
       declinedFan: this.declinedFan,
       drawCount: this.drawCount,
     };
@@ -283,6 +318,12 @@ export class PlayerState {
     this.swapTiles = state.swapTiles ? [...state.swapTiles] : null;
     this.won = state.won;
     this.winFan = state.winFan;
+    this.winItems = (state.winItems ?? []).map((item) => ({ ...item }));
+    this.winRawFan = state.winRawFan ?? state.winFan;
+    this.winMethod = state.winMethod ?? null;
+    this.winFromSeat = state.winFromSeat ?? null;
+    this.winFromTile = state.winFromTile ?? null;
+    this.winPayment = state.winPayment ?? 0;
     this.declinedFan = state.declinedFan;
     this.drawCount = state.drawCount;
   }
@@ -598,7 +639,7 @@ export class MahjongGame {
       }
       for (const { player } of winners) {
         player.hand.push(discard.tile);
-        this.settleDiscardWin(player, discard.fromSeat, discard.kongDiscard);
+        this.settleDiscardWin(player, discard.fromSeat, discard.kongDiscard, discard.tile);
       }
       this.pendingDiscard = null;
       this.afterWinsOrContinue();
@@ -725,12 +766,13 @@ export class MahjongGame {
     for (const payer of payers) {
       this.recordEvent("win", payer.id, player.id, fan.paymentPerOpponent, "自摸");
     }
-    this.finalizeWin(player, fan.finalFan);
+    // 自摸不是别人给的牌，所以 fromSeat / fromTile 都为 null。
+    this.finalizeWin(player, fan, { method: "self-draw", fromSeat: null, fromTile: null });
     this.drawnFromKong = false;
     this.afterWinsOrContinue();
   }
 
-  private settleDiscardWin(player: PlayerState, fromSeat: number, kongDiscard: boolean): void {
+  private settleDiscardWin(player: PlayerState, fromSeat: number, kongDiscard: boolean, tile: Tile): void {
     const context: WinContext = {
       concealedTiles: [...player.hand],
       declaredMelds: player.melds,
@@ -742,13 +784,24 @@ export class MahjongGame {
     if (!fan.valid) throw new Error("Winning hand contains missing suit tiles");
     const from = this.players[fromSeat]!;
     this.recordEvent("win", from.id, player.id, fan.paymentPerOpponent, "点炮");
-    this.finalizeWin(player, fan.finalFan);
+    this.finalizeWin(player, fan, { method: "discard", fromSeat, fromTile: tile });
   }
 
-  private finalizeWin(player: PlayerState, fan: number): void {
+  private finalizeWin(
+    player: PlayerState,
+    fan: FanResult,
+    source: { method: WinMethod; fromSeat: number | null; fromTile: Tile | null },
+  ): void {
     player.winningHand = [...player.hand];
     player.won = true;
-    player.winFan = fan;
+    player.winFan = fan.finalFan;
+    // 番型明细一并留下：结算界面要显示「胡了什么牌型」，而番型只在结算那一刻算得出来。
+    player.winItems = fan.items.map((item) => ({ ...item }));
+    player.winRawFan = fan.rawFan;
+    player.winMethod = source.method;
+    player.winFromSeat = source.fromSeat;
+    player.winFromTile = source.fromTile;
+    player.winPayment = fan.paymentPerOpponent;
     this.winnerSeats.push(player.seat);
     removeTiles(player.hand, player.hand);
   }
@@ -821,7 +874,8 @@ export class MahjongGame {
         if (!fan.valid) throw new Error("Rob kong hand contains missing suit tiles");
         // 补杠取消，不产生杠分；按点炮结构由补杠者支付。
         this.recordEvent("win", player.id, robber.id, fan.paymentPerOpponent, "抢杠胡");
-        this.finalizeWin(robber, fan.finalFan);
+        // 抢杠胡算点炮结构：给牌的是被抢杠的那一家，牌就是那张被补的牌。
+        this.finalizeWin(robber, fan, { method: "discard", fromSeat: player.seat, fromTile: tile });
       }
       this.drawnFromKong = false;
       this.afterWinsOrContinue();
@@ -892,9 +946,40 @@ export class MahjongGame {
     );
     assertZeroSum(deltas);
     const nextDealerSeat = this.firstMultiWinDiscarderSeat ?? this.winnerSeats[0] ?? this.dealerSeat;
-    this.result = { reason, deltas, winnerSeats: [...this.winnerSeats], nextDealerSeat };
+    this.result = {
+      reason,
+      deltas,
+      winnerSeats: [...this.winnerSeats],
+      nextDealerSeat,
+      wins: this.winnerSeats.map((seat) => this.winDetail(seat)),
+    };
     this.phase = "finished";
     this.currentPlayerSeat = null;
+  }
+
+  /**
+   * 一位赢家的结算明细。
+   *
+   * 「实收多少 / 几家付」**从账本 `events` 反推**，不另存一份：账本本来就是权威，
+   * 而自摸的付款家数会随「已胡的人不再付」变化（血战后期常常只剩两家付），
+   * 单独存一份迟早会与账本不一致。番型明细则存在玩家身上 —— 它只在结算那一刻算得出来。
+   */
+  private winDetail(seat: number): WinDetail {
+    const player = this.players[seat]!;
+    const payments = this.events.filter((event) => event.type === "win" && event.payee === player.id);
+    return {
+      seat,
+      // 没有 method 只可能是老快照恢复出来的（那时不存这些字段），按自摸兜底。
+      method: player.winMethod ?? ("self-draw" as const),
+      fromSeat: player.winFromSeat,
+      fromTile: player.winFromTile,
+      items: player.winItems.map((item) => ({ ...item })),
+      rawFan: player.winRawFan,
+      finalFan: player.winFan,
+      paymentPerOpponent: player.winPayment,
+      payerCount: payments.length,
+      points: payments.reduce((total, event) => total + event.points, 0),
+    };
   }
 
   /** 服务器权威：向各玩家返回当前允许的操作集合。 */
@@ -957,6 +1042,8 @@ function copyRoundResult(result: RoundResult): RoundResult {
     deltas: result.deltas.map((delta) => ({ ...delta })),
     winnerSeats: [...result.winnerSeats],
     nextDealerSeat: result.nextDealerSeat,
+    // 深拷贝：番型明细是嵌套数组，浅拷贝会让快照与内部状态共享同一份 items。
+    wins: result.wins.map((win) => ({ ...win, items: win.items.map((item) => ({ ...item })) })),
   };
 }
 

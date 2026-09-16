@@ -60,4 +60,42 @@ describe("round reveal", () => {
     expect([...observed].sort()).toEqual([1, 2, 3]);
     expect(reasons).toEqual(new Set(["three-winners", "wall-exhausted"]));
   });
+
+  it("结算载荷带上「胡了什么牌型 / 谁给的牌」", () => {
+    // 这两样只有结算那一刻算得出来（番型在 `finalizeWin` 里算完就不再重算），
+    // 所以必须跟着结算一起下发，否则客户端界面上永远是空的。
+    const kinds = new Set<string>();
+    let sawSelfDraw = 0;
+    let sawDiscard = 0;
+    for (let seed = 1; seed <= 100; seed++) {
+      let game = new MahjongGame(seed, ids);
+      for (let step = 0; game.phase !== "finished" && step < 2000; step++) {
+        const actor = ids.find((id) => game.allowedActions(id).length > 0);
+        game.autoAct(actor!);
+      }
+
+      const settlement = roundSettlement(game);
+      expect(settlement.wins).toHaveLength(game.result!.winnerSeats.length);
+      settlement.wins.forEach((win, index) => {
+        // 与 winnerSeats 同序，客户端才能把「总览」与「明细」对上号。
+        expect(win.seat).toBe(game.result!.winnerSeats[index]);
+        // 番型明细非空（平胡也会有一项），且名字是中文，可以直接显示。
+        expect(win.items.length).toBeGreaterThan(0);
+        for (const item of win.items) kinds.add(item.name);
+        if (win.method === "self-draw") {
+          sawSelfDraw += 1;
+          expect(win.fromSeat).toBeNull();
+        } else {
+          sawDiscard += 1;
+          expect(win.fromSeat).not.toBeNull();
+          expect(win.fromTile).not.toBeNull();
+        }
+      });
+    }
+    // 番型名字确实被带出来了（不是一串 code），而且自摸/点炮两种都出现过。
+    expect(kinds.size).toBeGreaterThan(1);
+    expect([...kinds].every((name) => /[\u4e00-\u9fa5]/.test(name))).toBe(true);
+    expect(sawSelfDraw).toBeGreaterThan(0);
+    expect(sawDiscard).toBeGreaterThan(0);
+  });
 });

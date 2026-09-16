@@ -9,6 +9,8 @@ export {
   type RecordedVoice,
   type VoiceRecorder,
 } from "./browser/voice-recorder.js";
+// 结算文案：两个浏览器客户端与 LayaAir 版共用一份，免得三处各写一套措辞。
+export { fanListText, matchResultText, roundResultText, winLines, winSummaryText } from "./browser/result-text.js";
 export type * from "./protocol.js";
 export type {
   HttpTransport,

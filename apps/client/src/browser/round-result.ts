@@ -1,6 +1,7 @@
 import type { RoomResult, RoomSnapshot } from "../protocol.js";
 import { element } from "./dom.js";
 import { tileChip } from "./tile-chips.js";
+import { winSummaryText } from "./result-text.js";
 
 const dismissed = new WeakSet<RoomResult>();
 
@@ -15,12 +16,27 @@ export function roundResultPanel(result: RoomResult, snapshot: RoomSnapshot | nu
     panel.append(close);
   }
   panel.append(element("h2", { text: `本局结算 · ${result.reason === "three-winners" ? "三家胡牌" : "流局"}` }));
+
+  // 胡了什么牌型、谁给的牌 —— 放在牌面之前：玩家第一眼要找的是这个，
+  // 而四家的牌面是拿来对照的细节。流局时这一段为空，整块不显示。
+  for (const win of result.wins ?? []) {
+    const name = snapshot?.players[win.seat]?.nickname ?? `${win.seat} 号位`;
+    panel.append(element("p", {
+      className: "win-summary",
+      text: `${win.seat} 号位（${name}）　${winSummaryText(win, snapshot)}`,
+    }));
+  }
+
   const players = result.players ?? result.deltas.map((entry, seat) => ({ playerId: entry.playerId, seat, won: result.winnerSeats.includes(seat), hand: [], melds: [] }));
   for (const player of players) {
     const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
     const name = snapshot?.players.find((entry) => entry.userId === player.playerId)?.nickname ?? `玩家${player.seat + 1}`;
     const row = element("div", { className: "result-player" });
-    row.append(element("p", { text: `${name}${player.won ? " · 已胡" : " · 未胡"}　${delta > 0 ? "赢 +" : delta < 0 ? "输 " : ""}${delta} 分` }));
+    // 赢家这一行直接写明「怎么胡的」—— 上面的总览是给整局看的，
+    // 这里是给「这一家的牌是怎么成的」看的，两处都写才不用来回对号。
+    const win = (result.wins ?? []).find((entry) => entry.seat === player.seat);
+    const how = win ? ` · ${winSummaryText(win, snapshot)}` : "";
+    row.append(element("p", { text: `${name}${player.won ? " · 已胡" : " · 未胡"}　${delta > 0 ? "赢 +" : delta < 0 ? "输 " : ""}${delta} 分${how}` }));
     const hand = element("div", { className: "melds" });
     for (const tile of [...player.hand].sort((a, b) => a - b)) hand.append(tileChip(tile));
     row.append(hand);

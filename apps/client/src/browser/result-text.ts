@@ -1,4 +1,5 @@
-import type { MatchResult, RoomResult, RoomSnapshot } from "../protocol.js";
+import type { MatchResult, RoomResult, RoomSnapshot, WinDetail } from "../protocol.js";
+import { tileLabel } from "./tile-label.js";
 
 /**
  * 结算摘要的两段文本。
@@ -43,6 +44,60 @@ export function roundResultText(result: RoomResult, snapshot: RoomSnapshot | nul
     ? `赢家座位 ${result.winnerSeats.join("、")}`
     : "无人胡牌";
   return `上一局（${ROUND_REASON[result.reason] ?? result.reason}）${winners}　${deltas}`;
+}
+
+/** 座位号换昵称；对不上时退化成「X 号位」，绝不返回 undefined。 */
+function seatName(snapshot: RoomSnapshot | null, seat: number): string {
+  return snapshot?.players[seat]?.nickname ?? `${seat} 号位`;
+}
+
+/**
+ * 番型明细的一段话：`对对胡1 + 门清1 + 自摸1 = 3番`。
+ *
+ * 每项都带自己的番数 —— 只写「3 番」的话，玩家看不出这 3 番是怎么来的，
+ * 而这正是他要对照规则表确认的东西。0 番的项（平胡）不写数字，免得像「平胡 0」。
+ */
+export function fanListText(win: WinDetail): string {
+  const parts = win.items.map((item) => (item.fan > 0 ? `${item.name}${item.fan}` : item.name));
+  const capped = win.rawFan > win.finalFan ? `（封顶 ${win.finalFan} 番）` : "";
+  return `${parts.join(" + ") || "平胡"} = ${win.rawFan} 番${capped}`;
+}
+
+/**
+ * 一位赢家的结算说明：**胡了什么牌型、谁给的牌、收了多少分**。
+ *
+ * 三件事按玩家关心的顺序排：先「怎么胡的」（自摸 / 谁点的炮），
+ * 再「什么牌型」（番型明细），最后「收多少」。
+ *
+ * 抢杠胡单独说 —— 那张牌不是打出来的，是被抢的补杠，写成「胡 X 打出的牌」不对。
+ * 判据用番型里的 `ROB_KONG`，不看 `method`（抢杠在引擎里也是 `discard` 结构）。
+ */
+export function winSummaryText(win: WinDetail, snapshot: RoomSnapshot | null): string {
+  const robbed = win.items.some((item) => item.code === "ROB_KONG");
+  const giver = win.fromSeat === null ? "对家" : seatName(snapshot, win.fromSeat);
+  const tile = win.fromTile === null ? null : tileLabel(win.fromTile);
+
+  let source: string;
+  if (win.method === "self-draw") source = "自摸";
+  else if (robbed) source = tile ? `抢杠 ${giver} 的 ${tile}` : `抢杠 ${giver}`;
+  else source = tile ? `胡 ${giver} 打出的 ${tile}` : `胡 ${giver} 打出的牌`;
+
+  // 自摸几家付款会随「已胡的人不再付」变化，所以写实际家数，不写死三家。
+  const payers = win.payerCount > 1 && win.paymentPerOpponent > 0
+    ? `${win.payerCount} 家各付 ${win.paymentPerOpponent} · `
+    : "";
+  return `${source} · ${fanListText(win)} · ${payers}实收 ${win.points} 分`;
+}
+
+/**
+ * 一局里所有赢家的结算说明，按胡牌先后。
+ *
+ * 流局（`wins` 为空）返回空数组 —— 调用方据此决定「要不要显示胡牌那块」，
+ * 而不是显示一行「（无）」。
+ */
+export function winLines(result: RoomResult, snapshot: RoomSnapshot | null): string[] {
+  return (result.wins ?? []).map((win) =>
+    `${win.seat} 号位（${seatName(snapshot, win.seat)}）　${winSummaryText(win, snapshot)}`);
 }
 
 /**

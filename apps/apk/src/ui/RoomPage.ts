@@ -1,4 +1,5 @@
 import type { ApiClient, ClientFlow, MatchState, MatchResult, RoomResult, RoomSnapshot, Screen, Suit, Tile } from "@mianyang-mahjong/client";
+import { winSummaryText } from "@mianyang-mahjong/client";
 import {
   actionAvailable,
   discardableIndexes,
@@ -310,12 +311,21 @@ export class RoomPage {
     this.resultTitle.text = this.lastMatchResult ? "整场结束 · 本局结算" : "本局结算";
     this.resultBody.removeChildren();
     label(this.resultBody, this.lastResult.winnerSeats.length > 0 ? `胡牌：${this.lastResult.winnerSeats.map((seat) => `座位${seat}`).join("、")}` : "流局", 26).pos(0, 0);
+    // 每家胡了什么牌型、谁给的牌 —— 结算界面的第一信息，放在牌面之前。
+    // 与两个浏览器客户端共用一份文案（win-summary 收在 client 包里）。
+    let winY = 32;
+    for (const win of this.lastResult.wins ?? []) {
+      const who = this.snapshot?.players[win.seat]?.nickname ?? `座位${win.seat}`;
+      label(this.resultBody, `${who}：${winSummaryText(win, this.snapshot)}`, 22, { width: 640, wordWrap: true }).pos(0, winY);
+      winY += 46;
+    }
     const nickOf = (userId: string): string => this.snapshot?.players.find((player) => player.userId === userId)?.nickname ?? userId;
     const result = this.lastResult;
     const players: NonNullable<RoomResult["players"]> = result.players ?? result.deltas.map<NonNullable<RoomResult["players"]>[number]>((entry, seat) => ({ playerId: entry.playerId, seat, won: false, hand: [], melds: [] }));
+    const rowsTop = winY + 13;
     players.forEach((player, index) => {
       const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
-      const y = 45 + index * 190;
+      const y = rowsTop + index * 190;
       label(this.resultBody, `${nickOf(player.playerId)}${player.won ? " · 已胡" : ""}  ${delta > 0 ? "赢 " : delta < 0 ? "输 " : ""}${fmtDelta(delta)} 分`, 26, { color: delta >= 0 ? THEME.good : THEME.bad }).pos(0, y);
       const tiles = sortedHand(player.hand);
       tiles.forEach((tile, i) => {

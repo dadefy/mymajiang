@@ -72,10 +72,38 @@ export interface RoomSnapshot {
   result: RoomResult | null;
 }
 
+/**
+ * 一位赢家的明细：胡牌类型与是谁给的牌。形状来自 `packages/rules` 的 `WinDetail`。
+ *
+ * `wins` 是随单局结算一起下发的（服务端 `roundSettlement` 里 `...result` 展开），
+ * 按**胡牌先后**排列 —— 血战到底一局可能有三家胡。流局时为空。
+ */
+export interface WinDetail {
+  seat: number;
+  method: "self-draw" | "discard";
+  /** 点炮（放炮）者的座位；自摸时为 null。 */
+  fromSeat: number | null;
+  /** 胡的那张牌来自别人时给牌值；自摸为 null。 */
+  fromTile: Tile | null;
+  /** 番型明细，名字已是中文（「对对胡」「清一色」「自摸」「平胡」…）。 */
+  items: Array<{ code: string; name: string; fan: number }>;
+  /** 各番相加、未封顶的番数。 */
+  rawFan: number;
+  /** 封顶后的番数（封顶 4 番）。 */
+  finalFan: number;
+  paymentPerOpponent: number;
+  /** 一共几家付了这份分（自摸时可能少于三家 —— 已胡的人不再付）。 */
+  payerCount: number;
+  /** 实收总分。 */
+  points: number;
+}
+
 /** **单局**结算。字段来自 `packages/rules` 的 `RoundResult`。 */
 export interface RoomResult {
   /** 仅在本局结束后下发；旧服务端可能不提供。 */
   players?: Array<{ playerId: string; seat: number; won: boolean; hand: Tile[]; melds: Array<{ kind: "pong" | "kong"; tile: Tile; concealed?: boolean }> }>;
+  /** 每位赢家胡了什么、谁给的牌；旧服务端可能不提供。 */
+  wins?: WinDetail[];
   reason: "three-winners" | "wall-exhausted" | "dissolved";
   deltas: Array<{ playerId: string; delta: number }>;
   winnerSeats: number[];
