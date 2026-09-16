@@ -8,9 +8,14 @@ import type {
   UploadResponse,
   UploadTransport,
 } from "@mianyang-mahjong/client";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "@mianyang-mahjong/client";
 
 export class LayaHttpTransport implements HttpTransport {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    /** 单次请求的超时；到点就按网络错误处理（于是上层会带幂等键重试）。 */
+    private readonly timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ) {}
 
   request<T>(input: HttpRequest): Promise<HttpResponse<T>> {
     return new Promise((resolve, reject) => {
@@ -18,7 +23,12 @@ export class LayaHttpTransport implements HttpTransport {
       const headers = ["Accept", "application/json"];
       if (input.body !== undefined) headers.push("Content-Type", "application/json");
       if (input.token) headers.push("X-Auth-Token", input.token);
+      if (input.idempotencyKey) headers.push("Idempotency-Key", input.idempotencyKey);
+      let settled = false;
       const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         const status = Number(request.http?.status ?? 0);
         if (status === 0) {
           reject(new Error("NETWORK_ERROR"));
@@ -26,6 +36,18 @@ export class LayaHttpTransport implements HttpTransport {
         }
         resolve({ status, body: parseResponse<T>(request.data) });
       };
+      /**
+       * `Laya.HttpRequest` 没有 `timeout` 也没有 `abort`，所以超时只能在 Promise 这一层做：
+       * 到点即失败，迟到的 COMPLETE/ERROR 由 `settled` 忽略。
+       *
+       * 底层请求可能仍在跑完，但那时界面早已按「网络错误」处理并带着**同一个幂等键**重试 ——
+       * 如果原来那次其实成功了，重试会拿回第一次的结果，不会产生第二间房、第二条消息。
+       */
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("REQUEST_TIMEOUT"));
+      }, this.timeoutMs);
       request.once(Laya.Event.COMPLETE, this, finish);
       request.once(Laya.Event.ERROR, this, finish);
       const send = request.send as unknown as (

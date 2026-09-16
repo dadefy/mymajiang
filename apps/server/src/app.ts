@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   AccountService,
@@ -28,6 +28,12 @@ import { adminConsoleHtml } from "./admin-console.js";
 import type { AdminStore } from "./admin-store.js";
 import type { GameStateStore } from "./game-state-store.js";
 import { InMemoryGroupEventBus, type GroupEventBus, type GroupMessageView } from "./group-events.js";
+import {
+  IDEMPOTENCY_HEADER,
+  IdempotencyStore,
+  isValidIdempotencyKey,
+  needsIdempotency,
+} from "./idempotency.js";
 import type { MatchHistoryReader, MatchRoundRecord, MatchSummary } from "./match-history.js";
 import { ScryptPasswordHasher } from "./password-hasher.js";
 import {
@@ -85,6 +91,11 @@ export interface AppDependencies {
   /** 各处额度。做成依赖而不是直接引用常量，测试才能用很小的额度验证接线。 */
   rateLimitRules: RateLimitRules;
   /**
+   * 幂等键的已完成响应。与 `rateLimiter` 一样是核心依赖，
+   * `createInMemoryDependencies` 一定会给。
+   */
+  idempotency: IdempotencyStore;
+  /**
    * 是否挂载浏览器调试客户端。
    *
    * 单端口部署下页面与接口同源，`socketUrl` 留空即可 —— 前端会用
@@ -126,10 +137,44 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     done(null, body);
   });
 
+  /**
+   * 幂等回放：同一个键再次到达时不再执行处理函数，直接返回第一次的响应。
+   *
+   * 放在 `preHandler` 而不是写进每个路由，是为了让「哪些接口需要保护」只存在于一处
+   * （`needsIdempotency`）—— 路由自己不需要知道幂等这件事。
+   */
+  app.addHook("preHandler", async (request, reply) => {
+    if (!needsIdempotency(request.method, request.url)) return;
+    const key = request.headers[IDEMPOTENCY_HEADER];
+    if (!isValidIdempotencyKey(key)) return;
+    const replayed = dependencies.idempotency.lookup(idempotencyScope(request.headers), key);
+    if (!replayed) return;
+    return reply
+      .status(replayed.status)
+      .header("Idempotency-Replayed", "true")
+      .type("application/json")
+      .send(replayed.body);
+  });
+
   app.addHook("onSend", async (request, reply, payload) => {
     if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && reply.statusCode < 400) {
       await dependencies.accountStore.flush?.();
     }
+    return payload;
+  });
+
+  /**
+   * 记住成功的响应，供同一个键的重试复用。
+   *
+   * 只记成功的：失败通常没有产生副作用，让重试真正执行一次才符合预期 ——
+   * 否则「第一次恰好返回 500」会被固化成那个键的永久结果。
+   */
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (reply.statusCode >= 400) return payload;
+    if (!needsIdempotency(request.method, request.url)) return payload;
+    const key = request.headers[IDEMPOTENCY_HEADER];
+    if (!isValidIdempotencyKey(key) || typeof payload !== "string") return payload;
+    dependencies.idempotency.remember(idempotencyScope(request.headers), key, reply.statusCode, payload);
     return payload;
   });
 
@@ -847,6 +892,19 @@ function commitAdminMutation(
   else dependencies.accountStore.saveAccount(account);
 }
 
+/**
+ * 幂等记录的归属：按令牌分桶，避免两个用户的同名键互相回放。
+ *
+ * 用令牌的哈希而不是原文 —— 这份内存要长期持有它，没必要留明文。
+ * 这里**不验签**：验签是各 handler 的事，这一层只负责分桶；验不过的请求会在 handler 里被拒，
+ * 它的幂等记录也就永远不会被写入。
+ */
+function idempotencyScope(headers: Record<string, unknown>): string {
+  const token = authToken(headers as unknown as Parameters<typeof authToken>[0]);
+  if (!token) return "anonymous";
+  return createHash("sha256").update(token).digest("hex").slice(0, 32);
+}
+
 async function requireUser(headers: { "x-auth-token"?: string | undefined; authorization?: string | undefined } | undefined, dependencies: AppDependencies): Promise<UserAccount> {
   const userId = await dependencies.tokens.verifyUserToken(authToken(headers));
   const account = dependencies.accountStore.findAccountById(userId);
@@ -1063,6 +1121,7 @@ export function createInMemoryDependencies(input: {
   createBlobId?: () => string;
   rateLimiter?: RateLimiter;
   rateLimitRules?: RateLimitRules;
+  idempotency?: IdempotencyStore;
   debugClient?: boolean;
   websocketUrl?: string;
 }): AppDependencies & { accountStore: AccountStore } {
@@ -1106,6 +1165,8 @@ export function createInMemoryDependencies(input: {
     // 每个 app 自建一个限流器，测试之间因此互不干扰。
     rateLimiter: input.rateLimiter ?? new RateLimiter(),
     rateLimitRules: input.rateLimitRules ?? RATE_LIMITS,
+    // 与限流器同理：每个 app 自建一份，测试之间互不干扰。
+    idempotency: input.idempotency ?? new IdempotencyStore(),
     ...(input.debugClient ? { debugClient: true } : {}),
     ...(input.websocketUrl ? { websocketUrl: input.websocketUrl } : {}),
   };

@@ -170,8 +170,9 @@ export class ApiClient {
 
   // ---------- 房间 ----------
 
-  createRoom(): Promise<ApiResult<{ roomId: string; status: string }>> {
-    return this.call({ method: "POST", path: "/v1/rooms" });
+  /** 建房。带上幂等键，超时重试才不会建出两间房。 */
+  createRoom(idempotencyKey?: string): Promise<ApiResult<{ roomId: string; status: string }>> {
+    return this.call({ method: "POST", path: "/v1/rooms", ...(idempotencyKey ? { idempotencyKey } : {}) });
   }
 
   room(roomId: string): Promise<ApiResult<RoomSnapshot>> {
@@ -241,20 +242,27 @@ export class ApiClient {
     return this.call({ method: "POST", path: "/v1/uploads", body: input });
   }
 
-  /** 发任意类型的群消息；`content` 对图片/语音来说是对象键。 */
+  /**
+   * 发任意类型的群消息；`content` 对图片/语音来说是对象键。
+   *
+   * `idempotencyKey` 由调用方在**重试时复用同一个值** —— 这是「重复提交不会发出第二条消息」
+   * 的关键（见 `ClientFlow` 的 `retryOnceOnNetworkFailure`）。
+   */
   sendGroupMessage(
     groupId: string,
     body: { type: GroupMessageView["type"]; content: string; voiceSeconds?: number },
+    idempotencyKey?: string,
   ): Promise<ApiResult<GroupMessageView>> {
     return this.call({
       method: "POST",
       path: `/v1/groups/${encodeURIComponent(groupId)}/messages`,
       body,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
     });
   }
 
-  sendGroupText(groupId: string, content: string): Promise<ApiResult<GroupMessageView>> {
-    return this.sendGroupMessage(groupId, { type: "text", content });
+  sendGroupText(groupId: string, content: string, idempotencyKey?: string): Promise<ApiResult<GroupMessageView>> {
+    return this.sendGroupMessage(groupId, { type: "text", content }, idempotencyKey);
   }
 
   recallGroupMessage(groupId: string, messageId: string): Promise<ApiResult<GroupMessageView>> {

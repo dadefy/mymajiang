@@ -8,6 +8,7 @@ import type {
   UploadResponse,
   UploadTransport,
 } from "../transport.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "../transport.js";
 
 /**
  * 浏览器版的三个传输适配器。
@@ -23,6 +24,8 @@ export class FetchHttpTransport implements HttpTransport {
   constructor(
     private readonly baseUrl: string,
     private readonly fetchImpl: typeof fetch = (...args) => globalThis.fetch(...args),
+    /** 单次请求的超时；到点就中断，交给上层按网络错误处理（于是会带幂等键重试）。 */
+    private readonly timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
   ) {}
 
   async request<T>(input: HttpRequest): Promise<HttpResponse<T>> {
@@ -30,17 +33,26 @@ export class FetchHttpTransport implements HttpTransport {
     // 用自定义头承载令牌，而不是标准的 Authorization —— 见 apps/server/src/auth.ts 的
     // authToken 说明：某些部署网关会覆盖/污染 Authorization 头，自定义头才能绕过。
     if (input.token) headers["X-Auth-Token"] = input.token;
+    if (input.idempotencyKey) headers["Idempotency-Key"] = input.idempotencyKey;
     if (input.body !== undefined) headers["Content-Type"] = "application/json";
 
-    const response = await this.fetchImpl(`${this.baseUrl}${input.path}`, {
-      method: input.method,
-      headers,
-      ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
-    });
+    // 浏览器这边能真中断，比 LayaAir 那侧干净。
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}${input.path}`, {
+        method: input.method,
+        headers,
+        signal: controller.signal,
+        ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+      });
 
-    // 204 之类没有响应体，`json()` 会抛，所以先取文本再判断。
-    const text = await response.text();
-    return { status: response.status, body: (text ? JSON.parse(text) : undefined) as T };
+      // 204 之类没有响应体，`json()` 会抛，所以先取文本再判断。
+      const text = await response.text();
+      return { status: response.status, body: (text ? JSON.parse(text) : undefined) as T };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

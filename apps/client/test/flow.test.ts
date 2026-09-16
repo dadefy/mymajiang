@@ -467,4 +467,75 @@ describe("ClientFlow", () => {
     // 页面没变，也不会把消息贴进不存在的列表里。
     expect(flow.current.name).toBe("home");
   });
+
+  it("建房遇到网络错误会重试一次，两次用的是同一个幂等键", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    http.requests.length = 0;
+
+    // 第一次抛异常（弱网下丢了响应），第二次成功。先注册的先匹配。
+    let attempt = 0;
+    http.on(
+      (request) => request.method === "POST" && request.path === "/v1/rooms",
+      () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("socket hang up");
+        return { status: 201, body: { roomId: "room-1", status: "waiting" } };
+      },
+    );
+    stubRoom(http, "room-1");
+
+    await flow.createRoom();
+
+    const calls = http.requests.filter((request) => request.path === "/v1/rooms");
+    expect(calls).toHaveLength(2);
+    // 关键在这里：重试复用同一个键，服务端才认得出「这是同一次操作」，
+    // 否则它会把重试当成新请求，建出两间房。
+    expect(calls[0]!.idempotencyKey).toBeDefined();
+    expect(calls[1]!.idempotencyKey).toBe(calls[0]!.idempotencyKey);
+    expect(flow.current).toMatchObject({ name: "room", roomId: "room-1" });
+  });
+
+  it("业务错误不重试（重试也不会变好）", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    http.requests.length = 0;
+    http.onJson("POST", "/v1/rooms", 409, { code: "DOMAIN_CONFLICT" });
+
+    await flow.createRoom();
+
+    expect(http.requests.filter((request) => request.path === "/v1/rooms")).toHaveLength(1);
+    expect(flow.current).toMatchObject({ name: "home" });
+  });
+
+  it("发消息遇到网络错误会重试一次，并且只贴出一条", async () => {
+    const { flow, http } = await chatWith();
+    http.requests.length = 0;
+
+    let attempt = 0;
+    http.on(
+      (request) => request.method === "POST" && request.path === "/v1/groups/g1/messages",
+      () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("timeout");
+        return { status: 201, body: groupMessage("m7") };
+      },
+    );
+
+    await flow.sendText("会重试");
+
+    const calls = http.requests.filter((request) => request.path === "/v1/groups/g1/messages");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.idempotencyKey).toBe(calls[0]!.idempotencyKey);
+
+    const screen = flow.current;
+    expect(screen.name).toBe("chat");
+    if (screen.name !== "chat") return;
+    // 第二次的返回值贴进来只有一条。
+    expect(screen.messages.filter((message) => message.messageId === "m7")).toHaveLength(1);
+  });
 });

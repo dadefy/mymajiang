@@ -1373,6 +1373,134 @@ describe("server API", () => {
     expect(asMember.json()).toMatchObject({ role: "member" });
   });
 
+  it("幂等键：同一个键重复发消息只落一条，第二次回放第一次的响应", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "群主庚");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "幂等群" },
+    });
+    const group = created.json();
+    const key = "op-message-abcdefghijkl";
+
+    const send = () =>
+      app.inject({
+        method: "POST",
+        url: `/v1/groups/${group.groupId}/messages`,
+        headers: { authorization: `Bearer ${owner.token}`, "idempotency-key": key },
+        payload: { type: "text", content: "只该有一条" },
+      });
+
+    const first = await send();
+    const second = await send();
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    // 第二次是回放，不是新执行。
+    expect(second.headers["idempotency-replayed"]).toBe("true");
+    expect(second.json().messageId).toBe(first.json().messageId);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    expect(listed.json().messages).toHaveLength(1);
+  });
+
+  it("不带幂等键时两次提交就是两条（原有语义不变）", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "群主辛");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "普通群" },
+    });
+    const group = created.json();
+
+    for (let index = 0; index < 2; index += 1) {
+      await app.inject({
+        method: "POST",
+        url: `/v1/groups/${group.groupId}/messages`,
+        headers: { authorization: `Bearer ${owner.token}` },
+        payload: { type: "text", content: "各是一条" },
+      });
+    }
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    expect(listed.json().messages).toHaveLength(2);
+  });
+
+  it("幂等键按用户分桶：两个人用同一个键互不影响", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "群主壬");
+    const member = await createBetaUser(app, dependencies, "群员癸");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "同键群" },
+    });
+    const group = created.json();
+    await app.inject({
+      method: "POST",
+      url: "/v1/groups/join",
+      headers: { authorization: `Bearer ${member.token}` },
+      payload: { groupNo: group.groupNo },
+    });
+
+    const key = "op-shared-abcdefghijkl";
+    for (const token of [owner.token, member.token]) {
+      const response = await app.inject({
+        method: "POST",
+        url: `/v1/groups/${group.groupId}/messages`,
+        headers: { authorization: `Bearer ${token}`, "idempotency-key": key },
+        payload: { type: "text", content: "各自的一条" },
+      });
+      expect(response.statusCode).toBe(201);
+      expect(response.headers["idempotency-replayed"]).toBeUndefined();
+    }
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}/messages`,
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    expect(listed.json().messages).toHaveLength(2);
+  });
+
+  it("幂等键：管理员重复提交同一笔调分只扣一次", async () => {
+    const { app, dependencies } = fixture();
+    const user = await createBetaUser(app, dependencies, "被扣分的");
+    const adminToken = await dependencies.tokens.issueAdminToken("developer", "super_admin");
+    const key = "op-points-abcdefghijkl";
+
+    const adjust = () =>
+      app.inject({
+        method: "POST",
+        url: `/v1/admin/users/${user.userId}/points`,
+        headers: { authorization: `Bearer ${adminToken}`, "idempotency-key": key },
+        payload: { delta: -100, reason: "重复提交测试" },
+      });
+
+    const first = await adjust();
+    const second = await adjust();
+
+    expect(first.statusCode).toBe(201);
+    expect(second.headers["idempotency-replayed"]).toBe("true");
+    // 同一个账目 id 说明第二次没有真的再扣一笔。
+    expect(second.json().ledgerId).toBe(first.json().ledgerId);
+    // createBetaUser 先发了 1000 分，扣掉 100 之后应当只剩 900。
+    expect(dependencies.accountStore.findAccountById(user.userId)?.points).toBe(900);
+  });
+
   it("supports group listing, inviting friends, leaving and dissolving", async () => {
     const { app, dependencies, tokens } = fixture();
     const owner = await createBetaUser(app, dependencies, "群主甲");

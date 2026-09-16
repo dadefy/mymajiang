@@ -12,6 +12,13 @@ export interface HttpRequest {
   body?: unknown;
   /** Bearer 令牌；未登录时省略。 */
   token?: string;
+  /**
+   * 幂等键：同一个键重复提交，服务端只会执行一次（第二次回放第一次的响应）。
+   *
+   * 只在「重复会产生额外副作用」的接口上有意义（建房、建群、发消息、调分、签发密钥）。
+   * 由 `ClientFlow` 在重试时**复用同一个键**，所以重试不会造成第二间房、第二条消息。
+   */
+  idempotencyKey?: string;
 }
 
 export interface HttpResponse<T = unknown> {
@@ -22,6 +29,14 @@ export interface HttpResponse<T = unknown> {
 export interface HttpTransport {
   request<T = unknown>(request: HttpRequest): Promise<HttpResponse<T>>;
 }
+
+/**
+ * 单次请求的默认超时。
+ *
+ * 没有超时的话，弱网下请求会一直挂着，界面永远停在「处理中」，而且**重试永远不会触发**
+ * —— 幂等键也就没机会发挥作用。所以超时是「弱网重试」的前半段，两者配套。
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
  * 一次直传请求。

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BrowserSocketTransportFactory, FetchHttpTransport } from "../src/browser/transports.js";
 
 interface RecordedRequest {
@@ -174,5 +174,39 @@ describe("BrowserSocketTransportFactory", () => {
 
     transport.close();
     expect(() => transport.send({ type: "start" })).toThrow("not connected");
+  });
+
+  it("带上幂等键时会发出 Idempotency-Key 头", async () => {
+    const { impl, requests } = fakeFetch({ status: 201, text: '{"roomId":"room-1"}' });
+    const transport = new FetchHttpTransport("http://127.0.0.1:3000", impl);
+
+    await transport.request({ method: "POST", path: "/v1/rooms", idempotencyKey: "op-mfk3n-abcdefghij" });
+
+    expect(requests[0]!.headers["Idempotency-Key"]).toBe("op-mfk3n-abcdefghij");
+  });
+
+  it("没带幂等键时不会发出这个头", async () => {
+    const { impl, requests } = fakeFetch({ status: 200, text: "{}" });
+    const transport = new FetchHttpTransport("http://127.0.0.1:3000", impl);
+
+    await transport.request({ method: "GET", path: "/v1/groups" });
+
+    expect(requests[0]!.headers["Idempotency-Key"]).toBeUndefined();
+  });
+
+  it("请求超时会中断，交给上层按网络错误处理（于是会带同一个幂等键重试）", async () => {
+    vi.useFakeTimers();
+    // 永远不返回的 fetch，但响应 abort —— 真实 fetch 就是这个行为。
+    const hanging = ((_url: string, init: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as unknown as typeof fetch;
+    const transport = new FetchHttpTransport("http://127.0.0.1:3000", hanging, 1000);
+
+    const pending = transport.request({ method: "GET", path: "/v1/groups" });
+    const assertion = expect(pending).rejects.toThrow("aborted");
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+    vi.useRealTimers();
   });
 });

@@ -12,7 +12,12 @@ import type {
   Suit,
   Tile,
 } from "./protocol.js";
-import type { SocketTransportFactory, UploadTransport } from "./transport.js";
+import type {
+  SocketTransportFactory,
+  UploadRequest,
+  UploadResponse,
+  UploadTransport,
+} from "./transport.js";
 
 /** 群聊一次拉多少条历史。服务端上限 200，这里取一个够用又不会一次拉太多的值。 */
 const CHAT_PAGE_SIZE = 50;
@@ -24,6 +29,31 @@ const CHAT_PAGE_SIZE = 50;
  * 权威判定仍在服务端（它会按内容类型与真实字节数再拒一遍）。
  */
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
+/**
+ * 生成一个幂等键。
+ *
+ * 不依赖 `crypto.randomUUID`：LayaAir 的原生运行时不一定提供它。时间戳 + 随机段就够了 ——
+ * 这个键只需要在「同一个用户的一次操作及其重试」之间唯一，不承担安全职责。
+ * 形状要满足服务端的校验：16–128 位、只含 URL 安全字符。
+ */
+function newIdempotencyKey(): string {
+  return `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+/**
+ * 网络错误时重试一次。
+ *
+ * **两次用的是同一个幂等键**，所以即使第一次其实已经到达并执行了（只是响应慢或丢了），
+ * 重试也只会拿回那一次的结果，不会多建一间房、多发一条消息。
+ *
+ * 只重试网络错误：4xx/5xx 是服务端已经给出的判断，原样重试没有意义。
+ */
+async function retryOnceOnNetworkFailure<T>(operation: () => Promise<ApiResult<T>>): Promise<ApiResult<T>> {
+  const first = await operation();
+  if (first.ok || first.error.kind !== "network") return first;
+  return operation();
+}
 
 /**
  * 界面只需要渲染的页面，字段全是纯数据：
@@ -201,7 +231,9 @@ export class ClientFlow {
   async createRoom(): Promise<void> {
     if (this.screen.name !== "home") return;
     this.set({ ...this.screen, busy: true });
-    const created = await this.api.createRoom();
+    // 建房不是幂等的：每调一次多一个房间。带上键，超时重试才不会建出两间。
+    const idempotencyKey = newIdempotencyKey();
+    const created = await retryOnceOnNetworkFailure(() => this.api.createRoom(idempotencyKey));
     if (!created.ok) {
       this.set({ ...this.screen, busy: false, error: describe(created.error) });
       return;
@@ -324,7 +356,9 @@ export class ClientFlow {
     if (text.length === 0) return;
     const groupId = this.screen.groupId;
     this.set({ ...this.screen, sending: true, error: undefined });
-    const sent = await this.api.sendGroupText(groupId, text);
+    // 发消息不是幂等的：多到达一次就多一条。重试复用同一个键。
+    const idempotencyKey = newIdempotencyKey();
+    const sent = await retryOnceOnNetworkFailure(() => this.api.sendGroupText(groupId, text, idempotencyKey));
     if (this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
     if (!sent.ok) {
       this.set({ ...this.screen, sending: false, error: describe(sent.error) });
@@ -608,22 +642,40 @@ export class ClientFlow {
   ): Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }> {
     const ticket = await this.api.createUpload({ kind: "image", contentType, byteSize: bytes.byteLength });
     if (!ticket.ok) return { ok: false, error: describeUploadFailure(ticket.error) };
+    let uploaded: UploadResponse;
     try {
-      const uploaded = await this.uploads.put({
+      uploaded = await this.putWithRetry({
         url: ticket.value.uploadUrl,
         method: ticket.value.method,
         headers: ticket.value.headers,
         body: bytes,
       });
-      if (uploaded.status < 200 || uploaded.status >= 300) {
-        return { ok: false, error: `图片上传失败（${uploaded.status}）` };
-      }
     } catch {
       return { ok: false, error: "图片上传失败，请检查网络后重试" };
     }
-    const message = await this.api.sendGroupMessage(groupId, { type: "image", content: ticket.value.objectKey });
+    if (uploaded.status < 200 || uploaded.status >= 300) {
+      return { ok: false, error: `图片上传失败（${uploaded.status}）` };
+    }
+    // 发消息这步才是「多到达一次就多一条」的那一步，必须带键重试。
+    const idempotencyKey = newIdempotencyKey();
+    const message = await retryOnceOnNetworkFailure(() =>
+      this.api.sendGroupMessage(groupId, { type: "image", content: ticket.value.objectKey }, idempotencyKey));
     if (!message.ok) return { ok: false, error: describe(message.error) };
     return { ok: true, value: message.value };
+  }
+
+  /**
+   * 直传一次，网络抖动时再试一次。
+   *
+   * PUT 到同一个签名地址是**覆盖**语义（同一个对象键），重试不会产生第二个对象，
+   * 所以这里可以放心重试，不像发消息那样必须靠幂等键。
+   */
+  private async putWithRetry(request: UploadRequest): Promise<UploadResponse> {
+    try {
+      return await this.uploads.put(request);
+    } catch {
+      return this.uploads.put(request);
+    }
   }
 
   private set(screen: Screen): void {
