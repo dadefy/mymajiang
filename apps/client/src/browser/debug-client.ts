@@ -4,6 +4,7 @@ import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } fro
 import { actionButtons, runAction } from "./action-buttons.js";
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
+import { matchResultText } from "./result-text.js";
 import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
 import { meldBox } from "./tile-chips.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
@@ -60,6 +61,33 @@ mediaCache.onChange(() => repaintMessages?.());
 
 /** 手动换三张时已选中的牌。 */
 let selected: Tile[] = [];
+
+/** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
+let lastHandSize: number | null = null;
+
+/**
+ * 刚摸到的那张牌，**只用于显示**，不参与任何判断。
+ *
+ * 判断办法：这一帧的手牌比上一帧多一张。出牌会让手牌变少、碰与杠也会变少，
+ * 所以「多一张」只可能是摸牌。出牌那一刻自动清空。
+ * 刚进房或刚重连时是 null —— 那一帧没有「上一帧」可比，不猜。
+ */
+let drawnTile: Tile | null = null;
+
+function trackDrawnTile(hand: readonly Tile[]): void {
+  if (lastHandSize !== null && hand.length === lastHandSize + 1) {
+    drawnTile = hand[hand.length - 1] ?? null;
+  } else if (hand.length !== lastHandSize) {
+    drawnTile = null;
+  }
+  lastHandSize = hand.length;
+}
+
+/** 离开行牌阶段就把「刚摸牌」清掉 —— 换三张与定缺是发牌，不是摸牌。 */
+function forgetDrawnTile(): void {
+  drawnTile = null;
+  lastHandSize = null;
+}
 
 // ---------- 渲染 ----------
 
@@ -410,6 +438,11 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
 
   if (screen.match) app.append(renderTable(screen.match, screen.actions, screen.snapshot));
   if (screen.lastResult) app.append(renderResult(screen.lastResult));
+  // 整场结算与单局结算是两个形状，分开渲染（见 result-text.ts）。
+  if (screen.lastMatchResult) {
+    app.append(panel("整场结束", element("p", { className: "turn other", text:
+      matchResultText(screen.lastMatchResult, screen.snapshot) })));
+  }
 }
 
 /** 顶部那行大字：轮到谁。 */
@@ -464,8 +497,10 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
   for (const player of match.players) {
     const isMe = player.seat === match.seat;
     const relation = isMe ? "我" : (ring.includes(player.seat) ? relationLabel(ring, ring.indexOf(player.seat)) : "已胡");
+    const holdingExtra = player.handSize % 3 === 2;
     const detail = [
       `手牌 ${player.handSize} 张`,
+      ...(player.seat === match.currentPlayerSeat && match.phase === "playing" && holdingExtra ? ["待出牌"] : []),
       `缺 ${player.missingSuit ? SUIT_LABEL[player.missingSuit] : "未定"}`,
       ...(isMe ? [] : [`已出 ${player.discards.map(tileLabel).join(" ") || "无"}`]),
       ...(player.won ? ["已胡"] : []),
@@ -485,12 +520,19 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
   }
 
   // 我的手牌：换三张阶段可点选，行牌阶段点击即出牌。按牌面排好，好找牌。
+  // 刚摸到的那张单独标出来 —— 摸牌是服务端自动做的，牌桌上唯一的痕迹就是
+  // 「手里多了一张」，不标出来会像凭空多一张。
+  if (match.phase === "playing") trackDrawnTile(match.hand);
+  else forgetDrawnTile();
   const hand = element("div", { className: "hand" });
+  let drawnMarked = false;
   for (const tile of sortedHand(match.hand)) {
     const chosen = selected.includes(tile);
+    const isDrawn = !drawnMarked && drawnTile !== null && tile === drawnTile;
+    if (isDrawn) drawnMarked = true;
     const node = element("button", {
       text: tileLabel(tile),
-      className: `tile${chosen ? " chosen" : ""}`,
+      className: `tile${chosen ? " chosen" : ""}${isDrawn ? " drawn" : ""}`,
       onClick: () => {
         if (match.phase === "swapping") {
           // 选满三张就替换最早选的那张，避免用户点第四张时不知所措。

@@ -136,6 +136,9 @@ export function multiClientHtml(options: DebugClientOptions): string {
     button.tile { background: #f4f1e6; color: #1d1a14; font-weight: bold; padding: 9px 7px; min-width: 46px; }
     button.tile.chosen { background: #d8a13a; }
     button.tile.missing-suit { opacity: .45; box-shadow: inset 0 0 0 2px #a83434; }
+    /* 刚摸到的那张：真牌桌上它就插在手里、等着被打出去。给它一条金边，
+       不然「手里凭空多一张」看着像画错了。 */
+    button.tile.drawn { box-shadow: 0 0 0 2px #d8a13a; }
     input.text { background: #0d1613; color: inherit; border: 1px solid #2d5347; border-radius: 7px; padding: 8px 10px; font: inherit; min-width: 300px; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
     .error { color: #ff9b9b; font-size: 13px; margin: 6px 0; }
@@ -159,8 +162,12 @@ export function multiClientHtml(options: DebugClientOptions): string {
     .seat-card { background: #17241f; border: 1px solid #24443a; border-radius: 10px; padding: 10px; }
     .seat-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; margin-bottom: 6px; }
     .seat-head .who { color: #b9d6c9; }
+    /* 手牌张数：牌桌上最基本的信息，用等宽数字免得每次跳动都重排。 */
+    .count { color: #8fb3a5; font-variant-numeric: tabular-nums; }
     .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #24443a; color: #cfe9de; }
     .tag.acting { background: #d8a13a; color: #241a05; font-weight: bold; }
+    /* 「刚摸牌」与「待出牌」分开：前者是这一帧真的摸了一张，后者只是手上多一张。 */
+    .tag.drawn { background: #1d6b4a; color: #eafaf2; font-weight: bold; }
     .tag.won { background: #4a2b2b; color: #ffc9c9; }
 
     .hand { display: flex; gap: 5px; flex-wrap: wrap; margin: 8px 0; }

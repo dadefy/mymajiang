@@ -6,6 +6,7 @@ import type {
   GroupMessagePage,
   GroupMessageView,
   GroupSummary,
+  MatchResult,
   MatchState,
   MatchSummary,
   RoomResult,
@@ -100,8 +101,16 @@ export type Screen =
       /** 当前这一局；还没开局或还没收到第一帧时为空。 */
       match: MatchState | null;
       actions: string[];
-      /** 最近一局的结算，弹窗用。 */
+      /** 最近一局的结算，弹窗用。**只有单局**形状（整场的见 `lastMatchResult`）。 */
       lastResult: RoomResult | null;
+      /**
+       * 整场结算（打满 8 局或中途解散）。
+       *
+       * 必须与 `lastResult` 分开：两者在服务端来自不同的包（规则包 / 域包），
+       * 字段完全不同（`deltas` vs `rawDeltas` + `accountDeltas`）。
+       * 之前合用一个字段，`match-finished` 一来，渲染层按单局去读就抛异常。
+       */
+      lastMatchResult: MatchResult | null;
       busy: boolean;
       notice?: string | undefined;
     }
@@ -429,6 +438,15 @@ export class ClientFlow {
       return;
     }
     this.socket.send({ type: "start" });
+    // 开局后立刻拉一次快照：`status` 要变成 "playing"。
+    //
+    // 不拉的话快照会永远停在 "waiting"（它只在进房、准备时刷新过），
+    // 而渲染层是**按快照状态决定显示准备按钮还是对局操作**的 ——
+    // 结果整局都停在「我准备好了 / 开始对局」那一屏，
+    // 碰、杠、胡、过这些按钮永远没有机会出现（只在 claiming 阶段下发）。
+    //
+    // 与 `setReady` 一样是 `await` 的：调用方（含测试）拿到返回时快照已经更新。
+    await this.refreshRoom();
   }
 
   // ---------- 行牌：都走实时通道 ----------
@@ -701,7 +719,7 @@ export class ClientFlow {
     this.closeSocket();
     this.earlierCursor = undefined;
     this.roomId = roomId;
-    this.set({ name: "room", roomId, roomNo, snapshot: null, match: null, actions: [], lastResult: null, busy: true });
+    this.set({ name: "room", roomId, roomNo, snapshot: null, match: null, actions: [], lastResult: null, lastMatchResult: null, busy: true });
     const socket = new MatchSocket({ url: this.socketUrl, token, factory: this.sockets });
     socket.on((event) => this.dispatchSocketEvent(event));
     this.socket = socket;
@@ -716,6 +734,7 @@ export class ClientFlow {
       match: null,
       actions: [],
       lastResult: null,
+      lastMatchResult: null,
       busy: false,
       ...(snapshot.ok ? {} : { notice: describe(snapshot.error) }),
     });
@@ -751,8 +770,9 @@ export class ClientFlow {
         return;
       case "match-finished":
         // 打完了就没有「回到这一局」可言了，入口同快照一起失效。
+        // 整场结算单独存 —— 它的形状和单局结算完全不同（见 `lastMatchResult`）。
         this.activeRoom = null;
-        this.set({ ...this.screen, lastResult: event.result, match: null, actions: [] });
+        this.set({ ...this.screen, lastMatchResult: event.result, match: null, actions: [] });
         return;
       case "error":
         // 实时通道的失败也要翻译：它和 REST 一样透传域层的英文原文。

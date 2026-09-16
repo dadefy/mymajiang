@@ -72,11 +72,29 @@ export interface RoomSnapshot {
   result: RoomResult | null;
 }
 
+/** **单局**结算。字段来自 `packages/rules` 的 `RoundResult`。 */
 export interface RoomResult {
   reason: "three-winners" | "wall-exhausted" | "dissolved";
   deltas: Array<{ playerId: string; delta: number }>;
   winnerSeats: number[];
   nextDealerSeat: number;
+}
+
+/**
+ * **整场**结算。字段来自 `packages/domain` 的 `RoomResult` —— 与上面那个**同名但形状不同**。
+ *
+ * 两者是在不同层次各自命名的（一个在规则包、一个在域包），到了协议层撞在了一起。
+ * 之前协议层只有单局那一个形状，`match-finished` 送来的整场结果被当成单局读，
+ * `result.deltas` 取到 undefined —— 三个客户端**都在整场结束时抛异常**：
+ * `/multi` 的中央区、`/debug` 的结算块、`/apk` 的结算浮层一起废掉。
+ * 所以这里必须分成两个类型，由编译器挡住误用。
+ */
+export interface MatchResult {
+  roomId: string;
+  completedRounds: number;
+  reason: "completed" | "dissolved";
+  rawDeltas: Array<{ playerId: string; delta: number }>;
+  accountDeltas: Array<{ playerId: string; delta: number }>;
 }
 
 export interface MatchPlayerView {
@@ -230,7 +248,7 @@ export type ServerFrame =
   | { type: "game"; state: MatchState }
   | { type: "actions"; actions: string[] }
   | { type: "round-finished"; roundNumber: number; result: RoomResult }
-  | { type: "match-finished"; result: RoomResult }
+  | { type: "match-finished"; result: MatchResult }
   | { type: "group-subscribed"; groupId: string }
   | { type: "group-unsubscribed"; groupId: string }
   | { type: "group-message"; groupId: string; message: GroupMessageView }

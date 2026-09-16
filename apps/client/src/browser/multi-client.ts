@@ -4,6 +4,7 @@ import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js"
 import { button, element } from "./dom.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
+import { matchResultText, roundResultText } from "./result-text.js";
 import { nicknameOf, resolveSeat, sortedHand } from "./table-order.js";
 import { discardGroups, freshDiscardSeat } from "./tile-view.js";
 import { meldBox, tileChip } from "./tile-chips.js";
@@ -58,12 +59,30 @@ interface SeatState {
   nickname: string;
   /** 换三张已选中的牌。每家独立，所以不能像单人版那样放模块级变量。 */
   selected: Tile[];
+  /** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
+  lastHandSize: number | null;
+  /**
+   * 刚摸到的那张牌，**只用于显示**，不参与任何判断。
+   *
+   * 识别办法：这一帧的手牌比上一帧多一张。出牌会让手牌变少、碰与杠也会变少，
+   * 所以「多一张」只可能是摸牌。出牌那一刻（手牌变少）自动清空。
+   * 刚连上时是 null —— 那一帧没有「上一帧」可比，别猜。
+   */
+  drawnTile: Tile | null;
 }
 
 function makeSeat(slot: number): SeatState {
   const api = new ApiClient(new FetchHttpTransport(runtime.apiBaseUrl));
   const flow = new ClientFlow(api, new BrowserSocketTransportFactory(), runtime.socketUrl, new FetchUploadTransport());
-  const seat: SeatState = { slot, flow, userId: null, nickname: `玩家 ${slot + 1}`, selected: [] };
+  const seat: SeatState = {
+    slot,
+    flow,
+    userId: null,
+    nickname: `玩家 ${slot + 1}`,
+    selected: [],
+    lastHandSize: null,
+    drawnTile: null,
+  };
   flow.onChange((screen) => {
     // 记下「我是谁」：服务端分配的座位号与连接之间没有别的对应关系，
     // 只能靠 userId 反查房间成员列表的下标。
@@ -76,6 +95,18 @@ function makeSeat(slot: number): SeatState {
     // 一进换三张阶段就是选中状态，看着像「我不记得点过它」。
     if (screen.name === "room" && screen.match?.phase !== "swapping" && seat.selected.length > 0) {
       seat.selected = [];
+    }
+    // 「刚摸牌」：服务端把摸到的牌 push 在手牌末尾，所以多出来的那张就是它。
+    // 只在行牌阶段认 —— 换三张/定缺是发牌，庄家那一手是 14 张，
+    // 不限定阶段的话新一局开头会误报一次「刚摸牌」。
+    const hand = screen.name === "room" && screen.match?.phase === "playing" ? screen.match.hand : undefined;
+    if (hand) {
+      if (seat.lastHandSize !== null && hand.length === seat.lastHandSize + 1) {
+        seat.drawnTile = hand[hand.length - 1] ?? null;
+      } else if (hand.length !== seat.lastHandSize) {
+        seat.drawnTile = null;
+      }
+      seat.lastHandSize = hand.length;
     }
     scheduleRender();
   });
@@ -214,7 +245,12 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
     element("span", { className: "who", text: seat.nickname }),
   );
   if (match) {
-    if (match.currentPlayerSeat === seatNo) head.append(element("span", { className: "tag acting", text: "当前行动" }));
+    // 手牌张数是牌桌上最基本的信息（三家各 13 张、轮到谁手上是 14 张）。
+    head.append(element("span", { className: "count", text: `手牌 ${match.hand.length} 张` }));
+    if (match.phase === "playing" && match.currentPlayerSeat === seatNo) {
+      head.append(element("span", { className: "tag acting", text: "待出牌" }));
+    }
+    if (seat.drawnTile !== null) head.append(element("span", { className: "tag drawn", text: "刚摸牌" }));
     if (match.won) head.append(element("span", { className: "tag won", text: "已胡" }));
     if (match.missingSuit) head.append(element("span", { className: "tag", text: `缺${SUIT_LABEL[match.missingSuit]}` }));
   }
@@ -260,11 +296,17 @@ function handBox(seat: SeatState, match: MatchState): HTMLElement {
     box.append(element("span", { className: "hint", text: match.won ? "已胡，退出轮转" : "没有手牌" }));
     return box;
   }
+  // 刚摸到的那张单独标出来 —— 真牌桌上它就是插在手里、要打出去的那张。
+  // 手牌是排好序的，所以标「同值的任意一张」与标原来那张看不出区别。
+  const drawn = seat.drawnTile;
+  let drawnMarked = false;
   for (const tile of sortedHand(match.hand)) {
     const chosen = seat.selected.includes(tile);
+    const isDrawn = !drawnMarked && drawn !== null && tile === drawn;
+    if (isDrawn) drawnMarked = true;
     const node = element("button", {
       text: tileLabel(tile),
-      className: `tile${chosen ? " chosen" : ""}`,
+      className: `tile${chosen ? " chosen" : ""}${isDrawn ? " drawn" : ""}`,
       onClick: () => onTileClick(seat, match, tile),
     });
     if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
@@ -290,7 +332,15 @@ function opsRow(seat: SeatState, seatNo: number): HTMLElement {
   const room = roomOf(seat);
   if (!room) return row;
 
-  if (room.snapshot?.status === "waiting") {
+  const match = room.match;
+  // 还没开局：准备 / 开始。
+  //
+  // 判据必须包含「没有对局帧」这一条，**不能只看快照状态**：快照只在进房、
+  // 准备时刷新过，若某条路径漏了刷新它就会一直停在 "waiting"，
+  // 于是整局都停在准备按钮上 —— 而碰/杠/胡/过只在 claiming 阶段下发，
+  // 那些按钮就永远没有机会出现（实测就是这么丢的：服务端发了 15 次 peng，页面一个没画）。
+  if (!match) {
+    if (room.snapshot?.status !== "waiting") return row;
     const ready = room.snapshot.players[seatNo]?.ready ?? false;
     row.append(ready
       ? button("取消准备", () => void seat.flow.setReady(false))
@@ -300,9 +350,6 @@ function opsRow(seat: SeatState, seatNo: number): HTMLElement {
     }
     return row;
   }
-
-  const match = room.match;
-  if (!match) return row;
 
   if (match.phase === "swapping") {
     row.append(
@@ -345,8 +392,9 @@ function renderCenter(): void {
     return;
   }
 
+  const drawnTile = seats.find((each) => seatNumberOf(each) === match.currentPlayerSeat)?.drawnTile ?? null;
   centerHost.append(
-    element("div", { className: "banner", text: bannerText(match, snapshot) }),
+    element("div", { className: "banner", text: bannerText(match, snapshot, drawnTile) }),
     element("p", { className: "meta", text:
       `第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)} · 牌墙剩 ${match.tilesLeft} 张` }),
   );
@@ -364,7 +412,13 @@ function renderCenter(): void {
   }
 
   const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each);
-  if (result) centerHost.append(element("p", { className: "hint", text: resultText(result, snapshot) }));
+  if (result) centerHost.append(element("p", { className: "hint", text: roundResultText(result, snapshot) }));
+
+  // 整场结算要与单局的分开渲染 —— 两者字段不同（见 result-text.ts）。
+  const matchResult = seats.map((seat) => roomOf(seat)?.lastMatchResult).find((each) => each);
+  if (matchResult) {
+    centerHost.append(element("p", { className: "banner", text: matchResultText(matchResult, snapshot) }));
+  }
 }
 
 /**
@@ -380,11 +434,14 @@ function discardGrid(match: MatchState, snapshot: RoomSnapshot | null): HTMLElem
   for (const group of discardGroups(match)) {
     const cell = element("div", { className: "discard-cell" });
     const position = SEAT_POSITIONS[group.seat];
+    // 手牌张数与弃牌张数一起给：牌桌上判断「他听没听、还剩几张」全靠这两个数。
+    const handSize = match.players.find((each) => each.seat === group.seat)?.handSize;
     cell.append(element("div", { className: "discard-head" },
       element("b", { text: `${group.seat} 号位` }),
       ...(position ? [element("span", { text: `（${POSITION_LABEL[position]}）` })] : []),
       element("span", { text: nicknameOf(snapshot, group.seat) }),
-      element("span", { text: `${group.tiles.length} 张` }),
+      element("span", { className: "count", text: `手牌 ${handSize ?? "?"} 张` }),
+      element("span", { className: "count", text: `已出 ${group.tiles.length} 张` }),
     ));
 
     const tiles = element("div", { className: "discard-tiles" });
@@ -401,7 +458,7 @@ function discardGrid(match: MatchState, snapshot: RoomSnapshot | null): HTMLElem
   return grid;
 }
 
-function bannerText(match: MatchState, snapshot: RoomSnapshot | null): string {
+function bannerText(match: MatchState, snapshot: RoomSnapshot | null, drawnTile: Tile | null): string {
   if (match.phase === "finished") return "本局已结束";
   // 换三张与定缺是四个人同时做，没有「轮到谁」这回事。
   if (match.phase === "swapping" || match.phase === "missing") {
@@ -414,16 +471,10 @@ function bannerText(match: MatchState, snapshot: RoomSnapshot | null): string {
   // claiming 阶段 currentPlayerSeat 仍是刚出牌的那个人，但他并不在等自己 ——
   // 这里不能说「轮到他出牌」，要说清大家在等什么。
   if (match.phase === "claiming") return `${who} 刚打出一张，其余人可以考虑碰 / 杠 / 胡`;
-  return `轮到 ${who} 出牌`;
-}
-
-function resultText(result: RoomResult, snapshot: RoomSnapshot | null): string {
-  const deltas = result.deltas.map((delta) => {
-    const index = snapshot?.players.findIndex((player) => player.userId === delta.playerId) ?? -1;
-    const who = index >= 0 ? `${index} 号位` : delta.playerId.slice(-4);
-    return `${who} ${delta.delta >= 0 ? "+" : ""}${delta.delta}`;
-  });
-  return `上一局（${result.reason}）赢家座位 ${result.winnerSeats.join("、") || "无"}　${deltas.join("　")}`;
+  // 摸牌是服务端自动做的，牌桌上唯一的痕迹就是「手里多了一张」——
+  // 所以这里直接把它报出来，否则看起来像牌凭空多了一张。
+  const drew = drawnTile !== null ? ` · 刚摸到 ${tileLabel(drawnTile)}` : "";
+  return `轮到 ${who} 出牌${drew}`;
 }
 
 function autoAll(kind: "swap" | "missing"): void {
@@ -563,6 +614,8 @@ function resetAll(): void {
     seat.selected = [];
     seat.userId = null;
     seat.nickname = `玩家 ${seat.slot + 1}`;
+    seat.lastHandSize = null;
+    seat.drawnTile = null;
   }
   setupPanel.hidden = false;
   boardPanel.hidden = true;

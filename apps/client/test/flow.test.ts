@@ -711,6 +711,54 @@ describe("ClientFlow", () => {
     expect(flow.current).toMatchObject({ name: "room", notice: "还有玩家没有准备" });
   });
 
+  it("开局之后立刻重拉快照 —— 否则整局都停在准备按钮上，碰/杠永远不出现", async () => {
+    // 实测过的缺陷：快照只在进房与准备时刷新，开局后它仍是 "waiting"，
+    // 而渲染层按快照状态决定「显示准备按钮还是对局操作」——
+    // 于是碰/杠/胡/过这些只在 claiming 阶段下发的按钮永远没有机会出现
+    // （服务端发了 15 次 peng，页面上一个都没画出来）。
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+
+    let status = "waiting";
+    http.on(
+      (request) => request.method === "POST" && request.path === "/v1/rooms",
+      () => ({ status: 201, body: { roomId: "room-1", status: "waiting" } }),
+    );
+    http.on(
+      (request) => request.method === "GET" && request.path === "/v1/rooms/room-1",
+      () => ({
+        status: 200,
+        body: {
+          roomId: "room-1",
+          ruleVersion: "MIANYANG_XZ_1_0",
+          status,
+          ownerId: SESSION.userId,
+          completedRounds: 0,
+          players: [{
+            userId: SESSION.userId, nickname: "张三", points: 2000, ready: true,
+            connected: true, disconnectedAt: null, reconnectDeadline: null,
+          }],
+          result: null,
+        },
+      }),
+    );
+
+    await flow.createRoom();
+    const before = flow.current;
+    expect(before.name === "room" ? before.snapshot?.status : null).toBe("waiting");
+
+    status = "playing"; // 服务端那边已经开局
+    await flow.startMatch();
+
+    const after = flow.current;
+    expect(after.name).toBe("room");
+    if (after.name !== "room") return;
+    // 不重拉的话这里仍是 "waiting" —— 整局都会看着像还没开局。
+    expect(after.snapshot?.status).toBe("playing");
+  });
+
   it("房间规则类的拒绝要翻成中文，不能把英文原文甩给用户", async () => {
     // 域层抛的是英文句子（服务端把 message 原样透传），直接显示会让人一头雾水。
     const cases: Array<[string, string]> = [

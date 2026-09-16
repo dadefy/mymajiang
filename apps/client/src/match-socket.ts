@@ -1,4 +1,4 @@
-import type { ClientFrame, GroupMessageView, MatchState, RoomResult, ServerFrame } from "./protocol.js";
+import type { ClientFrame, GroupMessageView, MatchResult, MatchState, RoomResult, ServerFrame } from "./protocol.js";
 import type { SocketTransport, SocketTransportFactory } from "./transport.js";
 
 /** 连接断开后的重连节奏：0.5s、1s、2s、4s……封顶 8s。 */
@@ -12,7 +12,7 @@ export type SocketEvent =
   | { kind: "actions"; actions: string[] }
   | { kind: "room"; status: string; playerCount: number }
   | { kind: "round-finished"; roundNumber: number; result: RoomResult }
-  | { kind: "match-finished"; result: RoomResult }
+  | { kind: "match-finished"; result: MatchResult }
   | { kind: "group-message"; groupId: string; message: GroupMessageView }
   | { kind: "group-message-recalled"; groupId: string; message: GroupMessageView }
   | { kind: "group-updated"; groupId: string; notice?: string; allMuted?: boolean }
