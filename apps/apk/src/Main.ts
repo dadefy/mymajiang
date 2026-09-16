@@ -1,6 +1,6 @@
 import { ApiClient, ClientFlow } from "@mianyang-mahjong/client";
 import { runtimeConfig } from "./runtime-config.js";
-import { LayaHttpTransport, LayaSocketTransportFactory } from "./laya-transports.js";
+import { LayaHttpTransport, LayaSocketTransportFactory, LayaUploadTransport } from "./laya-transports.js";
 import { ScreenHost } from "./ui/ScreenHost.js";
 import { DESIGN_HEIGHT, DESIGN_WIDTH, THEME } from "./ui/widgets.js";
 
@@ -10,7 +10,8 @@ const { regClass, property } = Laya;
  * 游戏入口：搭建传输层 → 客户端业务核心 → 页面渲染。
  *
  * 业务逻辑全部在 @mianyang-mahjong/client 里（不依赖引擎）；
- * 这里只做三件事：配置舞台、实例化两个 LayaAir 适配器、把 Screen 交给 ScreenHost。
+ * 这里只做三件事：配置舞台、实例化三个 LayaAir 适配器（HTTP / 实时通道 / 图片直传）、
+ * 把 Screen 交给 ScreenHost。
  */
 @regClass()
 export class Main extends Laya.Script {
@@ -19,7 +20,7 @@ export class Main extends Laya.Script {
         this.setupStage();
         const config = runtimeConfig();
         const api = new ApiClient(new LayaHttpTransport(config.apiBaseUrl));
-        const flow = new ClientFlow(api, new LayaSocketTransportFactory(), config.socketUrl);
+        const flow = new ClientFlow(api, new LayaSocketTransportFactory(), config.socketUrl, new LayaUploadTransport());
         const host = new ScreenHost(flow, api, Laya.stage);
         flow.onChange((screen) => host.render(screen));
         host.render(flow.current);

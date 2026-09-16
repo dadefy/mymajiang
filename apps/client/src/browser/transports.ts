@@ -4,16 +4,19 @@ import type {
   HttpTransport,
   SocketTransport,
   SocketTransportFactory,
+  UploadRequest,
+  UploadResponse,
+  UploadTransport,
 } from "../transport.js";
 
 /**
- * 浏览器版的两个传输适配器。
+ * 浏览器版的三个传输适配器。
  *
  * 与 LayaAir 那份（`apps/apk/src/laya-transports.ts`）是同一个接口的两套实现，
  * 业务层（`ApiClient` / `MatchSocket` / `ClientFlow`）两边完全共用 —— 这正是当初
- * 把「与运行环境的缝」收敛成两个接口的目的。
+ * 把「与运行环境的缝」收敛成接口的目的。
  *
- * 两个实现都支持注入底层实现（`fetch` / `WebSocket`），这样在 Node 里能塞假对象做单元测试。
+ * 三个实现都支持注入底层实现（`fetch` / `WebSocket`），这样在 Node 里能塞假对象做单元测试。
  */
 
 export class FetchHttpTransport implements HttpTransport {
@@ -38,6 +41,30 @@ export class FetchHttpTransport implements HttpTransport {
     // 204 之类没有响应体，`json()` 会抛，所以先取文本再判断。
     const text = await response.text();
     return { status: response.status, body: (text ? JSON.parse(text) : undefined) as T };
+  }
+}
+
+/**
+ * 浏览器版的二进制直传。
+ *
+ * 用 `fetch` 而不是 XHR：直传地址落在对象存储的域名上，跨域是常态 ——
+ * 签名和 CORS 都由存储端决定，我们只负责把服务端给的头照抄过去。
+ */
+export class FetchUploadTransport implements UploadTransport {
+  constructor(private readonly fetchImpl: typeof fetch = (...args) => globalThis.fetch(...args)) {}
+
+  async put(input: UploadRequest): Promise<UploadResponse> {
+    // 地址本身已经签好名了，**不要**再加我们的令牌 —— 多一个头会让签名对不上。
+    const response = await this.fetchImpl(input.url, {
+      method: input.method,
+      headers: input.headers,
+      // TS 5.7 起 `Uint8Array` 带上了 buffer 泛型（`Uint8Array<ArrayBufferLike>`），
+      // 与 lib.dom 的 `BodyInit` 对不上。运行时 fetch 接受任何 ArrayBufferView，
+      // 所以这里只是类型适配，不是真的在转换数据。
+      body: input.body as unknown as BodyInit,
+    });
+    // 204（本地驱动）与 200（COS）都没有响应体，不用读。
+    return { status: response.status };
   }
 }
 

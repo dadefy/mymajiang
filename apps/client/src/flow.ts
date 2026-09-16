@@ -12,10 +12,18 @@ import type {
   Suit,
   Tile,
 } from "./protocol.js";
-import type { SocketTransportFactory } from "./transport.js";
+import type { SocketTransportFactory, UploadTransport } from "./transport.js";
 
 /** 群聊一次拉多少条历史。服务端上限 200，这里取一个够用又不会一次拉太多的值。 */
 const CHAT_PAGE_SIZE = 50;
+
+/**
+ * 图片的本地上限。
+ *
+ * 与服务端 `UPLOAD_LIMITS.image.maximumBytes` 一致 —— 客户端这一道**只是不想白传一次**，
+ * 权威判定仍在服务端（它会按内容类型与真实字节数再拒一遍）。
+ */
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 /**
  * 界面只需要渲染的页面，字段全是纯数据：
@@ -59,8 +67,10 @@ export type Screen =
       hasEarlier: boolean;
       /** 正在加载更早的一页。 */
       loadingEarlier: boolean;
-      /** 正在发送。 */
+      /** 正在发送文字。 */
       sending: boolean;
+      /** 正在上传图片（签发 → 直传 → 发消息，三步都算）。 */
+      uploading: boolean;
       error?: string | undefined;
       notice?: string | undefined;
     };
@@ -77,6 +87,21 @@ function describe(error: ApiError): string {
   if (error.code === "ACCOUNT_NOT_ACTIVE") return "账号已被停用";
   if (error.message) return error.message;
   return `操作失败（${error.code}）`;
+}
+
+/**
+ * 上传相关的失败给一句人话。
+ *
+ * 单独写而不是复用 `describe`：签发被拒时服务端返回的 `message` 是英文的
+ * （例如 `image exceeds the 5 MB limit`），直接显示给用户不合适。
+ */
+function describeUploadFailure(error: ApiError): string {
+  if (error.kind === "unavailable") return "服务器没有开启图片上传";
+  if (error.kind === "network") return "连不上服务器，请稍后再试";
+  if (error.code === "RATE_LIMITED") return "上传太频繁，请稍后再试";
+  if (error.kind === "input") return "这张图片的格式或大小不符合要求";
+  if (error.kind === "forbidden") return "这次上传没有被授权，请重新登录后再试";
+  return describe(error);
 }
 
 /**
@@ -105,6 +130,8 @@ export class ClientFlow {
     private readonly api: ApiClient,
     private readonly sockets: SocketTransportFactory,
     private readonly socketUrl: string,
+    /** 图片直传。地址指向对象存储，所以和 `sockets` 一样是环境相关的缝。 */
+    private readonly uploads: UploadTransport,
   ) {}
 
   get current(): Screen {
@@ -270,6 +297,7 @@ export class ClientFlow {
       hasEarlier: false,
       loadingEarlier: false,
       sending: false,
+      uploading: false,
     });
     await this.attachChatSocket(groupId);
     await this.loadLatestPage(groupId);
@@ -303,6 +331,43 @@ export class ClientFlow {
       return;
     }
     this.set({ ...this.screen, sending: false, messages: appendMessage(this.screen.messages, sent.value) });
+  }
+
+  /**
+   * 发一张图片（群聊页面内用）。
+   *
+   * 上传本身走 `uploadGroupImage`，这里只多做两件事：标记页面「上传中」，
+   * 成功后把消息贴进当前列表（实时推送也会带来同一条，按 `messageId` 去重是幂等的）。
+   */
+  async sendImage(input: { bytes: Uint8Array; contentType: string }): Promise<void> {
+    if (this.screen.name !== "chat") return;
+    const groupId = this.screen.groupId;
+    this.set({ ...this.screen, uploading: true, error: undefined });
+    const sent = await this.uploadGroupImage(groupId, input);
+    if (this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
+    if (!sent.ok) {
+      this.set({ ...this.screen, uploading: false, error: sent.error });
+      return;
+    }
+    this.set({ ...this.screen, uploading: false, messages: appendMessage(this.screen.messages, sent.value) });
+  }
+
+  /**
+   * 上传一张图片并作为群消息发出。
+   *
+   * **不要求当前页面是群聊**：浏览器调试面板是在主页里直接发图的。
+   * 三步都不依赖界面状态，所以这里显式收 `groupId` 而不是读 `this.screen`。
+   */
+  async uploadGroupImage(
+    groupId: string,
+    input: { bytes: Uint8Array; contentType: string },
+  ): Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }> {
+    // 本地先挡一道：明显不合规的图没必要先传上去再被拒。权威判定仍在服务端。
+    if (input.bytes.byteLength === 0) return { ok: false, error: "这张图片是空的" };
+    if (input.bytes.byteLength > MAX_UPLOAD_BYTES) {
+      return { ok: false, error: `图片不能超过 ${MAX_UPLOAD_BYTES / 1024 / 1024} MB` };
+    }
+    return this.uploadImage(groupId, input.bytes, input.contentType);
   }
 
   /** 撤回一条消息。能不能撤由服务端判定（2 分钟窗口与权限），客户端不自己算。 */
@@ -528,6 +593,37 @@ export class ClientFlow {
       await socket.connect();
     }
     socket.subscribeGroup(groupId);
+  }
+
+  /**
+   * 上传的三步串起来，失败时给一句人话。
+   *
+   * 直传打的是对象存储的域名，和 API 不是同一条链路 —— 那边网络出问题表现为抛异常，
+   * 而不是一个带状态码的响应，所以这里要单独 catch。
+   */
+  private async uploadImage(
+    groupId: string,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }> {
+    const ticket = await this.api.createUpload({ kind: "image", contentType, byteSize: bytes.byteLength });
+    if (!ticket.ok) return { ok: false, error: describeUploadFailure(ticket.error) };
+    try {
+      const uploaded = await this.uploads.put({
+        url: ticket.value.uploadUrl,
+        method: ticket.value.method,
+        headers: ticket.value.headers,
+        body: bytes,
+      });
+      if (uploaded.status < 200 || uploaded.status >= 300) {
+        return { ok: false, error: `图片上传失败（${uploaded.status}）` };
+      }
+    } catch {
+      return { ok: false, error: "图片上传失败，请检查网络后重试" };
+    }
+    const message = await this.api.sendGroupMessage(groupId, { type: "image", content: ticket.value.objectKey });
+    if (!message.ok) return { ok: false, error: describe(message.error) };
+    return { ok: true, value: message.value };
   }
 
   private set(screen: Screen): void {

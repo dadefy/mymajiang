@@ -1,7 +1,7 @@
 import { ClientFlow, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
 import type { MatchState, RoomResult, Suit, Tile } from "../protocol.js";
-import { BrowserSocketTransportFactory, FetchHttpTransport } from "./transports.js";
+import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 
 /**
  * 给内部联网测试用的浏览器调试客户端。
@@ -46,7 +46,7 @@ function config(): RuntimeConfig {
 
 const runtime = config();
 const api = new ApiClient(new FetchHttpTransport(runtime.apiBaseUrl));
-const flow = new ClientFlow(api, new BrowserSocketTransportFactory(), runtime.socketUrl);
+const flow = new ClientFlow(api, new BrowserSocketTransportFactory(), runtime.socketUrl, new FetchUploadTransport());
 
 // ---------- 小工具 ----------
 
@@ -192,6 +192,29 @@ function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
       void flow.sendGroupText(group.groupId, content).then(load);
     });
 
+    // 图片直传：签发 → 打到存储的 PUT → 用对象键发消息，三步都在 flow 里。
+    // 这里只负责把用户选的文件读成字节。
+    const picker = element("input", { className: "text" });
+    picker.type = "file";
+    picker.accept = "image/*";
+    picker.addEventListener("change", () => {
+      const chosen = picker.files?.[0];
+      if (!chosen) return;
+      picker.value = "";
+      void (async () => {
+        const bytes = new Uint8Array(await chosen.arrayBuffer());
+        const sent = await flow.uploadGroupImage(group.groupId, {
+          bytes,
+          contentType: chosen.type || "image/png",
+        });
+        if (!sent.ok) {
+          messages.append(element("p", { className: "error", text: sent.error }));
+          return;
+        }
+        await load();
+      })();
+    });
+
     list.append(element("div", { className: "group" },
       element("div", { className: "row" },
         element("strong", { text: group.name }),
@@ -200,7 +223,7 @@ function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
         button("加载消息", () => void load()),
       ),
       messages,
-      input,
+      element("div", { className: "row" }, input, picker),
     ));
   }
   return panel("群聊", list);

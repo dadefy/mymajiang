@@ -11,6 +11,7 @@ import type {
   RoomResult,
   RoomSnapshot,
   SessionView,
+  UploadTicket,
 } from "./protocol.js";
 
 /** 服务端的稳定错误码，按语义分好类，界面代码按 `kind` 分支即可。 */
@@ -230,8 +231,30 @@ export class ApiClient {
     return this.call({ method: "GET", path: `/v1/groups/${encodeURIComponent(groupId)}/messages?${query.toString()}` });
   }
 
+  /**
+   * 签发一个图片或语音的直传地址。
+   *
+   * 类型与大小在**签发时**就被服务端校验掉（地址绑定了内容类型，换类型上传会被存储端拒绝），
+   * 所以这里传真实字节数，不要估算。没配存储时服务端返回 `STORAGE_UNAVAILABLE`（501）。
+   */
+  createUpload(input: { kind: "image" | "voice"; contentType: string; byteSize: number }): Promise<ApiResult<UploadTicket>> {
+    return this.call({ method: "POST", path: "/v1/uploads", body: input });
+  }
+
+  /** 发任意类型的群消息；`content` 对图片/语音来说是对象键。 */
+  sendGroupMessage(
+    groupId: string,
+    body: { type: GroupMessageView["type"]; content: string; voiceSeconds?: number },
+  ): Promise<ApiResult<GroupMessageView>> {
+    return this.call({
+      method: "POST",
+      path: `/v1/groups/${encodeURIComponent(groupId)}/messages`,
+      body,
+    });
+  }
+
   sendGroupText(groupId: string, content: string): Promise<ApiResult<GroupMessageView>> {
-    return this.call({ method: "POST", path: `/v1/groups/${encodeURIComponent(groupId)}/messages`, body: { type: "text", content } });
+    return this.sendGroupMessage(groupId, { type: "text", content });
   }
 
   recallGroupMessage(groupId: string, messageId: string): Promise<ApiResult<GroupMessageView>> {

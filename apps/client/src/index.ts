@@ -8,4 +8,7 @@ export type {
   HttpResponse,
   SocketTransport,
   SocketTransportFactory,
+  UploadTransport,
+  UploadRequest,
+  UploadResponse,
 } from "./transport.js";

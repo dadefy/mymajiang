@@ -150,6 +150,21 @@ export interface GroupMessagePage {
   nextCursor?: string;
 }
 
+/**
+ * `POST /v1/uploads` 的返回值：一个已经签好名的直传地址。
+ *
+ * `objectKey` 是之后发消息时要填进 `content` 的东西（归属与类型都写在键前缀里）；
+ * `uploadUrl` / `method` / `headers` 原样用到直传请求上即可 —— 内容类型参与签名，
+ * 拿到地址后换一种类型上传会被存储端拒绝。
+ */
+export interface UploadTicket {
+  objectKey: string;
+  uploadUrl: string;
+  method: string;
+  headers: Record<string, string>;
+  expiresInSeconds: number;
+}
+
 /** 一局进行中，服务端只发给本人的脱敏快照（见 ws-server.ts 的 playerSnapshot）。 */
 export interface MatchState {
   roomId: string;

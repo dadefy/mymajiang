@@ -1,15 +1,16 @@
 import type { ClientFlow, Screen } from "@mianyang-mahjong/client";
 import { buildMessageRows, describeGroupHeader, estimateMessageHeight, type ChatMessageRow } from "./chat-model.js";
+import { pickImage } from "./file-picker.js";
 import { THEME, box, field, label, refill, setButtonText, textButton } from "./widgets.js";
 
 /** 消息行宽度；右侧要留出撤回按钮的位置。 */
 const ROW_WIDTH = 690;
 
 /**
- * 群聊页面：群信息、消息列表、发消息与撤回。
+ * 群聊页面：群信息、消息列表、发消息、发图片与撤回。
  *
  * 和其他页面一样不持有业务状态：一切都来自 `chat` 这个 `Screen`，
- * 本页只保留「发送中」这类纯展示性的本地标记。
+ * 本页只保留「发送中 / 上传中」这类纯展示性的本地标记。
  */
 export class ChatPage {
   readonly view: Laya.Box;
@@ -18,12 +19,14 @@ export class ChatPage {
   private readonly noticeLabel: Laya.Label;
   private readonly earlierButton: Laya.Box;
   private readonly sendButton: Laya.Box;
+  private readonly imageButton: Laya.Box;
   private readonly messagePanel: Laya.Panel;
   private readonly messageList: Laya.VBox;
   private readonly emptyLabel: Laya.Label;
   private readonly statusLabel: Laya.Label;
   private readonly input: Laya.TextInput;
   private sending = false;
+  private uploading = false;
 
   constructor(
     private readonly flow: ClientFlow,
@@ -66,8 +69,9 @@ export class ChatPage {
     this.statusLabel = label(this.view, "", 22, { width: 690, align: "center", color: THEME.warn, wordWrap: true });
     this.statusLabel.pos(30, 1136);
 
-    this.input = field(this.view, 30, 1190, 500, 80, "说点什么…", 500).input;
-    this.sendButton = textButton(this.view, "发送", 545, 1190, 175, 80, THEME.accentDark, () => void this.send());
+    this.input = field(this.view, 30, 1190, 440, 80, "说点什么…", 500).input;
+    this.imageButton = textButton(this.view, "图片", 480, 1190, 110, 80, THEME.panelBg2, () => void this.pickAndSendImage());
+    this.sendButton = textButton(this.view, "发送", 598, 1190, 122, 80, THEME.accentDark, () => void this.send());
   }
 
   show(screen: Screen): void {
@@ -83,9 +87,11 @@ export class ChatPage {
     setButtonText(this.earlierButton, screen.loadingEarlier ? "加载中…" : "加载更早的消息");
 
     this.sending = screen.sending;
-    setButtonText(this.sendButton, screen.sending ? "发送中…" : "发送");
+    this.uploading = screen.uploading;
+    setButtonText(this.sendButton, screen.uploading ? "上传中…" : screen.sending ? "发送中…" : "发送");
+    setButtonText(this.imageButton, screen.uploading ? "上传中…" : "图片");
 
-    const status = screen.error ?? screen.notice ?? "";
+    const status = screen.error ?? screen.notice ?? (screen.uploading ? "图片上传中…" : "");
     this.statusLabel.text = status;
     this.statusLabel.color = screen.error ? THEME.bad : THEME.warn;
     this.statusLabel.visible = status.length > 0;
@@ -100,10 +106,18 @@ export class ChatPage {
 
   private async send(): Promise<void> {
     const text = this.input.text.trim();
-    if (this.sending || text.length === 0) return;
+    if (this.sending || this.uploading || text.length === 0) return;
     // 先清空输入框；失败会显示在状态行上，不让用户对着一个「以为没发出去」的框反复点。
     this.input.text = "";
     await this.flow.sendText(text);
+  }
+
+  /** 选一张图发出去。取消选择或环境不支持时什么都不做。 */
+  private async pickAndSendImage(): Promise<void> {
+    if (this.sending || this.uploading) return;
+    const picked = await pickImage();
+    if (!picked) return;
+    await this.flow.sendImage({ bytes: picked.bytes, contentType: picked.contentType });
   }
 
   private renderMessages(rows: ChatMessageRow[]): void {

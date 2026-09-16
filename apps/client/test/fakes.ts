@@ -4,6 +4,9 @@ import type {
   HttpResponse,
   SocketTransport,
   SocketTransportFactory,
+  UploadRequest,
+  UploadResponse,
+  UploadTransport,
 } from "../src/transport.js";
 
 export interface FakeResponse {
@@ -100,5 +103,28 @@ export class FakeSocketFactory implements SocketTransportFactory {
     const socket = this.created.at(-1);
     if (!socket) throw new Error("No socket has been created");
     return socket;
+  }
+}
+
+/** 记录直传请求的假传输；默认成功，可以改成返回某个状态码或直接抛错。 */
+export class FakeUploadTransport implements UploadTransport {
+  readonly requests: UploadRequest[] = [];
+  private status = 204;
+  private failure: Error | undefined;
+
+  /** 让下一次直传返回这个状态码。 */
+  respondWith(status: number): void {
+    this.status = status;
+  }
+
+  /** 让下一次直传抛错（存储侧网络不通时的样子）。 */
+  failWith(error: Error): void {
+    this.failure = error;
+  }
+
+  async put(request: UploadRequest): Promise<UploadResponse> {
+    this.requests.push(request);
+    if (this.failure) throw this.failure;
+    return { status: this.status };
   }
 }

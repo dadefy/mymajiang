@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../src/api-client.js";
 import { ClientFlow } from "../src/flow.js";
-import { FakeHttpTransport, FakeSocketFactory, type FakeSocketTransport } from "./fakes.js";
+import { FakeHttpTransport, FakeSocketFactory, FakeUploadTransport, type FakeSocketTransport } from "./fakes.js";
 
 const SESSION = {
   userId: "1234567890",
@@ -15,10 +15,11 @@ const SESSION = {
 function flowWith() {
   const transport = new FakeHttpTransport();
   const sockets = new FakeSocketFactory();
-  const flow = new ClientFlow(new ApiClient(transport), sockets, "ws://127.0.0.1:3001");
+  const uploads = new FakeUploadTransport();
+  const flow = new ClientFlow(new ApiClient(transport), sockets, "ws://127.0.0.1:3001", uploads);
   const screens: Array<{ name: string }> = [];
   flow.onChange((screen) => screens.push({ name: screen.name }));
-  return { transport, sockets, flow, screens, http: transport };
+  return { transport, sockets, uploads, flow, screens, http: transport };
 }
 
 /** 主页要的两个列表；不注册的话 refreshHome 会把错误带进页面。 */
@@ -72,6 +73,28 @@ function stubChat(transport: FakeHttpTransport, groupId: string, messages: unkno
     messages,
     ...(nextCursor === undefined ? {} : { nextCursor }),
   });
+}
+
+/** 登录并进到 g1 的群聊页面 —— 发图与群聊相关的用例都从这里开始。 */
+async function chatWith() {
+  const context = flowWith();
+  context.http.onJson("POST", "/v1/auth/login", 200, SESSION);
+  stubHome(context.http);
+  await context.flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+  stubChat(context.http, "g1", [groupMessage("m1")]);
+  await context.flow.openChat("g1");
+  return { ...context, socket: context.sockets.last() };
+}
+
+/** 一张图片的直传票据，`objectKey` 是发消息时要填的 content。 */
+function uploadTicket(objectKey: string): Record<string, unknown> {
+  return {
+    objectKey,
+    uploadUrl: `https://bucket.example.com/${objectKey}?sign=abc`,
+    method: "PUT",
+    headers: { "Content-Type": "image/png" },
+    expiresInSeconds: 60,
+  };
 }
 
 describe("ClientFlow", () => {
@@ -356,5 +379,92 @@ describe("ClientFlow", () => {
     expect(sockets.last().sent).toContainEqual({ type: "group-subscribe", groupId: "g1" });
     expect(flow.current).toMatchObject({ name: "chat", notice: undefined });
     vi.useRealTimers();
+  });
+
+  it("发图片：签发直传地址 → 把字节 PUT 上去 → 用对象键发消息", async () => {
+    const { flow, http, uploads } = await chatWith();
+    const objectKey = "uploads/1234567890/image/blob-1";
+    http.onJson("POST", "/v1/uploads", 201, uploadTicket(objectKey));
+    http.onJson("POST", "/v1/groups/g1/messages", 201, groupMessage("m9", { type: "image", content: objectKey }));
+
+    await flow.sendImage({ bytes: new Uint8Array([1, 2, 3]), contentType: "image/png" });
+
+    // 字节直接打到对象存储，并带上服务端给的头（内容类型参与签名）。
+    expect(uploads.requests).toHaveLength(1);
+    expect(uploads.requests[0]).toMatchObject({
+      url: `https://bucket.example.com/${objectKey}?sign=abc`,
+      method: "PUT",
+      headers: { "Content-Type": "image/png" },
+    });
+    expect([...uploads.requests[0]!.body]).toEqual([1, 2, 3]);
+    // 发消息时传的是对象键，不是那个带签名的地址。
+    expect(http.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/v1/groups/g1/messages",
+      body: { type: "image", content: objectKey },
+    });
+    const screen = flow.current;
+    expect(screen.name).toBe("chat");
+    if (screen.name !== "chat") return;
+    expect(screen.messages.map((message) => message.messageId)).toEqual(["m1", "m9"]);
+    expect(screen.uploading).toBe(false);
+  });
+
+  it("服务器没开图片上传时给出明确提示，且不会去直传", async () => {
+    const { flow, http, uploads } = await chatWith();
+    http.onJson("POST", "/v1/uploads", 501, { code: "STORAGE_UNAVAILABLE" });
+
+    await flow.sendImage({ bytes: new Uint8Array([1]), contentType: "image/png" });
+
+    expect(uploads.requests).toHaveLength(0);
+    expect(flow.current).toMatchObject({ error: "服务器没有开启图片上传", uploading: false });
+  });
+
+  it("直传被存储端拒绝时不会把消息发出去", async () => {
+    const { flow, http, uploads } = await chatWith();
+    http.onJson("POST", "/v1/uploads", 201, uploadTicket("uploads/1234567890/image/blob-2"));
+    uploads.respondWith(403);
+
+    await flow.sendImage({ bytes: new Uint8Array([1]), contentType: "image/png" });
+
+    expect(flow.current).toMatchObject({ error: "图片上传失败（403）", uploading: false });
+    expect(http.requests.some((request) => request.method === "POST" && request.path === "/v1/groups/g1/messages")).toBe(false);
+  });
+
+  it("直传网络不通时提示重试，而不是抛出去", async () => {
+    const { flow, http, uploads } = await chatWith();
+    http.onJson("POST", "/v1/uploads", 201, uploadTicket("uploads/1234567890/image/blob-3"));
+    uploads.failWith(new Error("socket hang up"));
+
+    await flow.sendImage({ bytes: new Uint8Array([1]), contentType: "image/png" });
+
+    expect(flow.current).toMatchObject({ error: "图片上传失败，请检查网络后重试", uploading: false });
+  });
+
+  it("本地就挡掉超限的图片，不白传一次", async () => {
+    const { flow, uploads } = await chatWith();
+
+    await flow.sendImage({ bytes: new Uint8Array(5 * 1024 * 1024 + 1), contentType: "image/png" });
+
+    expect(uploads.requests).toHaveLength(0);
+    expect(flow.current).toMatchObject({ error: "图片不能超过 5 MB" });
+  });
+
+  it("上传不依赖当前页面：在主页里也能往指定群发图（浏览器调试面板就是这么做）", async () => {
+    const { flow, http, uploads } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    const objectKey = "uploads/1234567890/image/blob-4";
+    http.onJson("POST", "/v1/uploads", 201, uploadTicket(objectKey));
+    http.onJson("POST", "/v1/groups/g1/messages", 201, groupMessage("m5", { type: "image", content: objectKey }));
+
+    expect(flow.current.name).toBe("home");
+    const sent = await flow.uploadGroupImage("g1", { bytes: new Uint8Array([7]), contentType: "image/png" });
+
+    expect(sent).toMatchObject({ ok: true, value: { messageId: "m5" } });
+    expect(uploads.requests).toHaveLength(1);
+    // 页面没变，也不会把消息贴进不存在的列表里。
+    expect(flow.current.name).toBe("home");
   });
 });
