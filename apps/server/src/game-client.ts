@@ -50,6 +50,16 @@ export interface GameClientOptions {
 }
 
 /**
+ * 「改了就该立刻生效」的配置类资源，不走缓存。
+ *
+ * 内测期间场景（`.ls`）、图集（`.atlas`）与清单（`.json`）会被反复改，
+ * 一旦被浏览器缓存就会出现「重新构建了、但手机上还是旧场景」这种很难查的现象
+ * —— 正好踩过一次（场景字段名改对了却看不到效果）。
+ * 引擎库（`libs/*.js`，近 2 MB）保持可缓存，那才是每次都要下的大头。
+ */
+const CONFIG_EXTENSIONS = new Set([".ls", ".json", ".atlas"]);
+
+/**
  * 读一个产物文件。
  *
  * `path` 是 `/app/*` 里那段通配：空串表示目录请求，给 `index.html`（LayaAir 是单页应用）。
@@ -72,7 +82,9 @@ async function serveGameAsset(path: string, reply: FastifyReply, options: GameCl
       message: `LayaAir Web 版还没构建：先跑 ${options.buildCommand}`,
     });
   }
-  return reply.type(CONTENT_TYPES[extname(target).toLowerCase()] ?? "application/octet-stream").send(body);
+  const extension = extname(target).toLowerCase();
+  if (CONFIG_EXTENSIONS.has(extension)) reply.header("Cache-Control", "no-store");
+  return reply.type(CONTENT_TYPES[extension] ?? "application/octet-stream").send(body);
 }
 
 export function registerGameClient(app: FastifyInstance, options: GameClientOptions): void {
