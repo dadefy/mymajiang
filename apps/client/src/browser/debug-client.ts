@@ -1,8 +1,9 @@
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
-import type { MatchState, RoomResult, Suit, Tile } from "../protocol.js";
+import type { GroupMessageView, MatchState, RoomResult, Suit, Tile } from "../protocol.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 import { BrowserVoiceRecorder } from "./voice-recorder.js";
+import { MediaCache } from "./media-cache.js";
 
 /**
  * 给内部联网测试用的浏览器调试客户端。
@@ -77,6 +78,27 @@ function panel(title: string, ...children: HTMLElement[]): HTMLElement {
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const bar = document.querySelector<HTMLDivElement>("#bar")!;
 
+/**
+ * 图片与语音的本地缓存。
+ *
+ * 服务端签发的读取地址只有几十秒有效期（私有桶只能靠签名读），而消息画到页面上会一直留着 ——
+ * 所以这里第一次加载就抓成本地 blob 地址，之后与签名是否过期无关。
+ */
+const mediaCache = new MediaCache({
+  load: async (sourceUrl) => {
+    const response = await fetch(sourceUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  },
+});
+
+/** 当前页面上那串消息的重画函数；媒体加载完成时只重画它，不动别的。 */
+let repaintMessages: (() => void) | undefined;
+
+// 媒体状态一变（下载完成或失败）就重画消息列表。整页重画会清掉正在输入的草稿与滚动位置，
+// 所以渲染层登记的是「只重画消息」这件事。
+mediaCache.onChange(() => repaintMessages?.());
+
 /** 手动换三张时已选中的牌。 */
 let selected: Tile[] = [];
 
@@ -99,6 +121,8 @@ function syncRoomPolling(inRoom: boolean): void {
 
 function render(screen: Screen): void {
   app.replaceChildren();
+  // 每次重画都先解绑：渲染层自己再登记（否则会指向已经卸载的那份 DOM）。
+  repaintMessages = undefined;
   renderBar(screen);
   syncRoomPolling(screen.name === "room");
   switch (screen.name) {
@@ -194,6 +218,57 @@ function renderHome(screen: Extract<Screen, { name: "home" }>): void {
   );
 }
 
+/**
+ * 一条群消息。
+ *
+ * 图片与语音的 `content` 是服务端签发的**带时效**读取地址（私有桶只能靠签名读），
+ * 所以先过 `mediaCache` 抓成本地地址再渲染 —— 直接用那个地址，过一会儿就变成裂图。
+ */
+function messageNode(message: GroupMessageView): HTMLElement {
+  const row = element("p");
+  row.append(element("span", { className: "hint", text: `${message.senderNickname ?? message.senderId}：` }));
+
+  if (message.type === "image") row.append(imagePart(message));
+  else if (message.type === "voice") row.append(voicePart(message));
+  else row.append(element("span", { text: message.content }));
+  return row;
+}
+
+function imagePart(message: GroupMessageView): HTMLElement {
+  const state = mediaCache.peek(message.messageId) ?? mediaCache.resolve(message.messageId, message.content);
+  if (state.status === "ready") {
+    const image = element("img", { className: "thumb" });
+    image.src = state.url;
+    image.alt = "图片";
+    image.title = "点开看原图";
+    // 本地地址在新标签页里同样有效。
+    image.addEventListener("click", () => window.open(state.url, "_blank"));
+    return image;
+  }
+  if (state.status === "loading") return element("span", { className: "hint", text: "（图片加载中…）" });
+  return button("图片加载失败，点这里重试", () => {
+    mediaCache.resolve(message.messageId, message.content, { retry: true });
+  });
+}
+
+function voicePart(message: GroupMessageView): HTMLElement {
+  const seconds = message.voiceSeconds === undefined ? "" : ` ${message.voiceSeconds} 秒`;
+  const state = mediaCache.peek(message.messageId) ?? mediaCache.resolve(message.messageId, message.content);
+  if (state.status === "ready") {
+    const audio = element("audio", { className: "voice" });
+    audio.controls = true;
+    audio.src = state.url;
+    return element("span", { className: "voice-wrap" },
+      element("span", { className: "hint", text: `语音${seconds} ` }),
+      audio,
+    );
+  }
+  if (state.status === "loading") return element("span", { className: "hint", text: `（语音${seconds} 加载中…）` });
+  return button("语音加载失败，点这里重试", () => {
+    mediaCache.resolve(message.messageId, message.content, { retry: true });
+  });
+}
+
 function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
   const list = element("div", { className: "list" });
   if (screen.groups.length === 0) {
@@ -203,18 +278,29 @@ function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
     const messages = element("div", { className: "messages" });
     const input = element("input", { className: "text" });
     input.placeholder = "发一条消息";
+    let current: GroupMessageView[] = [];
+    /**
+     * 画一批消息。
+     *
+     * `scrollToBottom` 只在「刚拉到 / 刚发出」时为真：媒体加载完成引起的那次重画要保住
+     * 用户当前的滚动位置，否则正在往上翻历史的人会被拽回底部。
+     */
+    const paint = (list: GroupMessageView[], scrollToBottom = false): void => {
+      const offset = messages.scrollTop;
+      messages.replaceChildren();
+      for (const message of list) messages.append(messageNode(message));
+      messages.scrollTop = scrollToBottom ? messages.scrollHeight : offset;
+    };
     const load = async (): Promise<void> => {
       const result = await flow.groupMessages(group.groupId, 30);
-      messages.replaceChildren();
       if (!result.ok) {
-        messages.append(element("p", { className: "error", text: "拉取消息失败" }));
+        messages.replaceChildren(element("p", { className: "error", text: "拉取消息失败" }));
         return;
       }
-      for (const message of result.value.messages) {
-        messages.append(element("p", { text: `${message.senderId}: ${message.content}` }));
-      }
-      messages.scrollTop = messages.scrollHeight;
+      current = result.value.messages;
+      paint(current, true);
     };
+    repaintMessages = () => paint(current);
     input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" || !input.value.trim()) return;
       const content = input.value;

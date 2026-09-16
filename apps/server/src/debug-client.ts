@@ -56,6 +56,11 @@ export function debugClientHtml(options: DebugClientOptions): string {
     .group { border-top: 1px solid #24443a; padding-top: 10px; }
     .messages { max-height: 180px; overflow: auto; display: grid; gap: 3px; margin: 6px 0; font-size: 14px; }
     .messages p { margin: 0; }
+    /* 图片预览：限制最大边长，点开可以在新标签看原图。 */
+    img.thumb { display: block; max-width: 220px; max-height: 160px; border-radius: 8px; margin: 4px 0; cursor: zoom-in; }
+    /* 语音：浏览器原生控件最省事，手机上也能直接播。 */
+    .voice-wrap { display: inline-flex; align-items: center; gap: 6px; }
+    audio.voice { height: 32px; max-width: 240px; vertical-align: middle; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
     .error { color: #ff9b9b; margin: 8px 0; }
     code { background: #0d1613; padding: 1px 5px; border-radius: 4px; }
