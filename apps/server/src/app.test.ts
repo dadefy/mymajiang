@@ -654,6 +654,30 @@ describe("server API", () => {
     expect((await fixture().app.inject({ method: "GET", url: "/debug" })).statusCode).toBe(404);
   });
 
+  it("LayaAir Web 版挂在 /app，路径不许越出产物目录", async () => {
+    const { app } = fixture({ debugClient: true });
+
+    // 路径穿越必须被挡住。这些目标里有真实存在的文件，校验一旦失效就会 200 ——
+    // 所以断言不依赖「Web 版是否已构建」。
+    for (const attack of ["/app/%2e%2e%2fpackage.json", "/app/%2e%2e%2f%2e%2e%2fpackage.json"]) {
+      expect((await app.inject({ method: "GET", url: attack })).statusCode).toBe(404);
+    }
+
+    // 构建过就给页面，没构建过就给一条能照着做的提示 —— 两种都不是错，但不该是 500。
+    const entry = await app.inject({ method: "GET", url: "/app" });
+    expect([200, 404]).toContain(entry.statusCode);
+    if (entry.statusCode === 200) {
+      expect(entry.headers["content-type"]).toContain("text/html");
+      expect(entry.headers["cache-control"]).toBe("no-store");
+    } else {
+      // 提示里要有构建命令，否则别人看到 404 不知道下一步做什么。
+      expect(entry.json().message).toContain("laya:build:web");
+    }
+
+    // 与 /debug 共用一个开关：没开内测入口时也不注册。
+    expect((await fixture().app.inject({ method: "GET", url: "/app" })).statusCode).toBe(404);
+  });
+
   it("注销账号后：令牌立刻失效、密钥既登不进也建不了新号、管理员也复活不了", async () => {
     const { app, dependencies } = fixture();
     // 自己发一把密钥，这样能拿到明文，才能验证「注销后这把密钥彻底作废」。

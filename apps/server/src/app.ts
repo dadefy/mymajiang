@@ -48,6 +48,7 @@ import {
 import { LocalDiskBlobStorage } from "./local-blob-storage.js";
 import { RATE_LIMITS, RateLimiter, type RateLimitRule, type RateLimitRules } from "./rate-limit.js";
 import { registerDebugClient } from "./debug-client.js";
+import { registerGameClient } from "./game-client.js";
 
 export interface AppDependencies {
   accountStore: AccountStore;
@@ -236,9 +237,12 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     }
   });
 
-  // 内部测试用的浏览器客户端。没开就不挂（测试里默认不挂）。
+  // 内部测试用的两个页面。没开就不挂（测试里默认不挂）。
   if (dependencies.debugClient) {
     registerDebugClient(app, { socketUrl: dependencies.websocketUrl ?? "" });
+    // LayaAir 构建出来的 Web 版也挂上：跑的是真正的渲染层（最终 APK 那套 UI）。
+    // 没构建时它只返回 404 并提示命令，不影响 /debug。
+    registerGameClient(app, { buildCommand: "pnpm --filter @mianyang-mahjong/apk laya:build:web" });
     // 内测要分享的是一个网址，让根路径直接把人送到客户端 —— 否则拿到链接的人
     // 只会看到一个 404，还得再问一次「要加什么后缀」。
     app.get("/", async (_request, reply) => reply.redirect("/debug", 302));

@@ -196,6 +196,53 @@ node --env-file=.env scripts/smoke.mjs
 
 ---
 
+## 九、LayaAir Web 版（可选，但更接近上线版本）
+
+`/debug` 是手写的调试界面；LayaAir 那边才是**最终 APK 里真正用的 UI**。
+把它构建成 Web 平台挂到服务端，就能用手机验到真实的界面与牌桌渲染。
+
+### 构建（需要 LayaAir CLI，**不需要**装那个几百 MB 的 IDE）
+
+```powershell
+# 1. 装 CLI（一次性；只往 %USERPROFILE%\.layaair 写）
+iwr https://raw.githubusercontent.com/layabox/layaair-cli/master/install.ps1 | iex
+& "$env:USERPROFILE\.layaair\layaair.cmd" install 3.4.0
+
+# 2. 构建 Web 版。产物落在 apps/apk/release/web（不进仓库）
+& "$env:USERPROFILE\.layaair\layaair.cmd" --version=3.4.0 build web -p apps/apk
+```
+
+`layaair build --list-platforms -p apps/apk` 可以看到支持的全部平台（web / android / ios /
+windows / 各家小游戏 等 19 个）。
+
+### 访问
+
+服务端会把产物挂在 `/app`：
+
+| 入口 | 地址 | 说明 |
+| --- | --- | --- |
+| LayaAir Web 版 | `http://<服务器IP>:3000/app` | 真正的渲染层，最接近 APK |
+| 调试客户端 | `http://<服务器IP>:3000/debug` | 手写界面，功能验证最方便（`/` 重定向到这里） |
+
+**为什么必须由服务端提供**：客户端按 `location.origin` 推导 API 与实时通道地址，
+**同源**才连得上；换个端口不仅地址不对，还会撞上跨域。
+
+没构建 `/app` 也能正常存在 —— 它只会返回 404 并告诉你该跑哪条命令，不影响 `/debug`。
+
+### 这一版能验到什么
+
+- 750×1334 竖屏布局、四个页面（密钥登录 / 资料 / 主页 / 房间）的真实渲染
+- 牌桌：真实牌面、点击选牌、换三张、定缺、出牌、结算浮层
+- 群聊页面的消息列表与输入
+
+### 这一版验不到什么
+
+`/app` 是 **Web 平台**，所以选图与录音走的仍是浏览器实现（`<input type="file">` 与
+`MediaRecorder`）—— 能验流程，但**验不到「原生 APK 上能不能选图/录音」**。
+要验那个得构建 `android` 平台，而它需要 **JDK + Android SDK**（本机目前都没装）。
+
+---
+
 ## 常见问题
 
 | 现象 | 原因 |

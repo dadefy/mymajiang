@@ -609,6 +609,25 @@ mianyang-mahjong/
   - 消息列表里的语音目前只显示「[语音 N 秒]」占位文字，**还不能播放**；
     播放要把对象键换成带时效的读取地址再解码，属于渲染层的后续工作。
 
+### 4.28 LayaAir Web 版挂载（为验收准备）
+
+LayaAir 侧的渲染层（也就是最终 APK 里那套 UI）此前只在混元的环境里构建过、**没有在真实环境跑过**。
+为了让手机能验到它，做了两件事：
+
+- 服务端新增 **`/app`**：把 `apps/apk/release/web`（`layaair build web -p apps/apk` 的产物）
+  挂上来，与 `/debug` 同一个开关；没构建时只返回 404 并给出该跑的命令，不影响 `/debug`。
+  **必须由服务端提供** —— 客户端按 `location.origin` 推导 API 与实时通道地址，同源才连得上
+  （换个端口不仅地址不对，还会撞上跨域）。
+- **顺带修掉一个会让 LayaAir 版连不上的 bug**：`apps/apk/src/runtime-config.ts` 里实时通道地址的
+  推导还是**双端口时代**的写法 —— 它把端口硬改成固定的 `3001`。当初改单端口时只改了
+  浏览器调试客户端，这一份漏了，表现是「能登录，但一进房间就断线」。现在两侧一致：
+  单端口下同源，只把 `http→ws` / `https→wss` 换掉协议。
+- 构建链路：**LayaAir CLI**（装在 `%USERPROFILE%\.layaair`，不需要 IDE）。
+  `layaair build --list-platforms` 列出 19 个平台，其中 `web` 可直接构建；
+  **`android` 需要 JDK + Android SDK**（当前机器都没装），所以 APK 暂时构建不了。
+- `/app` 跑的是 Web 平台，因此**验不到「原生 APK 上的选图与录音」** —— 那两个能力依赖
+  标准 Web API，在 Web 平台下走浏览器实现，能验流程但不能证明原生环境可用。
+
 ## 5. 当前 REST API
 
 ### 邀请密钥登录
