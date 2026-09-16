@@ -23,12 +23,20 @@ import type {
 const CHAT_PAGE_SIZE = 50;
 
 /**
- * 图片的本地上限。
+ * 图片与语音的本地上限。
  *
- * 与服务端 `UPLOAD_LIMITS.image.maximumBytes` 一致 —— 客户端这一道**只是不想白传一次**，
+ * 与服务端 `UPLOAD_LIMITS` 一致 —— 客户端这一道**只是不想白传一次**，
  * 权威判定仍在服务端（它会按内容类型与真实字节数再拒一遍）。
  */
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_VOICE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 语音时长上限；与服务端 `sendMessage` 对 `voiceSeconds` 的校验一致（1–60 秒）。
+ *
+ * 导出给渲染层用：录音界面要据此自动停止，不能录出一段服务端必然拒收的音频。
+ */
+export const MAX_VOICE_SECONDS = 60;
 
 /**
  * 生成一个幂等键。
@@ -374,16 +382,16 @@ export class ClientFlow {
    * 成功后把消息贴进当前列表（实时推送也会带来同一条，按 `messageId` 去重是幂等的）。
    */
   async sendImage(input: { bytes: Uint8Array; contentType: string }): Promise<void> {
-    if (this.screen.name !== "chat") return;
-    const groupId = this.screen.groupId;
-    this.set({ ...this.screen, uploading: true, error: undefined });
-    const sent = await this.uploadGroupImage(groupId, input);
-    if (this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
-    if (!sent.ok) {
-      this.set({ ...this.screen, uploading: false, error: sent.error });
-      return;
-    }
-    this.set({ ...this.screen, uploading: false, messages: appendMessage(this.screen.messages, sent.value) });
+    await this.sendAttachment((groupId) => this.uploadGroupImage(groupId, input));
+  }
+
+  /**
+   * 发一段语音（群聊页面内用）。
+   *
+   * `seconds` 是录音时长，服务端按 1–60 秒校验；它只用于展示，音频本身不带时长信息。
+   */
+  async sendVoice(input: { bytes: Uint8Array; contentType: string; seconds: number }): Promise<void> {
+    await this.sendAttachment((groupId) => this.uploadGroupVoice(groupId, input));
   }
 
   /**
@@ -398,10 +406,47 @@ export class ClientFlow {
   ): Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }> {
     // 本地先挡一道：明显不合规的图没必要先传上去再被拒。权威判定仍在服务端。
     if (input.bytes.byteLength === 0) return { ok: false, error: "这张图片是空的" };
-    if (input.bytes.byteLength > MAX_UPLOAD_BYTES) {
-      return { ok: false, error: `图片不能超过 ${MAX_UPLOAD_BYTES / 1024 / 1024} MB` };
+    if (input.bytes.byteLength > MAX_IMAGE_BYTES) {
+      return { ok: false, error: `图片不能超过 ${MAX_IMAGE_BYTES / 1024 / 1024} MB` };
     }
-    return this.uploadImage(groupId, input.bytes, input.contentType);
+    return this.uploadAndSend(groupId, "image", input.bytes, input.contentType);
+  }
+
+  /** 上传一段语音并作为群消息发出。同样不要求当前页面是群聊。 */
+  async uploadGroupVoice(
+    groupId: string,
+    input: { bytes: Uint8Array; contentType: string; seconds: number },
+  ): Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }> {
+    if (input.bytes.byteLength === 0) return { ok: false, error: "没有录到声音" };
+    if (input.bytes.byteLength > MAX_VOICE_BYTES) {
+      return { ok: false, error: `语音不能超过 ${MAX_VOICE_BYTES / 1024 / 1024} MB` };
+    }
+    if (!Number.isInteger(input.seconds) || input.seconds < 1 || input.seconds > MAX_VOICE_SECONDS) {
+      return { ok: false, error: `语音长度要在 1–${MAX_VOICE_SECONDS} 秒之间` };
+    }
+    return this.uploadAndSend(groupId, "voice", input.bytes, input.contentType, input.seconds);
+  }
+
+  /**
+   * 群聊页面内的「上传并发送」：标记上传中、把结果贴进当前列表。
+   *
+   * 图片与语音走的是同一条路（都只有三步：签发 → 直传 → 发消息），差别只在消息类型与参数，
+   * 所以这里收一个已经绑定好参数的操作，而不是把三步写两遍。
+   */
+  private async sendAttachment(
+    operation: (groupId: string) => Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }>,
+  ): Promise<void> {
+    if (this.screen.name !== "chat") return;
+    const groupId = this.screen.groupId;
+    this.set({ ...this.screen, uploading: true, error: undefined });
+    const sent = await operation(groupId);
+    if (this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
+    if (!sent.ok) {
+      this.set({ ...this.screen, uploading: false, error: sent.error });
+      return;
+    }
+    // 实时推送也会带来同一条，`appendMessage` 按 messageId 去重，谁都只留一条。
+    this.set({ ...this.screen, uploading: false, messages: appendMessage(this.screen.messages, sent.value) });
   }
 
   /** 撤回一条消息。能不能撤由服务端判定（2 分钟窗口与权限），客户端不自己算。 */
@@ -630,17 +675,21 @@ export class ClientFlow {
   }
 
   /**
-   * 上传的三步串起来，失败时给一句人话。
+   * 签发 → 直传 → 发消息，三步串起来，失败时给一句人话。
    *
-   * 直传打的是对象存储的域名，和 API 不是同一条链路 —— 那边网络出问题表现为抛异常，
+   * 图片与语音共用这一条：差别只在消息类型与 `voiceSeconds`。
+   * 直传打的是对象存储的域名，与 API 不是同一条链路 —— 那边网络出问题表现为抛异常，
    * 而不是一个带状态码的响应，所以这里要单独 catch。
    */
-  private async uploadImage(
+  private async uploadAndSend(
     groupId: string,
+    kind: "image" | "voice",
     bytes: Uint8Array,
     contentType: string,
+    voiceSeconds?: number,
   ): Promise<{ ok: true; value: GroupMessageView } | { ok: false; error: string }> {
-    const ticket = await this.api.createUpload({ kind: "image", contentType, byteSize: bytes.byteLength });
+    const label = kind === "image" ? "图片" : "语音";
+    const ticket = await this.api.createUpload({ kind, contentType, byteSize: bytes.byteLength });
     if (!ticket.ok) return { ok: false, error: describeUploadFailure(ticket.error) };
     let uploaded: UploadResponse;
     try {
@@ -651,15 +700,23 @@ export class ClientFlow {
         body: bytes,
       });
     } catch {
-      return { ok: false, error: "图片上传失败，请检查网络后重试" };
+      return { ok: false, error: `${label}上传失败，请检查网络后重试` };
     }
     if (uploaded.status < 200 || uploaded.status >= 300) {
-      return { ok: false, error: `图片上传失败（${uploaded.status}）` };
+      return { ok: false, error: `${label}上传失败（${uploaded.status}）` };
     }
     // 发消息这步才是「多到达一次就多一条」的那一步，必须带键重试。
     const idempotencyKey = newIdempotencyKey();
     const message = await retryOnceOnNetworkFailure(() =>
-      this.api.sendGroupMessage(groupId, { type: "image", content: ticket.value.objectKey }, idempotencyKey));
+      this.api.sendGroupMessage(
+        groupId,
+        {
+          type: kind,
+          content: ticket.value.objectKey,
+          ...(voiceSeconds === undefined ? {} : { voiceSeconds }),
+        },
+        idempotencyKey,
+      ));
     if (!message.ok) return { ok: false, error: describe(message.error) };
     return { ok: true, value: message.value };
   }

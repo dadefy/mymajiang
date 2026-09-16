@@ -1,7 +1,8 @@
-import { ClientFlow, type Screen } from "../flow.js";
+import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
 import type { MatchState, RoomResult, Suit, Tile } from "../protocol.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
+import { BrowserVoiceRecorder } from "./voice-recorder.js";
 
 /**
  * 给内部联网测试用的浏览器调试客户端。
@@ -215,6 +216,45 @@ function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
       })();
     });
 
+    // 语音：点一下开始录，再点一下停止并发送。录音器是浏览器通用的那一份。
+    const recorder = new BrowserVoiceRecorder();
+    let recording = false;
+    let recordTimer: ReturnType<typeof setInterval> | undefined;
+    const voiceButton = button("录音", () => {
+      void (async () => {
+        if (recording) {
+          if (recordTimer) clearInterval(recordTimer);
+          recordTimer = undefined;
+          recording = false;
+          voiceButton.textContent = "录音";
+          const recorded = await recorder.stop();
+          if (!recorded) return;
+          const sent = await flow.uploadGroupVoice(group.groupId, recorded);
+          if (!sent.ok) {
+            messages.append(element("p", { className: "error", text: sent.error }));
+            return;
+          }
+          await load();
+          return;
+        }
+        try {
+          await recorder.start();
+        } catch {
+          messages.append(element("p", {
+            className: "error",
+            text: "录不了音：需要允许麦克风权限，且页面要在 HTTPS 或 localhost 下",
+          }));
+          return;
+        }
+        recording = true;
+        recordTimer = setInterval(() => {
+          voiceButton.textContent = `录音 ${recorder.elapsedSeconds()}s`;
+          // 到上限就自动停（服务端只收 1–60 秒）。
+          if (recorder.elapsedSeconds() >= MAX_VOICE_SECONDS) voiceButton.click();
+        }, 500);
+      })();
+    });
+
     list.append(element("div", { className: "group" },
       element("div", { className: "row" },
         element("strong", { text: group.name }),
@@ -223,7 +263,7 @@ function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
         button("加载消息", () => void load()),
       ),
       messages,
-      element("div", { className: "row" }, input, picker),
+      element("div", { className: "row" }, input, picker, voiceButton),
     ));
   }
   return panel("群聊", list);

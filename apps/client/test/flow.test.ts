@@ -538,4 +538,66 @@ describe("ClientFlow", () => {
     // 第二次的返回值贴进来只有一条。
     expect(screen.messages.filter((message) => message.messageId === "m7")).toHaveLength(1);
   });
+
+  it("发语音：按 voice 签发 → 直传 → 发消息带上时长", async () => {
+    const { flow, http, uploads } = await chatWith();
+    const objectKey = "uploads/1234567890/voice/blob-9";
+    http.onJson("POST", "/v1/uploads", 201, {
+      objectKey,
+      uploadUrl: `https://bucket.example.com/${objectKey}?sign=def`,
+      method: "PUT",
+      headers: { "Content-Type": "audio/webm" },
+      expiresInSeconds: 60,
+    });
+    http.onJson("POST", "/v1/groups/g1/messages", 201, groupMessage("m8", {
+      type: "voice",
+      content: objectKey,
+      voiceSeconds: 7,
+    }));
+
+    await flow.sendVoice({ bytes: new Uint8Array([1, 2]), contentType: "audio/webm", seconds: 7 });
+
+    // 签发时必须是 voice —— 服务端按 kind 卡不同的类型白名单与大小上限。
+    expect(http.requests.find((request) => request.path === "/v1/uploads")?.body).toMatchObject({
+      kind: "voice",
+      contentType: "audio/webm",
+      byteSize: 2,
+    });
+    expect(uploads.requests[0]).toMatchObject({ url: `https://bucket.example.com/${objectKey}?sign=def` });
+    // 时长随消息一起发出去，收件人才能显示「7 秒」。
+    expect(http.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/v1/groups/g1/messages",
+      body: { type: "voice", content: objectKey, voiceSeconds: 7 },
+    });
+
+    const screen = flow.current;
+    const ids = screen.name === "chat" ? screen.messages.map((message) => message.messageId) : [];
+    expect(ids).toEqual(["m1", "m8"]);
+  });
+
+  it("语音的时长与字节在本地就校验，不合规不会去传", async () => {
+    const { flow, http, uploads } = await chatWith();
+    const send = (seconds: number, length = 1) =>
+      flow.sendVoice({ bytes: new Uint8Array(length), contentType: "audio/webm", seconds });
+
+    // 服务端只收 1–60 的整数秒。
+    await send(0);
+    expect(uploads.requests).toHaveLength(0);
+    expect(flow.current).toMatchObject({ error: "语音长度要在 1–60 秒之间" });
+
+    await send(61);
+    expect(uploads.requests).toHaveLength(0);
+    // 不是整数也不行（服务端是 z.number().int()）。
+    await send(2.5);
+    expect(uploads.requests).toHaveLength(0);
+
+    // 一秒钟都没录到。
+    await send(3, 0);
+    expect(uploads.requests).toHaveLength(0);
+    expect(flow.current).toMatchObject({ error: "没有录到声音" });
+
+    // 三次都没发过消息。
+    expect(http.requests.some((request) => request.method === "POST" && request.path === "/v1/groups/g1/messages")).toBe(false);
+  });
 });

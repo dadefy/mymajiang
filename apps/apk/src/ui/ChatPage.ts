@@ -1,4 +1,5 @@
-import type { ClientFlow, Screen } from "@mianyang-mahjong/client";
+import type { ClientFlow, Screen, VoiceRecorder } from "@mianyang-mahjong/client";
+import { BrowserVoiceRecorder, MAX_VOICE_SECONDS } from "@mianyang-mahjong/client";
 import { buildMessageRows, describeGroupHeader, estimateMessageHeight, type ChatMessageRow } from "./chat-model.js";
 import { pickImage } from "./file-picker.js";
 import { THEME, box, field, label, refill, setButtonText, textButton } from "./widgets.js";
@@ -20,6 +21,7 @@ export class ChatPage {
   private readonly earlierButton: Laya.Box;
   private readonly sendButton: Laya.Box;
   private readonly imageButton: Laya.Box;
+  private readonly voiceButton: Laya.Box;
   private readonly messagePanel: Laya.Panel;
   private readonly messageList: Laya.VBox;
   private readonly emptyLabel: Laya.Label;
@@ -27,6 +29,10 @@ export class ChatPage {
   private readonly input: Laya.TextInput;
   private sending = false;
   private uploading = false;
+  /** 录音是页面的本地状态（`Screen` 里没有它）：它是纯界面过程，不影响业务数据。 */
+  private recorder: VoiceRecorder | undefined;
+  private recording = false;
+  private recordTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly flow: ClientFlow,
@@ -69,9 +75,10 @@ export class ChatPage {
     this.statusLabel = label(this.view, "", 22, { width: 690, align: "center", color: THEME.warn, wordWrap: true });
     this.statusLabel.pos(30, 1136);
 
-    this.input = field(this.view, 30, 1190, 440, 80, "说点什么…", 500).input;
-    this.imageButton = textButton(this.view, "图片", 480, 1190, 110, 80, THEME.panelBg2, () => void this.pickAndSendImage());
-    this.sendButton = textButton(this.view, "发送", 598, 1190, 122, 80, THEME.accentDark, () => void this.send());
+    this.input = field(this.view, 30, 1190, 360, 80, "说点什么…", 500).input;
+    this.voiceButton = textButton(this.view, "语音", 398, 1190, 90, 80, THEME.panelBg2, () => void this.toggleRecording());
+    this.imageButton = textButton(this.view, "图片", 496, 1190, 90, 80, THEME.panelBg2, () => void this.pickAndSendImage());
+    this.sendButton = textButton(this.view, "发送", 594, 1190, 126, 80, THEME.accentDark, () => void this.send());
   }
 
   show(screen: Screen): void {
@@ -90,6 +97,8 @@ export class ChatPage {
     this.uploading = screen.uploading;
     setButtonText(this.sendButton, screen.uploading ? "上传中…" : screen.sending ? "发送中…" : "发送");
     setButtonText(this.imageButton, screen.uploading ? "上传中…" : "图片");
+    // 录音中的文案由页面自己维护（那是本地状态），所以正在录音时不去覆盖它。
+    if (!this.recording) setButtonText(this.voiceButton, screen.uploading ? "上传中…" : "语音");
 
     const status = screen.error ?? screen.notice ?? (screen.uploading ? "图片上传中…" : "");
     this.statusLabel.text = status;
@@ -99,9 +108,16 @@ export class ChatPage {
     this.renderMessages(buildMessageRows(screen.messages, { meId: screen.meId, now: new Date() }));
   }
 
-  /** 离开页面时清掉没发出去的草稿，回来是干净的。 */
+  /** 离开页面时清掉没发出去的草稿，并放弃正在进行的录音（不上传也不留）。 */
   hide(): void {
     this.input.text = "";
+    this.stopRecordTimer();
+    if (this.recording) {
+      this.recorder?.cancel();
+      this.recorder = undefined;
+      this.recording = false;
+      setButtonText(this.voiceButton, "语音");
+    }
   }
 
   private async send(): Promise<void> {
@@ -118,6 +134,62 @@ export class ChatPage {
     const picked = await pickImage();
     if (!picked) return;
     await this.flow.sendImage({ bytes: picked.bytes, contentType: picked.contentType });
+  }
+
+  /** 点一下开始录音，再点一下停止并发送。 */
+  private async toggleRecording(): Promise<void> {
+    if (this.sending || this.uploading) return;
+    if (this.recording) {
+      await this.finishRecording();
+      return;
+    }
+    const recorder = this.recorder ?? new BrowserVoiceRecorder();
+    try {
+      await recorder.start();
+    } catch {
+      // 两种情况都落在这里：原生运行时没有录音能力；浏览器里没给麦克风权限。
+      this.recorder = undefined;
+      this.showStatus("录不了音：需要允许麦克风权限，且页面要在 HTTPS 或 localhost 下", true);
+      return;
+    }
+    this.recorder = recorder;
+    this.recording = true;
+    this.recordTimer = setInterval(() => this.tickRecording(), 500);
+    this.tickRecording();
+  }
+
+  /** 停止录音并把这段语音发出去。 */
+  private async finishRecording(): Promise<void> {
+    if (!this.recording) return;
+    this.stopRecordTimer();
+    this.recording = false;
+    const recorder = this.recorder;
+    this.recorder = undefined;
+    setButtonText(this.voiceButton, "语音");
+    if (!recorder) return;
+    const recorded = await recorder.stop();
+    // 一秒钟都没录到就别发了（服务端只收 1 秒以上）。
+    if (!recorded) return;
+    await this.flow.sendVoice(recorded);
+  }
+
+  /** 刷新录音秒数；到上限自动停下发出去（服务端只收 1–60 秒）。 */
+  private tickRecording(): void {
+    const seconds = this.recorder?.elapsedSeconds() ?? 0;
+    setButtonText(this.voiceButton, `录音 ${seconds}s`);
+    if (seconds >= MAX_VOICE_SECONDS) void this.finishRecording();
+  }
+
+  private stopRecordTimer(): void {
+    if (this.recordTimer !== null) clearInterval(this.recordTimer);
+    this.recordTimer = null;
+  }
+
+  /** 页面自己发一条状态提示（录音相关的错误不走 `Screen`）。 */
+  private showStatus(text: string, isError: boolean): void {
+    this.statusLabel.text = text;
+    this.statusLabel.color = isError ? THEME.bad : THEME.warn;
+    this.statusLabel.visible = text.length > 0;
   }
 
   private renderMessages(rows: ChatMessageRow[]): void {
