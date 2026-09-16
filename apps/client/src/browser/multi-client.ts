@@ -4,7 +4,8 @@ import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js"
 import { button, element } from "./dom.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { resolveSeat, sortedHand } from "./table-order.js";
+import { nicknameOf, resolveSeat, sortedHand } from "./table-order.js";
+import { discardGroups, freshDiscardSeat, meldKindLabel, meldTiles } from "./tile-view.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 
@@ -36,6 +37,14 @@ const SEAT_COUNT = 4;
  * 顺时针邻位，扫一眼就知道接下来轮到谁。
  */
 const SEAT_POSITIONS = ["bottom", "right", "top", "left"] as const;
+
+/** 方位的中文名，用在同一张卡片上标「这一家坐在哪」。 */
+const POSITION_LABEL: Record<(typeof SEAT_POSITIONS)[number], string> = {
+  bottom: "下",
+  right: "右",
+  top: "上",
+  left: "左",
+};
 
 type RoomScreen = Extract<Screen, { name: "room" }>;
 
@@ -213,9 +222,8 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
   if (!match) {
     card.append(element("p", { className: "hint", text: room?.snapshot?.status === "waiting" ? "等待开局" : "连接中…" }));
   } else {
-    card.append(handBox(seat, match));
-    card.append(element("p", { className: "hint", text:
-      `副露 ${meldsText(match.melds)} · 已出 ${match.discards.map(tileLabel).join(" ") || "无"}` }));
+    card.append(tilesArea(seat, match));
+    card.append(element("p", { className: "hint", text: `已出 ${match.discards.length} 张（见中央弃牌区）` }));
   }
 
   card.append(opsRow(seat, seatNo));
@@ -224,11 +232,32 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
   return card;
 }
 
-function meldsText(melds: MatchState["melds"]): string {
-  if (melds.length === 0) return "无";
-  return melds
-    .map((meld) => `${meld.concealed ? "暗" : ""}${meld.kind === "kong" ? "杠" : "碰"}${tileLabel(meld.tile)}`)
-    .join(" ");
+/**
+ * 这一家摆出来的牌：手牌，紧挨着副露。
+ *
+ * 副露以前只报一句「副露 1」，看不出碰了什么、杠了什么 —— 而血战到底里
+ * 副露直接决定番型（碰碰胡、门清、金钩钓），光看个数等于没看到。
+ */
+function tilesArea(seat: SeatState, match: MatchState): HTMLElement {
+  const area = element("div", { className: "tiles-area" });
+  area.append(handBox(seat, match));
+  const melds = meldBox(match.melds);
+  if (melds.childElementCount > 0) area.append(melds);
+  return area;
+}
+
+/** 副露：一副一个框，框里按真实张数摆（碰 3 张、杠 4 张）。 */
+function meldBox(melds: MatchState["melds"]): HTMLElement {
+  const box = element("div", { className: "melds" });
+  for (const meld of melds) {
+    const group = element("div", { className: `meld-group${meld.kind === "kong" ? " kong" : ""}` });
+    group.append(element("span", { className: "kind", text: meldKindLabel(meld) }));
+    for (const tile of meldTiles(meld)) {
+      group.append(element("span", { className: "chip", text: tileLabel(tile) }));
+    }
+    box.append(group);
+  }
+  return box;
 }
 
 /**
@@ -340,8 +369,48 @@ function renderCenter(): void {
   if (match.phase === "missing") ops.append(button("四家全部自动定缺", () => autoAll("missing"), "primary"));
   if (ops.childElementCount > 0) centerHost.append(ops);
 
+  // 打出去的牌集中在中央 —— 以前它们只是每家卡片里的一串文字，
+  // 想看一眼「7万 打过了没有」得在四行文字里找。
+  if (match.phase === "playing" || match.phase === "claiming" || match.phase === "finished") {
+    centerHost.append(discardGrid(match, snapshot));
+  }
+
   const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each);
   if (result) centerHost.append(element("p", { className: "hint", text: resultText(result, snapshot) }));
+}
+
+/**
+ * 中央弃牌区：四家各一格，按座位号排。
+ *
+ * 牌的顺序就是打出来的先后（不做排序）——这是弃牌堆，不是手牌：
+ * 「他先打了 3 万、后面又打了 7 万」和反过来是两条不同的信息。
+ */
+function discardGrid(match: MatchState, snapshot: RoomSnapshot | null): HTMLElement {
+  const grid = element("div", { className: "discard-grid" });
+  const freshSeat = freshDiscardSeat(match);
+
+  for (const group of discardGroups(match)) {
+    const cell = element("div", { className: "discard-cell" });
+    const position = SEAT_POSITIONS[group.seat];
+    cell.append(element("div", { className: "discard-head" },
+      element("b", { text: `${group.seat} 号位` }),
+      ...(position ? [element("span", { text: `（${POSITION_LABEL[position]}）` })] : []),
+      element("span", { text: nicknameOf(snapshot, group.seat) }),
+      element("span", { text: `${group.tiles.length} 张` }),
+    ));
+
+    const tiles = element("div", { className: "discard-tiles" });
+    group.tiles.forEach((tile, index) => {
+      const chip = element("span", { className: "chip", text: tileLabel(tile) });
+      // 刚打出的那一张：claiming 阶段全场都在等它，框出来。
+      if (group.seat === freshSeat && index === group.tiles.length - 1) chip.classList.add("fresh");
+      tiles.append(chip);
+    });
+    if (group.tiles.length === 0) tiles.append(element("span", { className: "hint", text: "还没出牌" }));
+    cell.append(tiles);
+    grid.append(cell);
+  }
+  return grid;
 }
 
 function bannerText(match: MatchState, snapshot: RoomSnapshot | null): string {

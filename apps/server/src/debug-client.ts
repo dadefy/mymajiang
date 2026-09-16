@@ -162,6 +162,32 @@ export function multiClientHtml(options: DebugClientOptions): string {
     .ops { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
     .ops button { padding: 6px 10px; font-size: 13px; }
 
+    /* 手牌与副露并排：碰过/杠过的牌紧挨着这一家的手牌摆。
+       以前只报一句「副露 1」，看不出碰了什么 —— 而副露直接决定番型。 */
+    .tiles-area { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+    .melds { display: flex; gap: 4px; flex-wrap: wrap; padding-top: 8px; }
+    /* 左右两家是竖排手牌，副露跟着竖着摆在手牌旁边。 */
+    .seat.left .tiles-area, .seat.right .tiles-area { flex-wrap: nowrap; }
+    .seat.left .melds, .seat.right .melds { flex-direction: column; flex-wrap: nowrap; }
+    .meld-group { display: inline-flex; gap: 2px; align-items: center; padding: 2px 3px;
+                  border-radius: 6px; background: #0f1c17; border: 1px solid #2d5347; }
+    .meld-group.kong { border-color: #d8a13a; }
+    .meld-group .kind { font-size: 10px; color: #8fb3a5; margin: 0 2px; }
+
+    /* 小牌块：弃牌区与副露共用。比手牌小一号，好让一屏放得下。 */
+    .chip { display: inline-flex; align-items: center; justify-content: center;
+            width: 28px; height: 22px; background: #f4f1e6; color: #1d1a14;
+            font-weight: bold; font-size: 12px; border-radius: 4px; flex: none; }
+
+    /* 中央弃牌区：四家各一格，打出去的牌都在这儿看。 */
+    .discard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .discard-cell { background: #0f1c17; border: 1px solid #24443a; border-radius: 8px; padding: 6px 8px; }
+    .discard-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-size: 12px; color: #8fb3a5; }
+    .discard-head b { color: #cfe9de; font-size: 13px; }
+    .discard-tiles { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
+    /* 刚打出的那一张：claiming 阶段大家都在等它能不能被碰/杠/胡。 */
+    .chip.fresh { box-shadow: 0 0 0 2px #d8a13a; }
+
     .center { background: #14211c; border: 1px dashed #2d5347; border-radius: 10px; padding: 12px; }
     .banner { background: #3b2f10; border: 1px solid #d8a13a; color: #f0d9a8; border-radius: 8px;
               padding: 9px 12px; font-weight: bold; font-size: 15px; }
@@ -174,6 +200,9 @@ export function multiClientHtml(options: DebugClientOptions): string {
       #board { grid-template-columns: 1fr; grid-template-rows: auto; }
       .seat.top, .seat.left, .center, .seat.right, .seat.bottom { grid-area: auto; }
       .seat.left .hand, .seat.right .hand { flex-direction: row; flex-wrap: wrap; max-height: none; }
+      /* 单列时左右两家也变成横排手牌，副露跟着回到横排。 */
+      .seat.left .tiles-area, .seat.right .tiles-area { flex-wrap: wrap; }
+      .seat.left .melds, .seat.right .melds { flex-direction: row; flex-wrap: wrap; }
       input.text { min-width: 0; width: 100%; }
       .key-row { flex-wrap: wrap; }
     }
@@ -186,6 +215,7 @@ export function multiClientHtml(options: DebugClientOptions): string {
       <h2>四家同屏 · 一台设备控制四个玩家</h2>
       <p class="hint">填四把邀请密钥，点「自动开局」会依次完成：四家登录 → 一家建房 → 三家加入 →
         全部准备 → 房主开局。之后四家的手牌分列上、下、左、右（0 号位在下，按出牌顺序顺时针排开），
+        <strong>碰过 / 杠过的牌紧挨着那家的手牌摆</strong>，<strong>打出去的牌集中在中央弃牌区</strong>（四家各一格），
         每家的出牌与碰杠胡各自独立 —— 服务端是按座位脱敏的，这里看到的每张牌都来自对应那家自己的连接。</p>
       <p class="hint">⚠️ 「重来」只断开连接、<strong>不会退出房间</strong>：四家仍挂在原来那一局上，
         重连窗口内再点「自动开局」会自动回到同一局接着打；超过窗口就回不去了，
