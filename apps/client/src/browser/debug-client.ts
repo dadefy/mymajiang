@@ -272,7 +272,11 @@ function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
 function renderMatches(screen: Extract<Screen, { name: "home" }>): HTMLElement {
   const list = element("div", { className: "list" });
   if (screen.matches.length === 0) {
-    list.append(element("p", { className: "hint", text: "还没有战绩。" }));
+    // 战绩需要数据库：内存模式下查不了，这与「自己没打过」是两回事。
+    list.append(element("p", {
+      className: "hint",
+      text: screen.matchesUnavailable ? "当前运行模式没有战绩记录（服务端未配置数据库）。" : "还没有战绩。",
+    }));
   }
   for (const match of screen.matches) {
     const mine = match.me ? `我 ${match.me.accountDelta >= 0 ? "+" : ""}${match.me.accountDelta}` : "没参加";

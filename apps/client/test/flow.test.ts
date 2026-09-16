@@ -214,10 +214,12 @@ describe("ClientFlow", () => {
     expect(first.closed).toBe(true);
   });
 
-  it("主页列表拉取失败时留在主页并提示，不弹回登录", async () => {
+  it("战绩不可用（内存模式）不算错误，只在主页说明", async () => {
     const { flow, http } = flowWith();
     http.onJson("POST", "/v1/auth/login", 200, SESSION);
     http.onJson("GET", "/v1/groups", 200, { groups: [] });
+    // 没配数据库时服务端**按设计**返回 501。内测时每个人都会碰到它，
+    // 写成「操作失败」会让人以为系统坏了 —— 所以它只该是主页上的一句说明。
     http.onJson("GET", "/v1/matches", 501, { code: "MATCH_HISTORY_UNAVAILABLE" });
 
     await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
@@ -227,7 +229,25 @@ describe("ClientFlow", () => {
       me: { userId: SESSION.userId },
       groups: [],
       matches: [],
-      error: "操作失败（MATCH_HISTORY_UNAVAILABLE）",
+      matchesUnavailable: true,
+    });
+    expect(flow.current).not.toHaveProperty("error");
+  });
+
+  it("群列表拉取失败时留在主页并提示，不弹回登录", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    http.onJson("GET", "/v1/groups", 500, { code: "BOOM" });
+    http.onJson("GET", "/v1/matches", 200, { matches: [] });
+
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+
+    // 真正的失败仍然要提示出来 —— 上面那条「不算错误」不能把这类也吞掉。
+    expect(flow.current).toMatchObject({
+      name: "home",
+      groups: [],
+      matches: [],
+      error: "操作失败（BOOM）",
     });
   });
 

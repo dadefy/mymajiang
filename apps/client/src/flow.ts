@@ -77,6 +77,11 @@ export type Screen =
       me: { userId: string; nickname: string; points: number };
       groups: GroupSummary[];
       matches: MatchSummary[];
+      /**
+       * 战绩需要数据库。内存模式下服务端按设计返回 501 —— 这是**能力不可用**，不是操作失败，
+       * 所以单独一个标记让页面说清楚，而不是弹一条让人以为系统坏了的错误。
+       */
+      matchesUnavailable: boolean;
       busy: boolean;
       error?: string | undefined;
     }
@@ -220,17 +225,24 @@ export class ClientFlow {
     await this.enterHome(activated.value);
   }
 
-  /** 回主页：拉群列表与战绩。任何一项失败都留在主页并提示，不弹回登录。 */
+  /**
+   * 回主页：拉群列表与战绩。任何一项失败都留在主页并提示，不弹回登录。
+   *
+   * 但**战绩不可用要排除在外**：它需要数据库，内存模式下服务端按设计返回 501，
+   * 内测时每个人都会看到它 —— 写成「操作失败」会让人以为系统坏了。
+   */
   async refreshHome(): Promise<void> {
     if (this.screen.name !== "home") return;
     this.set({ ...this.screen, busy: true });
     const [groups, matches] = await Promise.all([this.api.groups(), this.api.matches()]);
-    const failure = groups.ok ? (matches.ok ? null : matches.error) : groups.error;
+    const matchesUnavailable = !matches.ok && matches.error.kind === "unavailable";
+    const failure = groups.ok ? (matches.ok || matchesUnavailable ? null : matches.error) : groups.error;
     this.set({
       name: "home",
       me: this.screen.me,
       groups: groups.ok ? groups.value.groups : [],
       matches: matches.ok ? matches.value.matches : [],
+      matchesUnavailable,
       busy: false,
       ...(failure ? { error: describe(failure) } : {}),
     });
@@ -504,14 +516,17 @@ export class ClientFlow {
   private async enterHome(me: { userId: string; nickname: string; points: number }): Promise<void> {
     // 令牌在登录那一刻就已由 ApiClient 自动持有；这里只记住「我是谁」，离开房间回主页时要用。
     this.me = me;
-    this.set({ name: "home", me: this.me, groups: [], matches: [], busy: true });
+    this.set({ name: "home", me: this.me, groups: [], matches: [], matchesUnavailable: false, busy: true });
     const [groups, matches] = await Promise.all([this.api.groups(), this.api.matches()]);
-    const failure = groups.ok ? (matches.ok ? null : matches.error) : groups.error;
+    // 同 refreshHome：战绩不可用（没配数据库）是预期状态，不算失败。
+    const matchesUnavailable = !matches.ok && matches.error.kind === "unavailable";
+    const failure = groups.ok ? (matches.ok || matchesUnavailable ? null : matches.error) : groups.error;
     this.set({
       name: "home",
       me: this.me,
       groups: groups.ok ? groups.value.groups : [],
       matches: matches.ok ? matches.value.matches : [],
+      matchesUnavailable,
       busy: false,
       ...(failure ? { error: describe(failure) } : {}),
     });

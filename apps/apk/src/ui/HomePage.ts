@@ -69,7 +69,7 @@ export class HomePage {
     this.errorLabel.visible = !screen.busy && screen.error !== undefined;
     this.errorLabel.text = screen.error ?? "";
     this.renderGroups(screen.groups);
-    this.renderMatches(screen.matches);
+    this.renderMatches(screen.matches, screen.matchesUnavailable);
   }
 
   private async joinRoom(): Promise<void> {
@@ -103,8 +103,12 @@ export class HomePage {
     });
   }
 
-  private renderMatches(matches: MatchSummary[]): void {
+  private renderMatches(matches: MatchSummary[], unavailable: boolean): void {
     this.matchEmpty.visible = matches.length === 0;
+    // 「没打过牌」和「这个模式查不了战绩」是两回事，别让内测的人以为系统坏了。
+    this.matchEmpty.text = unavailable
+      ? "当前运行模式没有战绩记录（服务器未配置数据库）"
+      : "还没有打过牌";
     refill(this.matchList, matches.length, (index, row) => {
       const match = matches[index]!;
       const mine = match.me?.accountDelta ?? 0;
