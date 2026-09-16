@@ -699,6 +699,15 @@ describe("server API", () => {
     // 所以这里注入的是空串 —— 隧道与反向代理下都自动正确。
     expect(page.body).toContain('"socketUrl":""');
 
+    // 四家同屏页面：同样只在服务端生成，模块复用 /debug 那个静态目录
+    // （所以不需要为它另配一条静态路由）。
+    const multi = await app.inject({ method: "GET", url: "/multi" });
+    expect(multi.statusCode).toBe(200);
+    expect(multi.headers["content-type"]).toContain("text/html");
+    expect(multi.headers["cache-control"]).toBe("no-store");
+    expect(multi.body).toContain("/debug/browser/multi-client.js");
+    expect(multi.body).toContain('"socketUrl":""');
+
     // 根路径把人送到内测客户端：分享出去的网址不该是个 404。
     const root = await app.inject({ method: "GET", url: "/" });
     expect(root.statusCode).toBe(302);
@@ -709,8 +718,9 @@ describe("server API", () => {
     const traversal = await app.inject({ method: "GET", url: "/debug/%2e%2e%2fpackage.json" });
     expect(traversal.statusCode).toBe(404);
 
-    // 没开调试客户端时完全不注册。
+    // 没开调试客户端时两个页面都不注册。
     expect((await fixture().app.inject({ method: "GET", url: "/debug" })).statusCode).toBe(404);
+    expect((await fixture().app.inject({ method: "GET", url: "/multi" })).statusCode).toBe(404);
   });
 
   it("LayaAir Web 版挂在 /app，路径不许越出产物目录", async () => {

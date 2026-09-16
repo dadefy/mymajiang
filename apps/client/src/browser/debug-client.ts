@@ -1,7 +1,10 @@
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
-import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Suit, Tile } from "../protocol.js";
+import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
+import { button, element } from "./dom.js";
+import { readRuntimeConfig } from "./runtime-config.js";
 import { activeRing, nicknameOf, relationLabel, turnOrder } from "./table-order.js";
+import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 import { BrowserVoiceRecorder } from "./voice-recorder.js";
 import { MediaCache } from "./media-cache.js";
@@ -17,58 +20,11 @@ import { MediaCache } from "./media-cache.js";
  * 令牌持有这些逻辑与最终版本完全一致 —— 换渲染层时业务行为不会变。
  */
 
-interface RuntimeConfig {
-  apiBaseUrl: string;
-  socketUrl: string;
-}
-
-const SUIT_LABEL: Record<Suit, string> = { wan: "万", tong: "筒", tiao: "条" };
-
-/** 牌面文字。牌的编号是 0..26：0-8 万、9-17 筒、18-26 条。 */
-function tileLabel(tile: Tile): string {
-  const suit = (["wan", "tong", "tiao"] as const)[Math.floor(tile / 9)] ?? "wan";
-  return `${(tile % 9) + 1}${SUIT_LABEL[suit]}`;
-}
-
-/**
- * 配置来源：服务端注入的 `window.__MYMJ_CONFIG__`，没有就按同源推断。
- *
- * 单端口部署时页面与接口同源，直接用 `location.origin` 推出实时通道地址即可：
- * `https://x` → `wss://x`、`http://x:3000` → `ws://x:3000`。
- * 这样**隧道、反向代理、HTTPS 全都自动正确** —— 换成 `wss://` 是浏览器对
- * HTTPS 页面的硬要求（混合内容会被拦截），同源推导天然满足。
- */
-function config(): RuntimeConfig {
-  const injected = (globalThis as { __MYMJ_CONFIG__?: Partial<RuntimeConfig> }).__MYMJ_CONFIG__ ?? {};
-  const origin = location.origin;
-  return {
-    apiBaseUrl: injected.apiBaseUrl ?? origin,
-    socketUrl: injected.socketUrl || origin.replace(/^http/, "ws"),
-  };
-}
-
-const runtime = config();
+const runtime = readRuntimeConfig();
 const api = new ApiClient(new FetchHttpTransport(runtime.apiBaseUrl));
 const flow = new ClientFlow(api, new BrowserSocketTransportFactory(), runtime.socketUrl, new FetchUploadTransport());
 
 // ---------- 小工具 ----------
-
-function element<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  options: { text?: string; className?: string; onClick?: () => void } = {},
-  ...children: (Node | string)[]
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  if (options.text !== undefined) node.textContent = options.text;
-  if (options.className) node.className = options.className;
-  if (options.onClick) node.addEventListener("click", options.onClick);
-  if (children.length > 0) node.append(...children);
-  return node;
-}
-
-function button(label: string, onClick: () => void, className = ""): HTMLButtonElement {
-  return element("button", { text: label, className, onClick });
-}
 
 function panel(title: string, ...children: HTMLElement[]): HTMLElement {
   const box = element("section", { className: "panel" });
@@ -153,6 +109,10 @@ function renderBar(screen: Screen): void {
   } else {
     bar.append(element("span", { text: "绵阳血战麻将 · 内测调试客户端" }));
   }
+  // 四家同屏那个页面的入口：内测时一个人验一整局，比凑四个人快得多。
+  const multi = element("a", { className: "link", text: "四家同屏 →" });
+  multi.href = "/multi";
+  bar.append(multi);
 }
 
 function errorLine(message: string | undefined): HTMLElement | null {
@@ -535,10 +495,7 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
         }
       },
     });
-    if (match.missingSuit) {
-      const suit = (["wan", "tong", "tiao"] as const)[Math.floor(tile / 9)];
-      if (suit === match.missingSuit) node.classList.add("missing-suit");
-    }
+    if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
     hand.append(node);
   }
 
@@ -554,8 +511,8 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
     );
   }
   if (match.phase === "missing") {
-    for (const suit of ["wan", "tong", "tiao"] as const) {
-      row.append(button(`定缺 ${SUIT_LABEL[suit]}`, () => flow.chooseMissing(suit as Suit)));
+    for (const suit of SUITS) {
+      row.append(button(`定缺 ${SUIT_LABEL[suit]}`, () => flow.chooseMissing(suit)));
     }
     row.append(button("自动定缺", () => flow.autoMissing()));
   }

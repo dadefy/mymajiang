@@ -61,3 +61,33 @@ export function nicknameOf(snapshot: RoomSnapshot | null, seat: number): string 
 export function turnOrder(match: MatchState): number[] {
   return [match.seat, ...activeRing(match)];
 }
+
+/**
+ * 把一条客户端连接对回座位号。
+ *
+ * 只有四家同屏那个页面上需要 —— 单人版里「我在几号位」就是 `match.seat`，
+ * 但同屏版要在一个屏幕上摆四条连接，且**等待期还没有对局视图**，
+ * 那时只能拿房间成员列表的下标去反查（服务端的约定就是 `players[i]` 坐 i 号位）。
+ *
+ * 三级回退，顺序不能换：
+ *   1. `matchSeat` —— 服务端权威给定的，最可靠；
+ *   2. 成员列表里按 `userId` 找下标；
+ *   3. `fallback`（同屏版传连接序号）—— 保证四家各占一个方位、互不覆盖。
+ *
+ * 注意第 1 步必须用 `!== null` 判断：**座位 0 是合法值**，写成真值判断会让
+ * 坐 0 号位的那家被当成「还没有座位」，然后掉到回退里去 —— 表现是四个方位
+ * 随机错位，而且只在部分账号上复现。
+ */
+export function resolveSeat(input: {
+  matchSeat: number | null;
+  userId: string | null;
+  players: ReadonlyArray<{ userId: string }> | null;
+  fallback: number;
+}): number {
+  if (input.matchSeat !== null) return input.matchSeat;
+  if (input.userId !== null && input.players !== null) {
+    const index = input.players.findIndex((player) => player.userId === input.userId);
+    if (index >= 0 && index < 4) return index;
+  }
+  return input.fallback;
+}

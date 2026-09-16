@@ -5,6 +5,7 @@ import {
   nextActiveSeat,
   nicknameOf,
   relationLabel,
+  resolveSeat,
   turnOrder,
 } from "../src/browser/table-order.js";
 
@@ -127,5 +128,36 @@ describe("座位号换昵称", () => {
     // 进房的一瞬间 match 帧可能先于房间快照到达。
     expect(nicknameOf(null, 2)).toBe("2 号位");
     expect(nicknameOf(snapshot(["张三"]), 3)).toBe("3 号位");
+  });
+});
+
+describe("四家同屏：把一条连接对回座位号", () => {
+  const players = snapshot(["张三", "李四", "王五", "赵六"]).players;
+
+  it("有对局视图时以服务端给的座位为准", () => {
+    // 开局之后 match.seat 是权威值，比任何推断都可靠。
+    expect(resolveSeat({ matchSeat: 2, userId: "u0", players, fallback: 0 })).toBe(2);
+  });
+
+  it("座位 0 是合法值，不能被当成「还没有座位」", () => {
+    // 写成真值判断（`if (matchSeat)`）会让坐 0 号位的那家掉进回退分支，
+    // 表现是四个方位随机错位、且只在部分账号上复现 —— 很难查。
+    expect(resolveSeat({ matchSeat: 0, userId: "u3", players, fallback: 3 })).toBe(0);
+  });
+
+  it("等待期没有对局视图，靠 userId 在成员列表里的下标反查", () => {
+    expect(resolveSeat({ matchSeat: null, userId: "u1", players, fallback: 0 })).toBe(1);
+    expect(resolveSeat({ matchSeat: null, userId: "u3", players, fallback: 1 })).toBe(3);
+  });
+
+  it("还没登录、或快照还没到时退回连接序号，保证四家各占一个方位", () => {
+    expect(resolveSeat({ matchSeat: null, userId: null, players, fallback: 2 })).toBe(2);
+    expect(resolveSeat({ matchSeat: null, userId: "u0", players: null, fallback: 1 })).toBe(1);
+  });
+
+  it("userId 不在成员列表里时也退回连接序号，而不是 -1", () => {
+    // 四个账号可能不同批（有人换过密钥、或房间里还有上一局留下的人），
+    // 对不上号时宁可方位暂时不准，也不能把卡片画到不存在的座位上去。
+    expect(resolveSeat({ matchSeat: null, userId: "u9", players, fallback: 3 })).toBe(3);
   });
 });

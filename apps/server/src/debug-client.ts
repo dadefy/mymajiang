@@ -76,6 +76,7 @@ export function debugClientHtml(options: DebugClientOptions): string {
     .order b { color: #d8a13a; font-weight: normal; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
     .error { color: #ff9b9b; margin: 8px 0; }
+    a.link { color: #d8a13a; text-decoration: none; font-weight: bold; }
     code { background: #0d1613; padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
@@ -84,6 +85,122 @@ export function debugClientHtml(options: DebugClientOptions): string {
   <main id="app"></main>
   <script>globalThis.__MYMJ_CONFIG__ = ${runtimeConfig};</script>
   <script type="module" src="/debug/browser/debug-client.js"></script>
+</body>
+</html>`;
+}
+
+/**
+ * `GET /multi` 的页面：四家同屏。
+ *
+ * 与 `/debug` 是同一套业务层（都跑 `ClientFlow`），区别只在于这里同时开**四条独立连接**，
+ * 把四家的手牌与操作摊在一个屏幕上。用途是内测时不用真的凑四个人 ——
+ * 一个人就能把整局打完，而且打出来的行为与四个真人打完全一致。
+ *
+ * 模块从 `/debug/browser/` 取（复用同一个静态目录），所以不需要另配静态路由。
+ */
+export function multiClientHtml(options: DebugClientOptions): string {
+  const runtimeConfig = JSON.stringify({ socketUrl: options.socketUrl });
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>绵阳血战麻将 · 四家同屏</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Microsoft YaHei", system-ui, sans-serif; background: #101a17; color: #e6f1ec; }
+    * { box-sizing: border-box; }
+    /* 作者样式里的 display 会压过 [hidden] 的 UA 规则，所以显式钉住。 */
+    [hidden] { display: none !important; }
+    body { margin: 0; }
+    #bar { display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: #123d2c; flex-wrap: wrap; }
+    .spacer { flex: 1; }
+    main { max-width: 1180px; margin: 0 auto; padding: 14px; display: grid; gap: 12px; }
+    .panel { background: #17241f; border: 1px solid #24443a; border-radius: 10px; padding: 16px; }
+    h2 { margin: 0 0 10px; font-size: 17px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+    button { background: #1d6b4a; color: white; border: 0; border-radius: 7px; padding: 7px 12px; font: inherit; cursor: pointer; }
+    button.primary { background: #d8a13a; color: #241a05; font-weight: bold; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.tile { background: #f4f1e6; color: #1d1a14; font-weight: bold; padding: 9px 7px; min-width: 46px; }
+    button.tile.chosen { background: #d8a13a; }
+    button.tile.missing-suit { opacity: .45; box-shadow: inset 0 0 0 2px #a83434; }
+    input.text { background: #0d1613; color: inherit; border: 1px solid #2d5347; border-radius: 7px; padding: 8px 10px; font: inherit; min-width: 300px; }
+    .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
+    .error { color: #ff9b9b; font-size: 13px; margin: 6px 0; }
+
+    .keys { display: grid; gap: 8px; margin: 10px 0; }
+    .key-row { display: flex; gap: 8px; align-items: center; }
+    .key-tag { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center;
+               border-radius: 50%; background: #24443a; font-size: 12px; color: #b9d6c9; flex: none; }
+
+    /* 四方牌桌：上 / 下 / 左 / 右，中央放公共信息。 */
+    #board { display: grid;
+             grid-template-columns: minmax(150px, 1fr) minmax(210px, 1.15fr) minmax(150px, 1fr);
+             grid-template-rows: auto minmax(160px, auto) auto;
+             gap: 10px; align-items: start; }
+    .seat.top    { grid-area: 1 / 2; }
+    .seat.left   { grid-area: 2 / 1; }
+    .center      { grid-area: 2 / 2; }
+    .seat.right  { grid-area: 2 / 3; }
+    .seat.bottom { grid-area: 3 / 2; }
+
+    .seat-card { background: #17241f; border: 1px solid #24443a; border-radius: 10px; padding: 10px; }
+    .seat-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; margin-bottom: 6px; }
+    .seat-head .who { color: #b9d6c9; }
+    .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #24443a; color: #cfe9de; }
+    .tag.acting { background: #d8a13a; color: #241a05; font-weight: bold; }
+    .tag.won { background: #4a2b2b; color: #ffc9c9; }
+
+    .hand { display: flex; gap: 5px; flex-wrap: wrap; margin: 8px 0; }
+    /* 左右两家按真实牌桌的样子竖着摆，也省横向空间。 */
+    .seat.left .hand, .seat.right .hand { flex-direction: column; flex-wrap: nowrap; align-items: stretch;
+                                          max-height: 380px; overflow: auto; }
+    .seat.left button.tile, .seat.right button.tile { min-width: 0; padding: 6px 8px; }
+    .ops { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
+    .ops button { padding: 6px 10px; font-size: 13px; }
+
+    .center { background: #14211c; border: 1px dashed #2d5347; border-radius: 10px; padding: 12px; }
+    .banner { background: #3b2f10; border: 1px solid #d8a13a; color: #f0d9a8; border-radius: 8px;
+              padding: 9px 12px; font-weight: bold; font-size: 15px; }
+    .room-no { font-size: 20px; font-weight: bold; margin: 4px 0; }
+    .meta { color: #b9d6c9; font-size: 13px; margin: 8px 0 4px; }
+    .center .ops { margin: 10px 0 0; }
+
+    /* 窄屏（手机）退回单列：四方布局在竖屏里挤不下，宁可按顺序排。 */
+    @media (max-width: 780px) {
+      #board { grid-template-columns: 1fr; grid-template-rows: auto; }
+      .seat.top, .seat.left, .center, .seat.right, .seat.bottom { grid-area: auto; }
+      .seat.left .hand, .seat.right .hand { flex-direction: row; flex-wrap: wrap; max-height: none; }
+      input.text { min-width: 0; width: 100%; }
+      .key-row { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <header id="bar"></header>
+  <main>
+    <section id="setup" class="panel">
+      <h2>四家同屏 · 一台设备控制四个玩家</h2>
+      <p class="hint">填四把邀请密钥，点「自动开局」会依次完成：四家登录 → 一家建房 → 三家加入 →
+        全部准备 → 房主开局。之后四家的手牌分列上、下、左、右（0 号位在下，按出牌顺序顺时针排开），
+        每家的出牌与碰杠胡各自独立 —— 服务端是按座位脱敏的，这里看到的每张牌都来自对应那家自己的连接。</p>
+      <div id="keys" class="keys"></div>
+      <div class="row">
+        <button id="auto" class="primary">自动开局</button>
+        <button id="again">重来</button>
+      </div>
+      <p id="status" class="hint"></p>
+    </section>
+    <section id="board" hidden>
+      <div class="seat top" id="pos-top"></div>
+      <div class="seat left" id="pos-left"></div>
+      <div class="center" id="center"></div>
+      <div class="seat right" id="pos-right"></div>
+      <div class="seat bottom" id="pos-bottom"></div>
+    </section>
+  </main>
+  <script>globalThis.__MYMJ_CONFIG__ = ${runtimeConfig};</script>
+  <script type="module" src="/debug/browser/multi-client.js"></script>
 </body>
 </html>`;
 }
@@ -119,6 +236,12 @@ export function registerDebugClient(app: FastifyInstance, options: DebugClientOp
     .header("Cache-Control", "no-store")
     .type("text/html; charset=utf-8")
     .send(debugClientHtml(options)));
+
+  // 四家同屏：一台设备开四条连接，一个人打完整局。内测时不必真的凑四个人。
+  app.get("/multi", async (_request: FastifyRequest, reply: FastifyReply) => reply
+    .header("Cache-Control", "no-store")
+    .type("text/html; charset=utf-8")
+    .send(multiClientHtml(options)));
 
   app.get("/debug/*", async (request: FastifyRequest, reply: FastifyReply) => {
     const params = request.params as { "*"?: string };
