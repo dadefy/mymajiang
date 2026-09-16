@@ -2,8 +2,9 @@ import { ApiClient } from "../api-client.js";
 import { ClientFlow, type Screen } from "../flow.js";
 import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
 import { button, element } from "./dom.js";
+import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { resolveSeat } from "./table-order.js";
+import { resolveSeat, sortedHand } from "./table-order.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 
@@ -242,7 +243,7 @@ function handBox(seat: SeatState, match: MatchState): HTMLElement {
     box.append(element("span", { className: "hint", text: match.won ? "已胡，退出轮转" : "没有手牌" }));
     return box;
   }
-  for (const tile of match.hand) {
+  for (const tile of sortedHand(match.hand)) {
     const chosen = seat.selected.includes(tile);
     const node = element("button", {
       text: tileLabel(tile),
@@ -306,13 +307,11 @@ function opsRow(seat: SeatState, seatNo: number): HTMLElement {
     }
     row.append(button("自动", () => seat.flow.autoMissing()));
   }
-  if (room.actions.includes("hu")) row.append(button("胡", () => seat.flow.claim("hu"), "primary"));
-  if (room.actions.includes("peng")) row.append(button("碰", () => seat.flow.claim("peng")));
-  if (room.actions.includes("kong")) row.append(button("杠", () => seat.flow.claim("kong")));
-  if (room.actions.includes("pass")) row.append(button("过", () => seat.flow.claim("pass")));
-  if (room.actions.includes("self-draw")) row.append(button("自摸", () => seat.flow.selfDraw(), "primary"));
-  if (room.actions.includes("concealed-kong")) row.append(button("暗杠", () => seat.flow.concealedKong()));
-  if (room.actions.includes("added-kong")) row.append(button("补杠", () => seat.flow.addedKong()));
+  // 动作名与按钮的对应收在 action-buttons.ts，两个页面共用一份 ——
+  // 之前两处各写一遍，结果三个动作名（暗杠/补杠/自摸）一起写错。
+  for (const spec of actionButtons(room.actions, match.phase)) {
+    row.append(button(spec.label, () => runAction(seat.flow, spec.kind), spec.primary ? "primary" : ""));
+  }
   return row;
 }
 

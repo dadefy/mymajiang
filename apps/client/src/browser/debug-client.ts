@@ -1,9 +1,10 @@
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
 import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
+import { actionButtons, runAction } from "./action-buttons.js";
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { activeRing, nicknameOf, relationLabel, turnOrder } from "./table-order.js";
+import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 import { BrowserVoiceRecorder } from "./voice-recorder.js";
@@ -477,9 +478,9 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
     ));
   }
 
-  // 我的手牌：换三张阶段可点选，行牌阶段点击即出牌。
+  // 我的手牌：换三张阶段可点选，行牌阶段点击即出牌。按牌面排好，好找牌。
   const hand = element("div", { className: "hand" });
-  for (const tile of match.hand) {
+  for (const tile of sortedHand(match.hand)) {
     const chosen = selected.includes(tile);
     const node = element("button", {
       text: tileLabel(tile),
@@ -516,13 +517,10 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
     }
     row.append(button("自动定缺", () => flow.autoMissing()));
   }
-  if (actions.includes("hu")) row.append(button("胡", () => flow.claim("hu"), "primary"));
-  if (actions.includes("peng")) row.append(button("碰", () => flow.claim("peng")));
-  if (actions.includes("kong")) row.append(button("杠", () => flow.claim("kong")));
-  if (actions.includes("pass")) row.append(button("过", () => flow.claim("pass")));
-  if (actions.includes("self-draw")) row.append(button("自摸", () => flow.selfDraw(), "primary"));
-  if (actions.includes("concealed-kong")) row.append(button("暗杠", () => flow.concealedKong()));
-  if (actions.includes("added-kong")) row.append(button("补杠", () => flow.addedKong()));
+  // 动作名与按钮的对应收在 action-buttons.ts，与四家同屏共用一份 —— 见那里的说明。
+  for (const spec of actionButtons(actions, match.phase)) {
+    row.append(button(spec.label, () => runAction(flow, spec.kind), spec.primary ? "primary" : ""));
+  }
 
   box.append(hand, row, element("p", { className: "hint", text: `我的副露：${match.melds.map((meld) => `${meld.kind}${tileLabel(meld.tile)}`).join(" ") || "无"}` }),
     element("p", { className: "hint", text: `我已出：${match.discards.map(tileLabel).join(" ") || "无"}` }));

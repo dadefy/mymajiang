@@ -1,7 +1,7 @@
-import type { MatchState, RoomSnapshot } from "../protocol.js";
+import type { MatchState, RoomSnapshot, Tile } from "../protocol.js";
 
 /**
- * 牌桌上的「轮到谁」与出牌顺序。
+ * 牌桌上的顺序：谁在什么时候动、手牌怎么排。
  *
  * 全是纯函数，不碰 DOM —— 这样才能单独测。方位算错在血战到底后期特别难发现：
  * 那时已经有人胡牌、退出了轮转，肉眼看着「下家」还以为是隔壁座位。
@@ -90,4 +90,18 @@ export function resolveSeat(input: {
     if (index >= 0 && index < 4) return index;
   }
   return input.fallback;
+}
+
+/**
+ * 手牌按牌面排好：万 → 筒 → 条，每种从 1 到 9。
+ *
+ * 牌的编号本身就是这个顺序（0–8 万、9–17 筒、18–26 条），所以按数值升序排即可。
+ * 服务端给的顺序是「发牌 + 摸牌」的先后，直接用会横七竖八 —— 一手牌里找一张牌
+ * 要来回扫，血战后期牌多了尤其难受。
+ *
+ * 只影响显示：出牌传的是牌值本身，与它在手牌里排第几无关。
+ * 返回新数组，不改动调用方拿到的那个（`match.hand` 是服务端视图的一部分）。
+ */
+export function sortedHand(hand: readonly Tile[]): Tile[] {
+  return [...hand].sort((left, right) => left - right);
 }

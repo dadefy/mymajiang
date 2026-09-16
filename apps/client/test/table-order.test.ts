@@ -6,8 +6,10 @@ import {
   nicknameOf,
   relationLabel,
   resolveSeat,
+  sortedHand,
   turnOrder,
 } from "../src/browser/table-order.js";
+import { tileLabel } from "../src/browser/tile-label.js";
 
 /** 造一局牌。默认「开局刚坐下」：四人都在轮转里。 */
 function match(options: {
@@ -159,5 +161,30 @@ describe("四家同屏：把一条连接对回座位号", () => {
     // 四个账号可能不同批（有人换过密钥、或房间里还有上一局留下的人），
     // 对不上号时宁可方位暂时不准，也不能把卡片画到不存在的座位上去。
     expect(resolveSeat({ matchSeat: null, userId: "u9", players, fallback: 3 })).toBe(3);
+  });
+});
+
+describe("手牌排序", () => {
+  it("按牌面排：万 → 筒 → 条，每种 1–9", () => {
+    // 牌的编号本身就是这个顺序（0–8 万、9–17 筒、18–26 条），所以升序排即可。
+    const messy = [20, 8, 9, 0, 26, 17]; // 3条、9万、1筒、1万、9条、9筒
+    expect(sortedHand(messy).map(tileLabel)).toEqual(["1万", "9万", "1筒", "9筒", "3条", "9条"]);
+  });
+
+  it("不改动传入的数组 —— match.hand 是服务端视图的一部分", () => {
+    const original = [5, 1, 3];
+    const sorted = sortedHand(original);
+    expect(original).toEqual([5, 1, 3]);
+    expect(sorted).toEqual([1, 3, 5]);
+  });
+
+  it("空手牌与单张都不出错", () => {
+    expect(sortedHand([])).toEqual([]);
+    expect(sortedHand([7])).toEqual([7]);
+  });
+
+  it("相同的牌排在一起（手上有对子时不会散开）", () => {
+    const withPair = [4, 13, 4, 13, 4];
+    expect(sortedHand(withPair)).toEqual([4, 4, 4, 13, 13]);
   });
 });
