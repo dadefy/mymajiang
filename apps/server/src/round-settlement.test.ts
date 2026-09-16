@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MahjongGame } from "@mianyang-mahjong/rules";
-import type { MatchRoom } from "@mianyang-mahjong/domain";
-import { playerSnapshot, roundSettlement } from "./ws-server.js";
+import type { MatchRoom, RoomResult } from "@mianyang-mahjong/domain";
+import { matchSettlement, playerSnapshot, roundSettlement } from "./ws-server.js";
 
 const ids = ["p0", "p1", "p2", "p3"] as [string, string, string, string];
 describe("round reveal", () => {
@@ -142,5 +142,87 @@ describe("round reveal", () => {
     expect([...kinds].every((name) => /[\u4e00-\u9fa5]/.test(name))).toBe(true);
     expect(sawSelfDraw).toBeGreaterThan(0);
     expect(sawDiscard).toBeGreaterThan(0);
+  });
+});
+
+describe("整局结算帧的载荷", () => {
+  /** 四位玩家：`seat` 是开局时按加入顺序定死的，昵称/头像/余额都挂在 account 上。 */
+  const seated = [
+    { userId: "1000000004", nickname: "赵六", avatarUrl: "avatar-4", points: 994, seat: 3 },
+    { userId: "1000000001", nickname: "张三", avatarUrl: "avatar-1", points: 1022, seat: 0 },
+    { userId: "1000000003", nickname: "王五", avatarUrl: "avatar-3", points: 992, seat: 2 },
+    { userId: "1000000002", nickname: "李四", avatarUrl: "avatar-2", points: 992, seat: 1 },
+  ];
+  const result: RoomResult = {
+    roomId: "r",
+    completedRounds: 8,
+    reason: "completed",
+    rawDeltas: [
+      { playerId: "1000000001", delta: 28 },
+      { playerId: "1000000002", delta: -8 },
+      { playerId: "1000000003", delta: -14 },
+      { playerId: "1000000004", delta: -6 },
+    ],
+    accountDeltas: [
+      { playerId: "1000000001", delta: 22 },
+      { playerId: "1000000002", delta: -8 },
+      { playerId: "1000000003", delta: -8 },
+      { playerId: "1000000004", delta: -6 },
+    ],
+  };
+
+  it("补上开始/结算两个时间戳，并把四行明细按座位排好", () => {
+    // 这份载荷长在 `broadcastState` 深处，只有**真打完一整局 8 小场**才会走到 ——
+    // 那一局要跑十几分钟，所以这里直接对着函数断言。
+    const room = {
+      roomId: "r",
+      startedAt: new Date("2026-09-17T00:00:00.000Z"),
+      finishedAt: new Date("2026-09-17T00:42:18.000Z"),
+      // 故意打乱插入顺序：输出必须是按 `seat` 排的，不能跟着 Map 的插入顺序走。
+      players: new Map(seated.map((entry) => [
+        entry.userId,
+        { account: { userId: entry.userId, nickname: entry.nickname, avatarUrl: entry.avatarUrl, points: entry.points }, seat: entry.seat },
+      ])),
+    } as unknown as MatchRoom;
+
+    const frame = matchSettlement(room, result);
+
+    // 两个毫秒时间戳（不是 Date）—— 结算记录顶部「开始 … 耗时 …」的唯一来源。
+    expect(frame.startedAt).toBe(Date.parse("2026-09-17T00:00:00.000Z"));
+    expect(frame.finishedAt).toBe(Date.parse("2026-09-17T00:42:18.000Z"));
+    expect(frame.finishedAt! - frame.startedAt!).toBe(2_538_000); // 42 分 18 秒
+
+    // 四行明细：顺序按座位，每行的 id / 昵称 / 头像 / 得失分 / 入账分 / 余额都对上人。
+    expect(frame.players.map((player) => player.seat)).toEqual([0, 1, 2, 3]);
+    expect(frame.players.map((player) => player.playerId))
+      .toEqual(["1000000001", "1000000002", "1000000003", "1000000004"]);
+    expect(frame.players.map((player) => player.nickname)).toEqual(["张三", "李四", "王五", "赵六"]);
+    expect(frame.players.map((player) => player.avatarUrl))
+      .toEqual(["avatar-1", "avatar-2", "avatar-3", "avatar-4"]);
+    expect(frame.players.map((player) => player.delta)).toEqual([28, -8, -14, -6]);
+    // 0 号位与 2 号位被处理过（+28→+22、-14→-8）—— 入账分与场上净胜负必须分开给。
+    expect(frame.players.map((player) => player.accountDelta)).toEqual([22, -8, -8, -6]);
+    expect(frame.players.map((player) => player.balance)).toEqual([1022, 992, 992, 994]);
+    // 零和：帧里那四行也得零和，玩家就是拿它来对账的。
+    expect(frame.players.reduce((sum, player) => sum + player.delta, 0)).toBe(0);
+
+    // 域层原有的字段一个都不能丢 —— 客户端还读 `rawDeltas` / `accountDeltas` / `reason`。
+    expect(frame.reason).toBe("completed");
+    expect(frame.completedRounds).toBe(8);
+    expect(frame.rawDeltas).toEqual(result.rawDeltas);
+    expect(frame.accountDeltas).toEqual(result.accountDeltas);
+    // 早先多下发过一个顶层 `balances`（与 `players[].balance` 是同一份数据）—— 已合并，别再回来。
+    expect(frame).not.toHaveProperty("balances");
+  });
+
+  it("房间没有时间戳时：startedAt 不给，finishedAt 兜底当前时刻（绝不写 NaN）", () => {
+    // 「缺开始时刻就整行不显示」是客户端的约定，前提是这里给的是 undefined 而不是 0/NaN。
+    const room = { roomId: "r", players: new Map() } as unknown as MatchRoom;
+    const before = Date.now();
+    const frame = matchSettlement(room, { ...result, reason: "dissolved", rawDeltas: [], accountDeltas: [] });
+    expect(frame.startedAt).toBeUndefined();
+    expect(frame.finishedAt).toBeGreaterThanOrEqual(before);
+    expect(Number.isFinite(frame.finishedAt)).toBe(true);
+    expect(frame.players).toEqual([]);
   });
 });

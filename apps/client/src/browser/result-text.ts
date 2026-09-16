@@ -53,6 +53,55 @@ export function roundLabel(roundNumber: number, totalRounds?: number): string {
   return `第 ${roundNumber}/${totalRounds ?? 8} 小场`;
 }
 
+/**
+ * 毫秒时间戳 → `2026-09-17 01:03`（**本地时间**）。
+ *
+ * 自己拼而不用 `toLocaleString`：三端（浏览器 / LayaAir / Node 测试）的 locale 与时区库
+ * 各不相同，同一个时刻会渲染成「9/17/2026, 1:03:46 AM」「2026/9/17 01:03」等各种样子，
+ * 而结算记录是**对账用的**，四个玩家屏幕上必须是同一串字。
+ *
+ * 认不出（undefined / NaN）时返回 null，让调用方整块不显示 ——
+ * 「开始时间 —」比不显示更让人怀疑数据丢了。
+ */
+export function clockText(epochMs: number | undefined): string | null {
+  if (epochMs === undefined || !Number.isFinite(epochMs)) return null;
+  const at = new Date(epochMs);
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+    + ` ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+/**
+ * 时长 → `42 分 18 秒`。
+ *
+ * 三档按「读到哪一位才有意义」分：不足 1 分钟只报秒；不足 1 小时报到秒
+ * （打一局牌差几秒是玩家真会讨论的事）；满 1 小时就只报到分 —— 再往下没人关心，
+ * 而且整点分钟数（`2 分`）不该拖一个 `0 秒`。
+ */
+export function durationText(ms: number | undefined): string | null {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return null;
+  const total = Math.floor(ms / 1000);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return minutes > 0 ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+  if (minutes > 0) return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  return `${seconds} 秒`;
+}
+
+/**
+ * 结算界面的那一行时间：`开始 2026-09-17 01:03　耗时 42 分 18 秒`。
+ *
+ * 两个时间戳缺任一个就返回 null —— 只报得出一个数的「耗时」是错的而不是不完整的。
+ */
+export function matchTimeText(startedAt?: number, finishedAt?: number): string | null {
+  const start = clockText(startedAt);
+  if (start === null || startedAt === undefined || finishedAt === undefined) return null;
+  const spent = durationText(finishedAt - startedAt);
+  if (spent === null) return null;
+  return `开始 ${start}　耗时 ${spent}`;
+}
+
 /** 一小场结算的一行摘要（含每家这一小场的得失分）。 */
 export function roundResultText(result: RoomResult, snapshot: RoomSnapshot | null): string {
   const deltas = (result.deltas ?? [])

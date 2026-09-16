@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MatchResult, RoomResult, RoomSnapshot, WinDetail } from "../src/protocol.js";
-import { countdownText, fanListText, matchResultText, roundResultText, winLines, winSummaryText } from "../src/browser/result-text.js";
+import { clockText, countdownText, durationText, fanListText, matchResultText, matchTimeText, roundResultText, winLines, winSummaryText } from "../src/browser/result-text.js";
 
 function snapshot(nicknames: string[]): RoomSnapshot {
   return {
@@ -256,5 +256,41 @@ describe("局间倒计时", () => {
   it("不停留（或老服务端不下发）时返回 null，调用方整块不显示", () => {
     // 返回 null 而不是「0 秒后开始下一局」—— 后者会让人以为卡住了。
     expect(countdownText(null, now)).toBeNull();
+  });
+});
+
+describe("整局结算记录顶部的时间行", () => {
+  it("时长按「读到哪一位才有意义」分档：秒 / 分秒 / 小时分", () => {
+    expect(durationText(59_000)).toBe("59 秒");
+    expect(durationText(2_538_000)).toBe("42 分 18 秒");
+    expect(durationText(3_600_000)).toBe("1 小时");
+    expect(durationText(3_900_000)).toBe("1 小时 5 分");
+  });
+
+  it("整分钟不拖一个「0 秒」", () => {
+    expect(durationText(60_000)).toBe("1 分");
+  });
+
+  it("认不出的时长返回 null，而不是「0 秒」或 NaN", () => {
+    expect(durationText(undefined)).toBeNull();
+    expect(durationText(Number.NaN)).toBeNull();
+    // 结算早于开局（时钟回拨）时不该写出一个负数时长。
+    expect(durationText(-1)).toBeNull();
+  });
+
+  it("时刻写成 `YYYY-MM-DD HH:mm`（本地时间，各端同一串字）", () => {
+    // 用本地构造的 Date 反推期望值，避开时区差异 —— 断言的是**格式**而不是某个绝对时刻。
+    const at = new Date(2026, 8, 17, 1, 3, 45); // 2026-09-17 01:03:45 本地
+    expect(clockText(at.getTime())).toBe("2026-09-17 01:03");
+    expect(clockText(undefined)).toBeNull();
+    expect(clockText(Number.NaN)).toBeNull();
+  });
+
+  it("两个时间戳齐了才给「开始 … 耗时 …」，缺一个就整行不显示", () => {
+    const start = new Date(2026, 8, 17, 1, 3).getTime();
+    expect(matchTimeText(start, start + 2_538_000)).toBe("开始 2026-09-17 01:03　耗时 42 分 18 秒");
+    // 只报得出一个数的「耗时」是错的，不是不完整的 —— 宁可不显示。
+    expect(matchTimeText(start, undefined)).toBeNull();
+    expect(matchTimeText(undefined, start)).toBeNull();
   });
 });

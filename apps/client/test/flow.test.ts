@@ -916,7 +916,9 @@ describe("ClientFlow", () => {
     // 一小场结束**不出**结算记录：那要等一整局打满。
     expect(mid.lastMatchResult).toBeNull();
     // 结算帧里没有账号余额 —— 打的过程中账号积分根本不该动。
-    expect(mid.lastResult).not.toHaveProperty("balances");
+    // 判据落在**玩家明细行里没有 `balance`**：那一列是「入账后的余额」，
+    // 整局没结算就不该存在（早先帧里另有一个顶层 `balances`，已并入 `players`）。
+    expect(mid.lastResult?.players?.[0]).not.toHaveProperty("balance");
 
     // 第 8 小场结束 + 整局结算，两个帧连续到。
     socket.serverSends({
@@ -941,7 +943,18 @@ describe("ClientFlow", () => {
         reason: "completed",
         rawDeltas: [{ playerId: SESSION.userId, delta: 40 }],
         accountDeltas: [{ playerId: SESSION.userId, delta: 40 }],
-        balances: [{ playerId: SESSION.userId, balance: 2040 }],
+        // 整局结算额外带两个时间戳（开始 / 结算）与四行玩家明细。
+        startedAt: 1_700_000_000_000,
+        finishedAt: 1_700_002_600_000,
+        players: [{
+          playerId: SESSION.userId,
+          nickname: "甲",
+          avatarUrl: "https://example.test/a.png",
+          seat: 0,
+          delta: 40,
+          accountDelta: 40,
+          balance: 2040,
+        }],
       },
     });
 
@@ -951,7 +964,11 @@ describe("ClientFlow", () => {
     expect(done.lastMatchResult).toMatchObject({ completedRounds: 8, reason: "completed" });
     // 入账之后的余额：结算记录要显示「账号 N 分」，这是唯一的来源
     // （房间已经结束，REST 快照拿不到它）。
-    expect(done.lastMatchResult?.balances?.[0]?.balance).toBe(2040);
+    expect(done.lastMatchResult?.players?.[0]?.balance).toBe(2040);
+    // 开始时间与耗时也一起过来了 —— 结算记录顶部那行全靠这两个数。
+    expect(done.lastMatchResult?.startedAt).toBe(1_700_000_000_000);
+    expect(done.lastMatchResult?.finishedAt).toBe(1_700_002_600_000);
+    expect(done.lastMatchResult?.players?.[0]?.playerId).toBe(SESSION.userId);
 
     // 回首页：账号积分跟着结算后的余额走。
     // 不重新拉 /v1/me 的话，剩下的就是登录那一刻的 0 分 —— 看得出「分没进账」。

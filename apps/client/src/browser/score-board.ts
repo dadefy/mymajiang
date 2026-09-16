@@ -71,7 +71,10 @@ export function seatScores(
   const roundDeltas = byPlayerId(result?.deltas);
   const rawDeltas = byPlayerId(matchResult?.rawDeltas);
   const accountDeltas = byPlayerId(matchResult?.accountDeltas);
-  const balances = new Map((matchResult?.balances ?? []).map((entry) => [entry.playerId, entry.balance]));
+  // 余额取整局结算里那 4 行明细（服务端拼好的，含入账后的账号分）。
+  // 早先帧里另有一个 `balances` 字段，与 `players[].balance` 是同一份数据 ——
+  // 同一个数在两处下发迟早会对不上，已合并成只留 `players`。
+  const balances = new Map((matchResult?.players ?? []).map((entry) => [entry.playerId, entry.balance]));
 
   const seats: Array<{ playerId: string; seat: number }> = [];
   if (result?.players && result.players.length > 0) {

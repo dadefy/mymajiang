@@ -152,6 +152,28 @@ export interface RoomResult {
  * `/multi` 的中央区、`/debug` 的结算块、`/apk` 的结算浮层一起废掉。
  * 所以这里必须分成两个类型，由编译器挡住误用。
  */
+/**
+ * 结算记录里**一行玩家明细**（整局结束界面上那 4 行）。
+ *
+ * 形状在服务端拼好：昵称/头像在房间成员上、本局得失分在 `rawDeltas` 里、
+ * 入账分与余额要等 `finalize()` 写完账号之后才有 —— 只有服务端那一侧能同时拿到，
+ * 所以这 4 行**不经客户端拼装**，直接照着渲染（客户端手里的 session 是开局前的快照）。
+ */
+export interface MatchResultPlayer {
+  /** 10 位数字 id 号。 */
+  playerId: string;
+  nickname: string;
+  avatarUrl: string;
+  /** 座位号 0..3，服务端已按它排好序（开局时按加入顺序定死）。 */
+  seat: number;
+  /** 本局（整场 8 小场）未封顶的净输赢。 */
+  delta: number;
+  /** 实际写入账号的分；与 `delta` 不同说明触发了封顶或负分保护。 */
+  accountDelta: number;
+  /** 入账之后的账号余额。 */
+  balance: number;
+}
+
 export interface MatchResult {
   roomId: string;
   completedRounds: number;
@@ -159,13 +181,21 @@ export interface MatchResult {
   rawDeltas: Array<{ playerId: string; delta: number }>;
   accountDeltas: Array<{ playerId: string; delta: number }>;
   /**
-   * 每位玩家**入账之后**的账号余额，随 `match-finished` 帧下发。
+   * 本场（一整局）**开局**时刻的毫秒时间戳，随 `match-finished` 帧下发。
    *
-   * 只有在结算真的改过账号分之后才有意义 —— 客户端手里的 session 是开局前登录时的快照，
-   * 看不到这个新值，而结算记录要写「积分已入账 → 新余额 N」。
-   * 从 REST 的房间快照拿不到（房间已结束），所以必须跟着帧走。
+   * 是开局那一刻（四家准备好、房主点开始），**不是**建房时刻 —— 房间可以先建着等人。
+   * 服务端没下发（旧服务端、或房间记录缺这个字段）时为 undefined。
    */
-  balances?: Array<{ playerId: string; balance: number }>;
+  startedAt?: number;
+  /** 结算时刻的毫秒时间戳；与 `startedAt` 一起算「本局耗时」。 */
+  finishedAt?: number;
+  /**
+   * 四位玩家的明细，已按座位排好序。
+   *
+   * 之所以要服务端给：客户端手里的 session 是开局前登录的快照，
+   * 看不到入账后的余额，也拿不到已经结束的房间快照（房间已结束）。
+   */
+  players?: MatchResultPlayer[];
 }
 
 export interface MatchPlayerView {

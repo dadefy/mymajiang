@@ -107,6 +107,44 @@ describe("match room", () => {
     expect(users.every((user) => user.activeMatchId === undefined)).toBe(true);
   });
 
+  it("记下本场的开始与结算时刻（结算界面靠这两个点算耗时）", () => {
+    // 时钟可控：`start()` 与 `finalize()` 各取一次，两个时刻的差就是「本局耗时」。
+    // 这两个值事后补不出来 —— `completedRounds` 只说明打了几个小场，不带任何时长信息。
+    let now = Date.parse("2026-09-17T00:00:00.000Z");
+    const users = [account("A", 600), account("B"), account("C"), account("D")];
+    const room = new MatchRoom("room-time", "123456", users[0]!, () => new Date(now));
+    for (const user of users.slice(1)) room.join(user);
+    for (const user of users) room.setReady(user.userId, true);
+
+    // 还没开局就没有开始时刻：房间可以先建着等人，等人的时间不该算进「本局耗时」。
+    expect(room.startedAt).toBeUndefined();
+    expect(room.finishedAt).toBeUndefined();
+
+    room.start("A");
+    expect(room.startedAt?.toISOString()).toBe("2026-09-17T00:00:00.000Z");
+    // 开局**不等于**结算：整局还没打完，结算时刻要等 finalize。
+    expect(room.finishedAt).toBeUndefined();
+
+    now += 2_538_000; // 42 分 18 秒
+    const round: RecordedRound = {
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: 60 },
+        { playerId: "B", delta: -20 },
+        { playerId: "C", delta: -20 },
+        { playerId: "D", delta: -20 },
+      ],
+      winnerSeats: [0],
+      nextDealerSeat: 1,
+    };
+    for (let index = 0; index < 7; index += 1) room.recordCompletedRound(round);
+    const result = room.recordCompletedRound(round);
+
+    expect(result?.reason).toBe("completed");
+    expect(room.finishedAt?.toISOString()).toBe("2026-09-17T00:42:18.000Z");
+    expect((room.finishedAt!.getTime() - room.startedAt!.getTime()) / 1000).toBe(2538);
+  });
+
   it("requires three votes to dissolve a playing room", () => {
     const { room } = readyRoom();
     room.start("A");

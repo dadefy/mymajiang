@@ -8,7 +8,7 @@ import {
   type Suit,
   type Tile,
 } from "@mianyang-mahjong/rules";
-import type { MatchRoom } from "@mianyang-mahjong/domain";
+import type { MatchRoom, RoomResult } from "@mianyang-mahjong/domain";
 import type { AppDependencies } from "./app.js";
 import type { StoredRoundState } from "./game-state-store.js";
 import type { GroupEvent } from "./group-events.js";
@@ -158,6 +158,46 @@ export function roundSettlement(
       /** 含本小场在内的整局累计净输赢。没有房间上下文时不给（见 `matchTotal`）。 */
       matchDelta: room ? matchTotal(room, game, player.id) : undefined,
     })),
+  };
+}
+
+/**
+ * 整局结算帧的载荷：在域层的 `RoomResult` 之上补三样**只有服务端这一侧拿得到**的东西。
+ *
+ *   ① `startedAt` / `finishedAt`（毫秒时间戳）—— 结算记录顶部那行「开始 … 耗时 …」的来源。
+ *      用毫秒数字而不是 `Date`：帧要过 JSON，数字没有序列化歧义。
+ *      `finishedAt` 兜底用当前时刻，`startedAt` 没有就不给（客户端据此整行不显示）。
+ *   ② `players`：**四行玩家明细**（头像、昵称、10 位 id 号、本局积分变化、入账分、余额）。
+ *      头像与昵称在房间成员上，入账分在 `matchResult` 里，余额要等 `finalize()` 写完账号 ——
+ *      客户端手里的 session 是**开局前**那次登录的快照，这四行它自己拼不出来。
+ *   ③ 座位顺序：`seat` 是开局时按加入顺序定死的，在这里排好，
+ *      免得三个客户端各排一遍、排法还不一致（`seat` 理论上缺失时按 0 兜底）。
+ *
+ * 单独成函数是为了能直接断言这四行与两个时间戳 —— 它在 `broadcastState` 深处，
+ * 只有真打完一整局（8 小场）才会走到，而那一局要跑十几分钟。
+ */
+export function matchSettlement(room: MatchRoom, matchResult: RoomResult) {
+  const rawDeltas = new Map(matchResult.rawDeltas.map((entry) => [entry.playerId, entry.delta]));
+  const accountDeltas = new Map(matchResult.accountDeltas.map((entry) => [entry.playerId, entry.delta]));
+  return {
+    ...matchResult,
+    startedAt: room.startedAt?.getTime(),
+    finishedAt: room.finishedAt?.getTime() ?? Date.now(),
+    players: [...room.players.values()]
+      .sort((left, right) => (left.seat ?? 0) - (right.seat ?? 0))
+      .map((player) => ({
+        /** 10 位数字 id 号：账号的唯一标识，界面上给人核对自己是哪一行用的。 */
+        playerId: player.account.userId,
+        nickname: player.account.nickname,
+        avatarUrl: player.account.avatarUrl,
+        seat: player.seat ?? 0,
+        /** 本局（整场 8 小场）未封顶的净输赢。 */
+        delta: rawDeltas.get(player.account.userId) ?? 0,
+        /** 实际写入账号的分；与 `delta` 不同说明触发了封顶或负分保护。 */
+        accountDelta: accountDeltas.get(player.account.userId) ?? 0,
+        /** 入账之后的账号余额。 */
+        balance: player.account.points,
+      })),
   };
 }
 
@@ -406,14 +446,9 @@ function buildRealtimeServer(
       if (matchResult) {
         for (const player of active.room.players.values()) dependencies.accountStore.saveAccount(player.account);
         await dependencies.accountStore.flush?.();
-        // 入账之后的账号余额。结算界面要显示「积分已入账 → 新余额」，
-        // 而客户端手里的 session 还是开局前那次登录的快照，只有服务端知道新值。
-        const balances = [...active.room.players.values()].map((player) => ({
-          playerId: player.account.userId,
-          balance: player.account.points,
-        }));
         for (const connection of seatMap?.values() ?? []) {
-          connection.send({ type: "match-finished", result: { ...matchResult, balances } });
+          // 载荷的拼装在 `matchSettlement`（那里排好座位、补上时间戳与四行明细）。
+          connection.send({ type: "match-finished", result: matchSettlement(active.room, matchResult) });
         }
         dependencies.gameStateStore?.clear(active.room.roomId);
         clearInterRoundTimer(active);

@@ -50,6 +50,21 @@ export class MatchRoom {
   ownerId: string;
   completedRounds = 0;
   result?: RoomResult;
+  /**
+   * 本场（一整局 8 小场）**开始**的时刻：四家都准备好、房主点开局的那一刻。
+   *
+   * 与 `createdAt` 不是一回事：房间可以先建着等人，等十几分钟才开局。
+   * 结算界面要显示的「本场游戏开始时间」是后者，用 `createdAt` 会多算等人的时间。
+   * 等待中的房间（还没 `start()`）没有这个值。
+   */
+  startedAt?: Date;
+  /**
+   * 结算（`finalize()`）发生的时刻。只有 `completed` / `dissolved` 之后才有。
+   *
+   * 与 `startedAt` 一起算出「本局耗时」——那是玩家判断「这局打得久不久」的唯一依据，
+   * 事后从别处推不出来（`completedRounds` 不携带任何时长信息）。
+   */
+  finishedAt?: Date;
 
   constructor(
     readonly roomId: string,
@@ -158,6 +173,8 @@ export class MatchRoom {
       player.seat = seat;
       player.account.activeMatchId = this.roomId;
     });
+    // 开局时刻记在这里（**校验全过之后**）：上面几条都可能抛错，抛了就不算开局。
+    this.startedAt = this.now();
     this.status = "playing";
   }
 
@@ -216,6 +233,9 @@ export class MatchRoom {
     }
 
     this.status = reason === "completed" ? "finished" : "dissolved";
+    // 结算时刻：与 `startedAt` 配对算耗时。放在入账之后，
+    // 因为上面的入账校验（积分不能为负）抛错时这一局并没有结算成功。
+    this.finishedAt = this.now();
     this.result = {
       roomId: this.roomId,
       completedRounds: this.completedRounds,
