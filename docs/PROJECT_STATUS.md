@@ -113,7 +113,12 @@ mianyang-mahjong/
 ├─ packages/domain/          账号、好友、群聊、房间、积分领域逻辑
 ├─ packages/rules/           麻将规则、牌型、番数、对局引擎与状态快照
 ├─ apps/client/              客户端业务骨架：协议类型、REST 调用、实时通道、页面流
-└─ docs/PROJECT_STATUS.md    本文档
+└─ docs/                     规格、验收与部署文档
+   ├─ PROJECT_STATUS.md      本文档：权威规格与进度
+   ├─ DEPLOYMENT.md          公网部署清单（环境变量、systemd、Nginx、HTTPS、自检、备份）
+   ├─ INTERNAL_TESTING.md    内测指引与逐项验收清单
+   ├─ TASKS.md               任务板
+   └─ CONTRIBUTING.md        协作约定
 ```
 
 ## 4. 已完成功能
@@ -695,6 +700,34 @@ REST 的 `/start` 保留（脚本、排查用），但 `ApiClient` 上加了注�
 `acceptance.mjs` 现在正是按这个顺序验的：先进房间连上实时通道 → 四人准备 → 房主发 `start`
 → 四个座位都收到首帧。**这一步以前从未被端到端验证过。**
 
+### 4.31 公网部署清单与 `TRUST_PROXY`
+
+要往公网放，先把两件事做掉：
+
+**一、`TRUST_PROXY`（以前的已知缺口，现在实现了）。** 限流按 `request.ip` 计数，
+而反代后面取到的是**代理的地址** —— 不配这一项时全站共用一个额度：登录额度是 30 次/分钟，
+四个测试者再加上任何脚本化客户端会互相吃额度。反过来，**直连部署时又不能开**：
+那等于信任客户端自己填的 `X-Forwarded-For`，谁都能伪造 IP 绕过限流。
+
+所以做成显式开关（`main.ts` 的 `trustProxySetting`）：
+`loopback`（Nginx 同机，最常见）/ `1`（信任所有代理）/ `1.2.3.4/32,10.0.0.0/8`（可信网段）/ 不设（直连）。
+值直接交给 Fastify 的 `trustProxy`（它的类型不接受数字跳数，所以别写 `2`）。
+
+**二、`docs/DEPLOYMENT.md`（新增）。** 一份照着做就能上线的清单：
+
+- **两档**：A 档内存模式（今天就能玩，重启清空、语音不可用）/ B 档 PostgreSQL + 域名 + HTTPS；
+- **环境变量逐条**（含「`HOST` 写成 127.0.0.1 就外面全连不上」这类最容易漏的）；
+- `systemd` 常驻单元；
+- Nginx 反代样例 —— **`Upgrade` / `Connection` 两个头必须显式转发**，
+  漏掉的表现是「页面能打开、能登录，但一进房间就断线」；
+- HTTPS 与录音的关系、国内服务器 + 域名的备案前提；
+- **对着公网地址跑自检**：`smoke.mjs` 与 `acceptance.mjs` 都认 `SERVER_BASE_URL`；
+- 备份三件套（`.env` / 密钥台账 / 数据库）与上线前还欠的事项。
+
+顺带统一了两处小坑：`smoke.mjs` 原来认 `SMOKE_BASE_URL`，与另外两个脚本的
+`SERVER_BASE_URL` 不是同一个名字（部署后对着远程跑会踩），现已统一；
+`.env.example` 补齐了 `TRUST_PROXY` / `NODE_ENV` / `DEBUG_CLIENT` / `PUBLIC_HOST`。
+
 ## 5. 当前 REST API
 
 ### 邀请密钥登录
@@ -959,8 +992,9 @@ pnpm --filter @mianyang-mahjong/server db:migrate
   COS 驱动则由存储服务自己的域名承担。
 - 接口限流的计数在**内存里**：重启即清零，多实例部署时各算各的。单进程够用，
   多实例要换成共享存储（如 Redis）。
-- 限流按 `request.ip`：**部署在反向代理后面时必须配置 Fastify 的 `trustProxy`**，
-  否则所有请求都会被算成代理的 IP，一个人的额度会被全站共享。
+- 限流按 `request.ip`：反代后面必须设 `TRUST_PROXY`（`loopback` / 可信网段 / `1`），
+  否则所有请求都会被算成代理的 IP，一个人的额度会被全站共享。**已实现**（见 4.31）；
+  直连部署时不要开，否则客户端能伪造 `X-Forwarded-For` 绕过限流。
 - 限流额度是**写死的常量**（见 `rate-limit.ts` 的 `RATE_LIMITS`），没有按套餐或用户等级区分；
   目前也没有管理端查看/封禁某个 key 的入口。
 - 管理员角色 `review_admin` 原本只负责注册审核，现在已没有任何专属职责，仍保留在类型里待清理。

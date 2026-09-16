@@ -42,6 +42,8 @@ const createMessageId = randomUUID;
 const createFriendRequestId = randomUUID;
 const createLedgerId = randomUUID;
 const createRoomId = randomUUID;
+/** 6 位数字房间号（100000–999999）：给人念、给人输的那串，与群聊的 8 位群号同一套发号方式。 */
+const createRoomNo = () => String(randomInt(100_000, 1_000_000));
 const createKeyId = randomUUID;
 // 内测入口：开发方签发一次性邀请密钥，不再使用手机短信验证码。
 const invitationKeyCodec = new CryptoInvitationKeyCodec();
@@ -83,6 +85,28 @@ const port = Number(process.env.PORT ?? 3000);
 // 只有在实时通道确实位于另一个入口时才需要显式指定。
 const websocketUrl = process.env.PUBLIC_WEBSOCKET_URL;
 
+/**
+ * 反代后面的真实客户端地址。**不设就是"不信任任何代理"**。
+ *
+ * 为什么必须有这个开关：限流按 `request.ip` 计数，而反代后面取到的是代理的地址 ——
+ * 全站共用一个额度，一个人的操作会把所有人的登录额度吃光（见 `docs/DEPLOYMENT.md`）。
+ *
+ * 取值（直接把字符串交给 Fastify 的 `trustProxy`）：
+ *   * 不设          —— 直连部署（或本机测试）。**直连时绝不能开**，否则客户端能伪造 IP 绕过限流；
+ *   * `loopback`    —— 最常见：Nginx 与它在同一台机器上，只有本机能转发过来；
+ *   * `1` / `true`  —— 信任所有代理；仅当服务端口只对代理开放时使用；
+ *   * `1.2.3.4/32,10.0.0.0/8` —— 精确列出可信代理网段；
+ *   * `0` / `false` —— 显式关闭（等同于不设）。
+ */
+function trustProxySetting(): boolean | string | undefined {
+  const raw = process.env.TRUST_PROXY?.trim();
+  if (!raw) return undefined;
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  return raw;
+}
+const trustProxy = trustProxySetting();
+
 // 对象存储。两种驱动：
 //   * `local` —— 文件落磁盘，用自签名 URL 模拟云端预签名直传，不需要云账号；
 //   * `cos`   —— 腾讯云 COS。桶上开默认加密即可，预签名直传会自动加密，代码不用管。
@@ -111,11 +135,14 @@ const dependencies = createInMemoryDependencies({
   createUserId: () => String(randomInt(1_000_000_000, 10_000_000_000)),
   createLedgerId,
   createRoomId,
+  createRoomNo,
   createGroupId,
   createGroupNo,
   createMessageId,
   createFriendRequestId,
   createAdminAuditId: randomUUID,
+  // 反代后面必须设，否则限流会把所有人算成一个 IP（见上面 trustProxySetting）。
+  ...(trustProxy === undefined ? {} : { trustProxy }),
   ...(database ? { database } : {}),
   ...(accountStore ? { accountStore } : {}),
   ...(invitationKeyStore ? { invitationKeyStore } : {}),

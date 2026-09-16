@@ -35,6 +35,8 @@ function fixture(overrides: {
   matchHistory?: MatchHistoryReader;
   localBlobStorage?: LocalDiskBlobStorage;
   rateLimitRules?: RateLimitRules;
+  /** 部署在反向代理后面时的取值；省略即不信任任何代理。 */
+  trustProxy?: boolean;
   debugClient?: boolean;
   websocketUrl?: string;
 } = {}) {
@@ -64,6 +66,7 @@ function fixture(overrides: {
       ? { blobStorage: overrides.localBlobStorage, localBlobStorage: overrides.localBlobStorage }
       : {}),
     ...(overrides.rateLimitRules ? { rateLimitRules: overrides.rateLimitRules } : {}),
+    ...(overrides.trustProxy === undefined ? {} : { trustProxy: overrides.trustProxy }),
     ...(overrides.debugClient ? { debugClient: true } : {}),
     ...(overrides.websocketUrl ? { websocketUrl: overrides.websocketUrl } : {}),
   });
@@ -1404,6 +1407,32 @@ describe("server API", () => {
     });
     // 打完/解散的房间不能再把人往里面引。
     expect(login.json().activeRoom).toBeNull();
+  });
+
+  it("配了 trustProxy 才按 X-Forwarded-For 计限流（反代后面的正确姿势）", async () => {
+    // 额度压到 2 次，才好在测试里撞到墙。
+    const tiny: RateLimitRules = { ...RATE_LIMITS, authByIp: { limit: 2, windowMs: 60_000 } };
+    const login = (app: ReturnType<typeof createApp>, forwardedFor: string) => app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      headers: { "x-forwarded-for": forwardedFor },
+      payload: { key: "MYMJ-AAAA-AAAA-AAAA-AAAA" },
+    });
+
+    // 直连（不信任代理）：所有请求都算到 socket 对端那一个地址 —— 测试里都是同一个，
+    // 所以第 3 次就撞墙。这正是「反代后面不配 trustProxy」时的现场：
+    // 所有人的额度是共享的。
+    const direct = fixture({ rateLimitRules: tiny });
+    expect((await login(direct.app, "1.1.1.1")).statusCode).toBe(401);
+    expect((await login(direct.app, "2.2.2.2")).statusCode).toBe(401);
+    expect((await login(direct.app, "3.3.3.3")).statusCode).toBe(429);
+
+    // 信任代理（同一台机器上的 Nginx）：按 X-Forwarded-For 分开计数，各用各的额度。
+    const proxied = fixture({ rateLimitRules: tiny, trustProxy: true });
+    expect((await login(proxied.app, "1.1.1.1")).statusCode).toBe(401);
+    expect((await login(proxied.app, "1.1.1.1")).statusCode).toBe(401);
+    expect((await login(proxied.app, "1.1.1.1")).statusCode).toBe(429); // 这个 IP 用完了
+    expect((await login(proxied.app, "2.2.2.2")).statusCode).toBe(401); // 另一个 IP 不受影响
   });
 
   it("finds users by exact ID and completes the friend workflow", async () => {    const { app, dependencies, tokens } = fixture();

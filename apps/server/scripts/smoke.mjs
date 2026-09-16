@@ -7,9 +7,13 @@
  *
  * 用法（服务端要已经跑起来）：
  *   node scripts/smoke.mjs
- * 需要 ADMINT_ID / ADMIN_PASSWORD（从 .env 读，或直接给环境变量）来验证管理流程。
+ * 需要 ADMIN_ID / ADMIN_PASSWORD（从 .env 读，或直接给环境变量）来验证管理流程。
+ *
+ * 默认打本机 `http://127.0.0.1:3000`；验远程部署时给 `SERVER_BASE_URL`
+ * （与 `seed-testers.mjs` / `acceptance.mjs` 用同一个变量名，省得记两套）：
+ *   SERVER_BASE_URL=https://牌桌.example.com node --env-file=.env scripts/smoke.mjs
  */
-const BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
+const BASE = process.env.SERVER_BASE_URL ?? "http://127.0.0.1:3000";
 
 let failures = 0;
 function check(label, ok, extra = "") {

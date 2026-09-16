@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -98,6 +98,18 @@ export interface AppDependencies {
   /** 各处额度。做成依赖而不是直接引用常量，测试才能用很小的额度验证接线。 */
   rateLimitRules: RateLimitRules;
   /**
+   * 反代后面的**真实**客户端地址。
+   *
+   * 限流按 `request.ip` 计数，而不设这项时 Fastify 用的是 socket 对端地址 —— 直连（或本机测试）
+   * 时这是对的，但**只要前面有反向代理或负载均衡，这个地址就变成代理的**：
+   * 全站共用一个额度，一个人的操作会把所有人的登录额度吃光。
+   *
+   * 部署在 Nginx / 云负载均衡后面时**必须**设它（见 `docs/DEPLOYMENT.md`）。
+   * 反过来，**直连部署时绝不能开** —— 那等于信任客户端自己填的 `X-Forwarded-For`，
+   * 谁都能伪造 IP 绕过限流。
+   */
+  trustProxy?: FastifyServerOptions["trustProxy"];
+  /**
    * 幂等键的已完成响应。与 `rateLimiter` 一样是核心依赖，
    * `createInMemoryDependencies` 一定会给。
    */
@@ -168,7 +180,10 @@ function invitationKeyView(key: InvitationKey, activated: boolean) {
 }
 
 export function createApp(dependencies: AppDependencies): FastifyInstance {
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    ...(dependencies.trustProxy === undefined ? {} : { trustProxy: dependencies.trustProxy }),
+  });
 
   // 图片与语音是二进制，不能让 Fastify 按 JSON 解析。声明之后 `request.body` 就是 Buffer。
   app.addContentTypeParser(/^(image|audio)\/.+/, { parseAs: "buffer" }, (_request, body, done) => {
@@ -1218,6 +1233,8 @@ export function createInMemoryDependencies(input: {
   createBlobId?: () => string;
   rateLimiter?: RateLimiter;
   rateLimitRules?: RateLimitRules;
+  /** 部署在反向代理后面时传进来；省略即不信任任何代理（直连部署的正确取值）。 */
+  trustProxy?: FastifyServerOptions["trustProxy"];
   idempotency?: IdempotencyStore;
   debugClient?: boolean;
   websocketUrl?: string;
@@ -1264,6 +1281,7 @@ export function createInMemoryDependencies(input: {
     // 每个 app 自建一个限流器，测试之间因此互不干扰。
     rateLimiter: input.rateLimiter ?? new RateLimiter(),
     rateLimitRules: input.rateLimitRules ?? RATE_LIMITS,
+    ...(input.trustProxy === undefined ? {} : { trustProxy: input.trustProxy }),
     // 与限流器同理：每个 app 自建一份，测试之间互不干扰。
     idempotency: input.idempotency ?? new IdempotencyStore(),
     ...(input.debugClient ? { debugClient: true } : {}),
