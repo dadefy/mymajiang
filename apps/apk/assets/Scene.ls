@@ -7,7 +7,7 @@
   "top": 0,
   "bottom": 0,
   "name": "Scene2D",
-  "components": [
+  "_$comp": [
     {
       "_$id": "main_boot",
       "_$type": "Main"
