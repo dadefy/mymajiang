@@ -455,7 +455,6 @@ export class MahjongGame {
     const player = this.player(playerId);
     if (player.swapTiles) throw new Error("Swap already submitted");
     if (tiles.length !== 3) throw new Error("Exactly three tiles are required");
-    if (new Set(tiles).size !== tiles.length) throw new Error("Swap tiles must be distinct");
     const suit = tileSuit(tiles[0]!);
     if (!tiles.every((tile) => tileSuit(tile) === suit)) throw new Error("Swap tiles must share one suit");
     const proof = [...player.hand];

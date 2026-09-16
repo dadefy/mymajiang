@@ -137,6 +137,22 @@ describe("发牌", () => {
 });
 
 describe("换三张", () => {
+  it("允许换出两张同值牌，并按手牌实际张数校验、保持换牌守恒", () => {
+    const game = new MahjongGame(7, [...IDS]);
+    const hand = game.players[0]!.hand;
+    hand.splice(0, hand.length, ...parseTiles("113456789m23456p"));
+    expect(() => game.submitSwap("p0", [0, 0, 0])).toThrow("Tile is not in hand");
+    expect(game.players[0]!.swapTiles).toBeNull();
+    const before = game.players.flatMap((player) => player.hand).sort((a,b) => a-b);
+    game.submitSwap("p0", [0, 0, 2]);
+    expect(game.players[0]!.swapTiles).toEqual([0, 0, 2]);
+    expect(game.allowedActions("p0")).not.toContain("swap");
+    expect(() => game.submitSwap("p0", [0, 0, 2])).toThrow("Swap already submitted");
+    for (const id of IDS.slice(1)) game.autoSwap(id);
+    expect(game.phase).toBe("missing");
+    expect(game.players.flatMap((player) => player.hand).sort((a,b) => a-b)).toEqual(before);
+  });
+
   it("三张必须同花色且都在手牌中", () => {
     const game = new MahjongGame(7, [...IDS]);
     const hand = game.players[0]!.hand;

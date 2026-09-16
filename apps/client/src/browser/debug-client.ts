@@ -1,3 +1,4 @@
+import { SwapSelection } from "./swap-selection.js";
 import { roundResultPanel } from "./round-result.js";
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
@@ -61,7 +62,7 @@ let repaintMessages: (() => void) | undefined;
 mediaCache.onChange(() => repaintMessages?.());
 
 /** 手动换三张时已选中的牌。 */
-let selected: Tile[] = [];
+const selected = new SwapSelection();
 
 /** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
 let lastHandSize: number | null = null;
@@ -525,10 +526,11 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
   // 「手里多了一张」，不标出来会像凭空多一张。
   if (match.phase === "playing") trackDrawnTile(match.hand);
   else forgetDrawnTile();
+  selected.sync(match, actions, flow.current.name === "room" ? flow.current.notice : undefined);
   const hand = element("div", { className: "hand" });
   let drawnMarked = false;
-  for (const tile of sortedHand(match.hand)) {
-    const chosen = selected.includes(tile);
+  for (const [index, tile] of sortedHand(match.hand).entries()) {
+    const chosen = selected.has(index);
     const isDrawn = !drawnMarked && drawnTile !== null && tile === drawnTile;
     if (isDrawn) drawnMarked = true;
     const node = element("button", {
@@ -537,27 +539,30 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
       onClick: () => {
         if (match.phase === "swapping") {
           // 选满三张就替换最早选的那张，避免用户点第四张时不知所措。
-          if (selected.includes(tile)) selected = selected.filter((each) => each !== tile);
-          else selected = [...selected, tile].slice(-3);
+          selected.toggle(index);
           render(flow.current);
         } else if (match.phase === "playing" || match.phase === "claiming") {
           flow.discard(tile);
         }
       },
     });
+    if (match.phase === "swapping") node.disabled = !selected.enabled;
     if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
     hand.append(node);
   }
 
   const row = element("div", { className: "row" });
-  if (match.phase === "swapping") {
+  if (match.phase === "swapping" && !selected.enabled) row.append(element("span", { text: "已提交换牌，等待其他玩家" }));
+  if (match.phase === "swapping" && selected.enabled) {
     row.append(
       button(`换这三张（已选 ${selected.length}/3）`, () => {
-        if (selected.length !== 3) return;
-        flow.swap([...selected]);
-        selected = [];
+        const hand = sortedHand(match.hand);
+        if (!selected.valid(hand)) return;
+        const tiles = selected.tiles(hand);
+        selected.submit(() => flow.swap(tiles));
+        render(flow.current);
       }, "primary"),
-      button("自动换三张", () => { selected = []; flow.autoSwap(); }),
+      button("自动换三张", () => { selected.submit(() => flow.autoSwap()); render(flow.current); }),
     );
   }
   if (match.phase === "missing") {

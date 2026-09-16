@@ -1,3 +1,4 @@
+import { SwapSelection } from "./swap-selection.js";
 import { roundResultPanel } from "./round-result.js";
 import { ApiClient } from "../api-client.js";
 import { ClientFlow, type Screen } from "../flow.js";
@@ -59,7 +60,7 @@ interface SeatState {
   userId: string | null;
   nickname: string;
   /** 换三张已选中的牌。每家独立，所以不能像单人版那样放模块级变量。 */
-  selected: Tile[];
+  selected: SwapSelection;
   /** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
   lastHandSize: number | null;
   /**
@@ -80,7 +81,7 @@ function makeSeat(slot: number): SeatState {
     flow,
     userId: null,
     nickname: `玩家 ${slot + 1}`,
-    selected: [],
+    selected: new SwapSelection(),
     lastHandSize: null,
     drawnTile: null,
   };
@@ -95,7 +96,7 @@ function makeSeat(slot: number): SeatState {
     // 这一家的选择会留到下一局 —— 那时手里凑巧有同样的牌，就会有一张牌
     // 一进换三张阶段就是选中状态，看着像「我不记得点过它」。
     if (screen.name === "room" && screen.match?.phase !== "swapping" && seat.selected.length > 0) {
-      seat.selected = [];
+      seat.selected.clear();
     }
     // 「刚摸牌」：服务端把摸到的牌 push 在手牌末尾，所以多出来的那张就是它。
     // 只在行牌阶段认 —— 换三张/定缺是发牌，庄家那一手是 14 张，
@@ -299,28 +300,29 @@ function handBox(seat: SeatState, match: MatchState): HTMLElement {
   }
   // 刚摸到的那张单独标出来 —— 真牌桌上它就是插在手里、要打出去的那张。
   // 手牌是排好序的，所以标「同值的任意一张」与标原来那张看不出区别。
+  seat.selected.sync(match, roomOf(seat)?.actions ?? [], roomOf(seat)?.notice);
   const drawn = seat.drawnTile;
   let drawnMarked = false;
-  for (const tile of sortedHand(match.hand)) {
-    const chosen = seat.selected.includes(tile);
+  for (const [index, tile] of sortedHand(match.hand).entries()) {
+    const chosen = seat.selected.has(index);
     const isDrawn = !drawnMarked && drawn !== null && tile === drawn;
     if (isDrawn) drawnMarked = true;
     const node = element("button", {
       text: tileLabel(tile),
       className: `tile${chosen ? " chosen" : ""}${isDrawn ? " drawn" : ""}`,
-      onClick: () => onTileClick(seat, match, tile),
+      onClick: () => onTileClick(seat, match, tile, index),
     });
+    if (match.phase === "swapping") node.disabled = !seat.selected.enabled;
     if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
     box.append(node);
   }
   return box;
 }
 
-function onTileClick(seat: SeatState, match: MatchState, tile: Tile): void {
+function onTileClick(seat: SeatState, match: MatchState, tile: Tile, index: number): void {
   if (match.phase === "swapping") {
     // 选满三张就替换最早选的那张，避免点第四张时不知所措。
-    if (seat.selected.includes(tile)) seat.selected = seat.selected.filter((each) => each !== tile);
-    else seat.selected = [...seat.selected, tile].slice(-3);
+    seat.selected.toggle(index);
     scheduleRender();
     return;
   }
@@ -353,16 +355,21 @@ function opsRow(seat: SeatState, seatNo: number): HTMLElement {
   }
 
   if (match.phase === "swapping") {
+    if (!seat.selected.enabled) {
+      row.append(element("span", { className: "hint", text: "已提交换牌，等待其他玩家" }));
+      return row;
+    }
     row.append(
       button(`换这三张（${seat.selected.length}/3）`, () => {
-        if (seat.selected.length !== 3) return;
-        seat.flow.swap([...seat.selected]);
-        seat.selected = [];
+        const hand = sortedHand(match.hand);
+        if (!seat.selected.valid(hand)) return;
+        const tiles = seat.selected.tiles(hand);
+        seat.selected.submit(() => seat.flow.swap(tiles));
         scheduleRender();
       }, "primary"),
       button("自动", () => {
-        seat.selected = [];
-        seat.flow.autoSwap();
+        seat.selected.submit(() => seat.flow.autoSwap());
+        scheduleRender();
       }),
     );
   }
@@ -480,9 +487,11 @@ function bannerText(match: MatchState, snapshot: RoomSnapshot | null, drawnTile:
 
 function autoAll(kind: "swap" | "missing"): void {
   for (const seat of seats) {
-    seat.selected = [];
-    if (kind === "swap") seat.flow.autoSwap();
-    else seat.flow.autoMissing();
+    const room = roomOf(seat);
+    if (!room?.match) continue;
+    seat.selected.sync(room.match, room.actions, room.notice);
+    if (kind === "swap") seat.selected.submit(() => seat.flow.autoSwap());
+    else if (room.actions.includes("choose-missing")) seat.flow.autoMissing();
   }
   scheduleRender();
 }
@@ -612,7 +621,7 @@ function showBoard(): void {
 function resetAll(): void {
   for (const seat of seats) {
     seat.flow.signOut();
-    seat.selected = [];
+    seat.selected.clear();
     seat.userId = null;
     seat.nickname = `玩家 ${seat.slot + 1}`;
     seat.lastHandSize = null;
