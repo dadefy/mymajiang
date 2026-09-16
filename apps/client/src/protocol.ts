@@ -183,6 +183,22 @@ export interface UploadTicket {
   expiresInSeconds: number;
 }
 
+/**
+ * 牌桌上看得见的副露。
+ *
+ * **别人的暗杠 `tile` 是 `null`** —— 服务端在 `playerSnapshot` 里把它裁掉了
+ * （见 `apps/server/src/meld-visibility.ts`）：真实牌桌上暗杠是扣着的，
+ * 对手只知道「那里有四张牌」，不知道是哪一张。
+ *
+ * 判据用 `tile === null`，不要用 `concealed` —— 本人的暗杠也是 `concealed`，
+ * 但自己看得见牌值。
+ */
+export interface VisibleMeld {
+  kind: "pong" | "kong";
+  tile: Tile | null;
+  concealed?: boolean;
+}
+
 /** 一局进行中，服务端只发给本人的脱敏快照（见 ws-server.ts 的 playerSnapshot）。 */
 export interface MatchState {
   roomId: string;
@@ -192,6 +208,7 @@ export interface MatchState {
   currentPlayerSeat: number | null;
   tilesLeft: number;
   hand: Tile[];
+  /** 我的副露：自己的牌值一定看得见，所以这里不是 `VisibleMeld`。 */
   melds: Array<{ kind: "pong" | "kong"; tile: Tile; concealed?: boolean }>;
   missingSuit: Suit | null;
   discards: Tile[];
@@ -199,7 +216,7 @@ export interface MatchState {
   players: Array<{
     seat: number;
     handSize: number;
-    melds: Array<{ kind: "pong" | "kong"; tile: Tile; concealed?: boolean }>;
+    melds: VisibleMeld[];
     discards: Tile[];
     won: boolean;
     missingSuit: Suit | null;

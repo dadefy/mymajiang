@@ -5,7 +5,8 @@ import { button, element } from "./dom.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
 import { nicknameOf, resolveSeat, sortedHand } from "./table-order.js";
-import { discardGroups, freshDiscardSeat, meldKindLabel, meldTiles } from "./tile-view.js";
+import { discardGroups, freshDiscardSeat } from "./tile-view.js";
+import { meldBox, tileChip } from "./tile-chips.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 
@@ -241,23 +242,10 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
 function tilesArea(seat: SeatState, match: MatchState): HTMLElement {
   const area = element("div", { className: "tiles-area" });
   area.append(handBox(seat, match));
+  // 副露的渲染在 tile-chips.ts，与单人版 `/debug` 共用一份（张数写错肉眼看不出来）。
   const melds = meldBox(match.melds);
   if (melds.childElementCount > 0) area.append(melds);
   return area;
-}
-
-/** 副露：一副一个框，框里按真实张数摆（碰 3 张、杠 4 张）。 */
-function meldBox(melds: MatchState["melds"]): HTMLElement {
-  const box = element("div", { className: "melds" });
-  for (const meld of melds) {
-    const group = element("div", { className: `meld-group${meld.kind === "kong" ? " kong" : ""}` });
-    group.append(element("span", { className: "kind", text: meldKindLabel(meld) }));
-    for (const tile of meldTiles(meld)) {
-      group.append(element("span", { className: "chip", text: tileLabel(tile) }));
-    }
-    box.append(group);
-  }
-  return box;
 }
 
 /**
@@ -401,7 +389,7 @@ function discardGrid(match: MatchState, snapshot: RoomSnapshot | null): HTMLElem
 
     const tiles = element("div", { className: "discard-tiles" });
     group.tiles.forEach((tile, index) => {
-      const chip = element("span", { className: "chip", text: tileLabel(tile) });
+      const chip = tileChip(tile);
       // 刚打出的那一张：claiming 阶段全场都在等它，框出来。
       if (group.seat === freshSeat && index === group.tiles.length - 1) chip.classList.add("fresh");
       tiles.append(chip);

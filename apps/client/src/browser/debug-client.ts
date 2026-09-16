@@ -5,6 +5,7 @@ import { actionButtons, runAction } from "./action-buttons.js";
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
 import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
+import { meldBox } from "./tile-chips.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 import { BrowserVoiceRecorder } from "./voice-recorder.js";
@@ -465,17 +466,22 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
     const relation = isMe ? "我" : (ring.includes(player.seat) ? relationLabel(ring, ring.indexOf(player.seat)) : "已胡");
     const detail = [
       `手牌 ${player.handSize} 张`,
-      `副露 ${player.melds.length}`,
       `缺 ${player.missingSuit ? SUIT_LABEL[player.missingSuit] : "未定"}`,
       ...(isMe ? [] : [`已出 ${player.discards.map(tileLabel).join(" ") || "无"}`]),
       ...(player.won ? ["已胡"] : []),
     ].join(" · ");
-    box.append(element("div", {
+    const row = element("div", {
       className: `seat${player.seat === match.currentPlayerSeat ? " acting" : ""}${player.won ? " won" : ""}`,
     },
       element("span", { className: "tag", text: `${relation}·${player.seat} 号位` }),
       element("span", { text: detail }),
-    ));
+    );
+    // 副露摆成牌块，与四家同屏共用一份渲染 —— 以前只报「副露 1」，
+    // 看不出碰了什么、杠了什么，而副露直接决定番型。
+    // 别人的暗杠只亮一张、其余三张扣着（口径在服务端的 meld-visibility.ts）。
+    const melds = meldBox(player.melds);
+    if (melds.childElementCount > 0) row.append(melds);
+    box.append(row);
   }
 
   // 我的手牌：换三张阶段可点选，行牌阶段点击即出牌。按牌面排好，好找牌。

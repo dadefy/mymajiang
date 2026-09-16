@@ -74,6 +74,18 @@ export function debugClientHtml(options: DebugClientOptions): string {
     .seat.acting .tag { color: #d8a13a; }
     .order { font-size: 13px; color: #8fb3a5; margin: 8px 0 2px; }
     .order b { color: #d8a13a; font-weight: normal; }
+    /* 牌块：副露与弃牌堆用。比手牌小一号，好让一屏放得下。
+       .chip.back 是**扣着**的牌（别人的暗杠只亮一张）。
+       注意这些 CSS 在模板字符串里，注释里写反引号会直接截断字符串。 */
+    .chip { display: inline-flex; align-items: center; justify-content: center;
+            width: 28px; height: 22px; background: #f4f1e6; color: #1d1a14;
+            font-weight: bold; font-size: 12px; border-radius: 4px; flex: none; }
+    .chip.back { background: #24443a; box-shadow: inset 0 0 0 1px #2d5347; }
+    .melds { display: flex; gap: 4px; flex-wrap: wrap; margin: 4px 0; }
+    .meld-group { display: inline-flex; gap: 2px; align-items: center; padding: 2px 3px;
+                  border-radius: 6px; background: #0f1c17; border: 1px solid #2d5347; }
+    .meld-group.kong { border-color: #d8a13a; }
+    .meld-group .kind { font-size: 10px; color: #8fb3a5; margin: 0 2px; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
     .error { color: #ff9b9b; margin: 8px 0; }
     a.link { color: #d8a13a; text-decoration: none; font-weight: bold; }
@@ -174,10 +186,13 @@ export function multiClientHtml(options: DebugClientOptions): string {
     .meld-group.kong { border-color: #d8a13a; }
     .meld-group .kind { font-size: 10px; color: #8fb3a5; margin: 0 2px; }
 
-    /* 小牌块：弃牌区与副露共用。比手牌小一号，好让一屏放得下。 */
+    /* 小牌块：弃牌区与副露共用。比手牌小一号，好让一屏放得下。
+       .chip.back 是**扣着**的牌 —— 别人的暗杠只亮一张，其余三张画成背面。
+       注意这些 CSS 在模板字符串里，注释里写反引号会直接截断字符串。 */
     .chip { display: inline-flex; align-items: center; justify-content: center;
             width: 28px; height: 22px; background: #f4f1e6; color: #1d1a14;
             font-weight: bold; font-size: 12px; border-radius: 4px; flex: none; }
+    .chip.back { background: #24443a; box-shadow: inset 0 0 0 1px #2d5347; }
 
     /* 中央弃牌区：四家各一格，打出去的牌都在这儿看。 */
     .discard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }

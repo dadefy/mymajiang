@@ -203,7 +203,15 @@ export class RoomPage {
   private renderOpponentRows(match: MatchState): void {
     const others = match.players.filter((player) => player.seat !== match.seat).sort((left, right) => left.seat - right.seat);
     others.forEach((player, index) => {
-      const melds = player.melds.map((meld) => `${meld.kind === "pong" ? "碰" : "杠"}${tileName(meld.tile)}`).join(" ");
+      // 暗杠：服务端只让对手看到一副「扣着的杠」。牌值可见时亮一张、其余扣着；
+      // 若口径改成全扣（tile 为 null），就只写「暗杠」不带牌值。
+      const melds = player.melds
+        .map((meld) => {
+          if (meld.tile === null) return "暗杠(扣)";
+          if (meld.kind === "kong" && meld.concealed) return `暗杠${tileName(meld.tile)}(扣3)`;
+          return `${meld.kind === "pong" ? "碰" : "杠"}${tileName(meld.tile)}`;
+        })
+        .join(" ");
       const text = `${playerName(this.snapshot, player.seat)} · ${player.handSize}张${player.won ? " · 已胡" : ""}${melds ? ` · ${melds}` : ""}`;
       const row = box(this.matchArea, 30 + index * 235, 82, 220, 78, player.won ? THEME.accentDark : THEME.panelBg2);
       label(row, text, 20, { width: 200, align: "center", wordWrap: true }).pos(10, 13);

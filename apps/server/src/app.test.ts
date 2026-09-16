@@ -708,6 +708,16 @@ describe("server API", () => {
     expect(multi.body).toContain("/debug/browser/multi-client.js");
     expect(multi.body).toContain('"socketUrl":""');
 
+    // 这两个页面都是**模板字符串**拼出来的，而 CSS 注释里写一个反引号就会把字符串
+    // 截断：症状是 HTML 只剩前半截、样式整段消失，而且不一定报错。
+    // 「收尾标签在不在」是最省事的一道闸 —— 这个坑已经踩过两次了。
+    for (const body of [page.body, multi.body]) {
+      expect(body.trimEnd().endsWith("</html>")).toBe(true);
+    }
+    // 牌块样式：副露与弃牌堆共用；.chip.back 是**扣着**的牌（暗杠只亮一张）。
+    expect(page.body).toContain(".chip.back");
+    expect(multi.body).toContain(".chip.back");
+
     // 根路径把人送到内测客户端：分享出去的网址不该是个 404。
     const root = await app.inject({ method: "GET", url: "/" });
     expect(root.statusCode).toBe(302);

@@ -11,6 +11,7 @@ import type { MatchRoom } from "@mianyang-mahjong/domain";
 import type { AppDependencies } from "./app.js";
 import type { StoredRoundState } from "./game-state-store.js";
 import type { GroupEvent } from "./group-events.js";
+import { maskMelds } from "./meld-visibility.js";
 import { WebSocketConnection, WebSocketServer, type WsMessage } from "./ws.js";
 
 interface ActiveMatch {
@@ -66,7 +67,9 @@ function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundN
     players: game.players.map((other) => ({
       seat: other.seat,
       handSize: other.handSize,
-      melds: [...other.melds],
+      // 别人的暗杠是扣着的，牌值不下发（见 meld-visibility.ts）——
+      // 否则任何打开开发者工具的人都能读出对手暗杠的是哪张牌。
+      melds: maskMelds(other.melds, other.seat === seat),
       discards: [...other.discards],
       won: other.won,
       missingSuit: other.missingSuit,

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { MatchState } from "../src/protocol.js";
+import type { MatchState, VisibleMeld } from "../src/protocol.js";
 import {
   discardGroups,
   freshDiscardSeat,
+  meldDisplay,
   meldKindLabel,
-  meldTiles,
+  meldSize,
 } from "../src/browser/tile-view.js";
 import { tileLabel } from "../src/browser/tile-label.js";
 
@@ -42,39 +43,74 @@ function match(options: {
   };
 }
 
-describe("副露摆几张牌", () => {
+describe("副露占几张牌", () => {
   it("碰是 3 张、杠是 4 张", () => {
-    expect(meldTiles({ kind: "pong", tile: 0 })).toEqual([0, 0, 0]);
-    expect(meldTiles({ kind: "kong", tile: 0 })).toEqual([0, 0, 0, 0]);
+    expect(meldSize({ kind: "pong" })).toBe(3);
+    expect(meldSize({ kind: "kong" })).toBe(4);
   });
 
-  it("暗杠也是 4 张 —— 张数不因看不见而变", () => {
-    expect(meldTiles({ kind: "kong", tile: 20, concealed: true })).toEqual([20, 20, 20, 20]);
-  });
-
-  it("杠比碰多摆的那一张就是杠的价值所在", () => {
-    // 少摆一张的话牌桌上少一张牌，而肉眼几乎看不出来。
-    expect(meldTiles({ kind: "kong", tile: 5 }).length
-      - meldTiles({ kind: "pong", tile: 5 }).length).toBe(1);
-  });
-
-  it("同一副牌里都是同一个牌值", () => {
-    const tiles = meldTiles({ kind: "kong", tile: 13 });
-    expect(new Set(tiles).size).toBe(1);
-    expect(tileLabel(tiles[0]!)).toBe("5筒");
+  it("暗杠也是 4 张 —— 张数不因看不看得见而变", () => {
+    expect(meldSize({ kind: "kong" })).toBe(4);
   });
 });
 
 describe("副露的名字", () => {
   it("碰、明杠、暗杠三种名字分得开", () => {
-    expect(meldKindLabel({ kind: "pong", tile: 0 })).toBe("碰");
-    expect(meldKindLabel({ kind: "kong", tile: 0 })).toBe("杠");
-    expect(meldKindLabel({ kind: "kong", tile: 0, concealed: true })).toBe("暗杠");
+    expect(meldKindLabel({ kind: "pong" })).toBe("碰");
+    expect(meldKindLabel({ kind: "kong" })).toBe("杠");
+    expect(meldKindLabel({ kind: "kong", concealed: true })).toBe("暗杠");
   });
 
   it("暗杠不写成「杠」—— 它不破门清，牌桌上必须能一眼分开", () => {
-    expect(meldKindLabel({ kind: "kong", tile: 7, concealed: true }))
-      .not.toBe(meldKindLabel({ kind: "kong", tile: 7 }));
+    expect(meldKindLabel({ kind: "kong", concealed: true }))
+      .not.toBe(meldKindLabel({ kind: "kong" }));
+  });
+});
+
+describe("一副副露怎么摆（亮几张、扣几张）", () => {
+  const pong: VisibleMeld = { kind: "pong", tile: 0 };
+  const openKong: VisibleMeld = { kind: "kong", tile: 13 };
+  const concealedMine: VisibleMeld = { kind: "kong", tile: 20, concealed: true };
+
+  it("碰：三张全亮", () => {
+    const view = meldDisplay(pong);
+    expect(view.faceUp.map(tileLabel)).toEqual(["1万", "1万", "1万"]);
+    expect(view.faceDown).toBe(0);
+  });
+
+  it("明杠：四张全亮", () => {
+    const view = meldDisplay(openKong);
+    expect(view.faceUp).toHaveLength(4);
+    expect(view.faceDown).toBe(0);
+  });
+
+  it("暗杠（牌值可见）：只亮一张，其余三张扣着", () => {
+    // 这是产品口径：暗杠给其他三家看一张就行。
+    const view = meldDisplay(concealedMine);
+    expect(view.faceUp.map(tileLabel)).toEqual(["3条"]);
+    expect(view.faceDown).toBe(3);
+    expect(view.kindLabel).toBe("暗杠");
+  });
+
+  it("暗杠（牌值不可见）：整副扣着，一张也不亮", () => {
+    // 口径改成全扣时走这条路：服务端把 tile 裁成 null（见 meld-visibility.ts）。
+    const hidden: VisibleMeld = { kind: "kong", tile: null, concealed: true };
+    const view = meldDisplay(hidden);
+    expect(view.faceUp).toEqual([]);
+    expect(view.faceDown).toBe(4);
+    expect(view.kindLabel).toBe("暗杠");
+  });
+
+  it("亮 + 扣的张数永远等于这副牌的真实张数", () => {
+    // 少摆一张的话牌桌上就少了一张牌，而肉眼几乎看不出来。
+    for (const meld of [pong, openKong, concealedMine, { kind: "kong", tile: null, concealed: true } as VisibleMeld]) {
+      const view = meldDisplay(meld);
+      expect(view.faceUp.length + view.faceDown).toBe(meldSize(meld));
+    }
+  });
+
+  it("判据是 tile 为 null，不是 concealed —— 本人的暗杠也是 concealed 但看得见", () => {
+    expect(meldDisplay(concealedMine).faceUp).toHaveLength(1);
   });
 });
 
