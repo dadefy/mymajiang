@@ -25,6 +25,9 @@ afterEach(async () => {
 });
 
 let idCounter = 1234567890;
+/** 房间号发号器。同一个 app 里可能建多间房，**必须是递增序列**： */
+/** `nextRoomNo` 撞号会一直重抽，固定值会让建房死循环。 */
+let roomNoCounter = 100_000;
 
 function fixture(overrides: {
   friendService?: FriendService;
@@ -36,6 +39,7 @@ function fixture(overrides: {
   websocketUrl?: string;
 } = {}) {
   idCounter = 1234567890;
+  roomNoCounter = 100_000;
   const tokens = new TokenService("test-jwt-secret-that-is-longer-than-32-characters");
   const dependencies = createInMemoryDependencies({
     tokens,
@@ -45,6 +49,7 @@ function fixture(overrides: {
     createUserId: () => String(idCounter++),
     createLedgerId: () => `ledger-${idCounter}`,
     createRoomId: () => `room-${idCounter}`,
+    createRoomNo: () => String((roomNoCounter += 1)),
     createGroupId: () => `group-${idCounter}`,
     createGroupNo: () => "12345678",
     createMessageId: () => `message-${idCounter++}`,
@@ -70,7 +75,7 @@ async function createBetaUser(
   app: ReturnType<typeof createApp>,
   dependencies: ReturnType<typeof fixture>["dependencies"],
   nickname: string,
-): Promise<{ userId: string; token: string }> {
+): Promise<{ userId: string; token: string; key: string }> {
   const key = dependencies.invitationKeys.issue({ count: 1, note: nickname, actorId: "developer" })[0]!.key;
   const account = dependencies.accountService.activateWithKey({
     key,
@@ -84,7 +89,44 @@ async function createBetaUser(
     headers: { authorization: `Bearer ${adminToken}` },
     payload: { delta: 1000, reason: "测试发放" },
   });
-  return { userId: account.userId, token: await dependencies.tokens.issueUserToken(account.userId) };
+  return { userId: account.userId, token: await dependencies.tokens.issueUserToken(account.userId), key };
+}
+
+/** 建一间四人房并开局。返回房间号（给人念的那串）与内部 id。 */
+async function startFourPlayerRoom(
+  app: ReturnType<typeof createApp>,
+  players: Array<{ token: string }>,
+): Promise<{ roomId: string; roomNo: string }> {
+  const created = await app.inject({
+    method: "POST",
+    url: "/v1/rooms",
+    headers: { authorization: `Bearer ${players[0]!.token}` },
+  });
+  const { roomId, roomNo } = created.json() as { roomId: string; roomNo: string };
+  for (const player of players.slice(1)) {
+    const joined = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${player.token}` },
+      payload: { roomNo },
+    });
+    expect(joined.statusCode).toBe(201);
+  }
+  for (const player of players) {
+    await app.inject({
+      method: "POST",
+      url: `/v1/rooms/${roomId}/ready`,
+      headers: { authorization: `Bearer ${player.token}` },
+      payload: { ready: true },
+    });
+  }
+  const started = await app.inject({
+    method: "POST",
+    url: `/v1/rooms/${roomId}/start`,
+    headers: { authorization: `Bearer ${players[0]!.token}` },
+  });
+  expect(started.statusCode).toBe(200);
+  return { roomId, roomNo };
 }
 
 describe("server API", () => {
@@ -1203,8 +1245,168 @@ describe("server API", () => {
     expect(body.players.map((entry: { nickname: string }) => entry.nickname)).toEqual(["甲", "乙", "丙", "丁"]);
   });
 
-  it("finds users by exact ID and completes the friend workflow", async () => {
-    const { app, dependencies, tokens } = fixture();
+  it("hands out a 6-digit room number and lets others join by it", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "房主");
+    const guest = await createBetaUser(app, dependencies, "客人");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/rooms",
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    expect(created.statusCode).toBe(201);
+    // 房间号是给人念、给人输的那串：恰好 6 位数字。
+    const roomNo = created.json().roomNo as string;
+    expect(roomNo).toMatch(/^\d{6}$/);
+
+    const joined = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${guest.token}` },
+      payload: { roomNo },
+    });
+    expect(joined.statusCode).toBe(201);
+    expect(joined.json()).toMatchObject({ roomNo, status: "waiting", playerCount: 2 });
+    // 换回来的内部 id 和房主拿到的是同一个 —— 后续接口仍按它走。
+    expect(joined.json().roomId).toBe(created.json().roomId);
+
+    const snapshot = await app.inject({
+      method: "GET",
+      url: `/v1/rooms/${created.json().roomId as string}`,
+      headers: { authorization: `Bearer ${guest.token}` },
+    });
+    expect(snapshot.json().roomNo).toBe(roomNo);
+  });
+
+  it("never gives two rooms the same number", async () => {
+    const { app, dependencies } = fixture();
+    const user = await createBetaUser(app, dependencies, "连着开房的人");
+    const numbers = new Set<string>();
+    for (let index = 0; index < 5; index += 1) {
+      const created = await app.inject({
+        method: "POST",
+        url: "/v1/rooms",
+        headers: { authorization: `Bearer ${user.token}` },
+      });
+      numbers.add(created.json().roomNo as string);
+    }
+    expect(numbers.size).toBe(5);
+  });
+
+  it("separates an unknown room number from a malformed one", async () => {
+    const { app, dependencies } = fixture();
+    const user = await createBetaUser(app, dependencies, "找房的人");
+
+    const missing = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${user.token}` },
+      payload: { roomNo: "000001" },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ code: "NOT_FOUND", message: "ROOM_NOT_FOUND" });
+
+    // 位数不对是输入问题（400），不是「没有这间房」—— 客户端要能分开说。
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${user.token}` },
+      payload: { roomNo: "12345" },
+    });
+    expect(malformed.statusCode).toBe(400);
+  });
+
+  it("tells a returning player which match is still open", async () => {
+    const { app, dependencies } = fixture();
+    const players = [];
+    for (const nickname of ["甲", "乙", "丙", "丁"]) {
+      players.push(await createBetaUser(app, dependencies, nickname));
+    }
+    const { roomId, roomNo } = await startFourPlayerRoom(app, players);
+
+    // 对局中退出、重新登录（换了设备或重启了客户端）：登录响应要带上这间房。
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { key: players[1]!.key },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(login.json().activeRoom).toEqual({ roomId, roomNo, status: "playing", playerCount: 4 });
+
+    // 没在打牌的人不该收到这个入口。
+    const outsider = await createBetaUser(app, dependencies, "场外人");
+    const outsiderLogin = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { key: outsider.key },
+    });
+    expect(outsiderLogin.json().activeRoom).toBeNull();
+  });
+
+  it("lets a player who is already seated come back by room number", async () => {
+    const { app, dependencies } = fixture();
+    const players = [];
+    for (const nickname of ["甲", "乙", "丙", "丁"]) {
+      players.push(await createBetaUser(app, dependencies, nickname));
+    }
+    const { roomId, roomNo } = await startFourPlayerRoom(app, players);
+
+    // 已经在房里的人按房间号回来：不算「加入」，但也不该被「已经开局」挡住。
+    const back = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${players[2]!.token}` },
+      payload: { roomNo },
+    });
+    expect(back.statusCode).toBe(201);
+    expect(back.json()).toMatchObject({ roomId, status: "playing", playerCount: 4 });
+
+    // 外人拿同一个房间号仍然进不来 —— 这不是一条绕过满员的捷径。
+    const outsider = await createBetaUser(app, dependencies, "想插队的人");
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${outsider.token}` },
+      payload: { roomNo },
+    });
+    expect(rejected.statusCode).toBe(409);
+  });
+
+  it("stops advertising a match once it is over", async () => {
+    const { app, dependencies } = fixture();
+    const players = [];
+    for (const nickname of ["甲", "乙", "丙", "丁"]) {
+      players.push(await createBetaUser(app, dependencies, nickname));
+    }
+    const { roomId } = await startFourPlayerRoom(app, players);
+
+    // 三人同意解散，这一局就结束了。
+    await app.inject({
+      method: "POST",
+      url: `/v1/rooms/${roomId}/dissolve`,
+      headers: { authorization: `Bearer ${players[0]!.token}` },
+    });
+    for (const player of players.slice(1, 3)) {
+      const voted = await app.inject({
+        method: "POST",
+        url: `/v1/rooms/${roomId}/dissolve/vote`,
+        headers: { authorization: `Bearer ${player.token}` },
+        payload: { agree: true },
+      });
+      expect(voted.statusCode).toBe(200);
+    }
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { key: players[0]!.key },
+    });
+    // 打完/解散的房间不能再把人往里面引。
+    expect(login.json().activeRoom).toBeNull();
+  });
+
+  it("finds users by exact ID and completes the friend workflow", async () => {    const { app, dependencies, tokens } = fixture();
     const first = await createBetaUser(app, dependencies, "好友甲");
     const second = await createBetaUser(app, dependencies, "好友乙");
 

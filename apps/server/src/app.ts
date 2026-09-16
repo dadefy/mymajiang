@@ -71,8 +71,14 @@ export interface AppDependencies {
   /** 有它时改密码会等落盘再返回；内存模式省略。 */
   adminAccountStore?: AdminAccountStore & { flush?(): Promise<void> };
   createRoomId: () => string;
+  /**
+   * 生成 6 位数字房间号。
+   *
+   * 做成依赖是为了让测试能注入确定的序列（否则断言没法写），与 `createGroupNo` 同一个理由。
+   */
+  createRoomNo: () => string;
   /** When present, rooms record themselves as they are created and mutated. */
-  createRoom?: (roomId: string, owner: UserAccount) => MatchRoom;
+  createRoom?: (roomId: string, roomNo: string, owner: UserAccount) => MatchRoom;
   /** Reads finished matches back. Only available when the server has a database. */
   matchHistory?: MatchHistoryReader;
   /** Stores the round in flight so a restart can carry on. Only with a database. */
@@ -107,14 +113,45 @@ export interface AppDependencies {
   websocketUrl?: string;
 }
 
-/** 一次激活成功的返回：与登录同一份会话信息，客户端两条路径可以共用解析逻辑。 */
-function sessionView(account: UserAccount) {
+/**
+ * 一次激活/登录成功的返回：客户端两条路径可以共用解析逻辑。
+ *
+ * 除了账号本身还带上「进行中的对局」（`activeRoom`）—— 有人退出对局后重新登录，
+ * 客户端凭它就能在主页显示「你有一局还没打完，点这里回去」，
+ * 不必自己拿 `activeMatchId` 再去问一次房间接口。
+ */
+function sessionView(account: UserAccount, dependencies: AppDependencies) {
   return {
     userId: account.userId,
     nickname: account.nickname,
     avatarUrl: account.avatarUrl,
     status: account.status,
     points: account.points,
+    activeRoom: activeRoomView(account, dependencies),
+  };
+}
+
+/**
+ * 账号上挂着的、还能回去的那一局。
+ *
+ * 三个条件缺一不可：账号还记得 `activeMatchId`、那间房还在服务端内存里、
+ * 而且**还没打完**（waiting / playing）。已结束或已解散的房间不能再把人往里面引 ——
+ * 尤其是重启后没被载入的那些（见 `PostgresRoomStore.load`），
+ * 这时候房间只存在于数据库历史里，回去只会得到一个 404。
+ *
+ * 返回房间号而不只是 `roomId`：房间页要显示的是那串 6 位数字。
+ */
+function activeRoomView(account: UserAccount, dependencies: AppDependencies) {
+  const roomId = account.activeMatchId;
+  if (!roomId) return null;
+  const room = dependencies.roomStore.get(roomId);
+  if (!room || (room.status !== "waiting" && room.status !== "playing")) return null;
+  if (!room.players.has(account.userId)) return null;
+  return {
+    roomId: room.roomId,
+    roomNo: room.roomNo,
+    status: room.status,
+    playerCount: room.players.size,
   };
 }
 
@@ -264,7 +301,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     }).parse(request.body);
     const account = dependencies.accountService.activateWithKey(body);
     return reply.status(201).send({
-      ...sessionView(account),
+      ...sessionView(account, dependencies),
       token: await dependencies.tokens.issueUserToken(account.userId),
     });
   });
@@ -278,7 +315,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     if (!account) throw new Error("KEY_ACTIVATION_REQUIRED");
     if (account.status !== "active") throw new Error("ACCOUNT_NOT_ACTIVE");
     return {
-      ...sessionView(account),
+      ...sessionView(account, dependencies),
       token: await dependencies.tokens.issueUserToken(account.userId),
     };
   });
@@ -565,9 +602,40 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/rooms", async (request, reply) => {
     const user = await requireUser(request.headers, dependencies);
     const roomId = dependencies.createRoomId();
-    const room = dependencies.createRoom ? dependencies.createRoom(roomId, user) : new MatchRoom(roomId, user);
+    const roomNo = nextRoomNo(dependencies);
+    const room = dependencies.createRoom
+      ? dependencies.createRoom(roomId, roomNo, user)
+      : new MatchRoom(roomId, roomNo, user);
     dependencies.roomStore.set(roomId, room);
-    return reply.status(201).send({ roomId, status: room.status });
+    // 把房间号一并返回：它才是要发给人家的那串。
+    return reply.status(201).send({ roomId, roomNo, status: room.status });
+  });
+
+  /**
+   * 按 6 位房间号加入。
+   *
+   * 与群聊的 `POST /v1/groups/join`（按 8 位群号）是同一套做法 ——
+   * 内部仍用 `roomId` 标识房间，但**对外只要求输入房间号**。
+   */
+  app.post("/v1/rooms/join", async (request, reply) => {
+    const body = z.object({ roomNo: z.string().regex(/^\d{6}$/) }).parse(request.body);
+    const user = await requireUser(request.headers, dependencies);
+    const room = findRoomByNo(dependencies, body.roomNo);
+    if (!room) throw new Error("ROOM_NOT_FOUND");
+    /**
+     * 对局中的人按房间号回来**不算「加入」**：他本来就在这间房里，
+     * 只是客户端重启或换了设备。`join()` 会对已开局的房间拒绝（`Room has already started`），
+     * 拿它挡住一个本来就有权待在这里的人没有意义。
+     *
+     * 这不放宽任何权限：只有已经在 `players` 里的人才会走这条捷径。
+     */
+    if (!room.players.has(user.userId)) room.join(user);
+    return reply.status(201).send({
+      roomId: room.roomId,
+      roomNo: room.roomNo,
+      status: room.status,
+      playerCount: room.players.size,
+    });
   });
 
   app.get("/v1/rooms/:roomId", async (request) => {
@@ -992,9 +1060,32 @@ function roundView(round: MatchRoundRecord) {
   };
 }
 
+/**
+ * 抽一个没被占用的 6 位房间号。
+ *
+ * 房间总量不大（同一时刻能开的房间有限），而且号段有一百万个，
+ * 所以「抽一次、撞了就再抽」足够；真撞满的极端情况也没必要在这里处理。
+ * 与群聊 8 位群号的做法一致（见 `GroupService.createGroup`）。
+ */
+function nextRoomNo(dependencies: AppDependencies): string {
+  const taken = new Set([...dependencies.roomStore.values()].map((room) => room.roomNo));
+  let roomNo = dependencies.createRoomNo();
+  while (taken.has(roomNo)) roomNo = dependencies.createRoomNo();
+  return roomNo;
+}
+
+/** 按房间号找房间。找不到返回 undefined，由调用方决定报什么错。 */
+function findRoomByNo(dependencies: AppDependencies, roomNo: string): MatchRoom | undefined {
+  for (const room of dependencies.roomStore.values()) {
+    if (room.roomNo === roomNo) return room;
+  }
+  return undefined;
+}
+
 function roomSnapshot(room: MatchRoom) {
   return {
     roomId: room.roomId,
+    roomNo: room.roomNo,
     ruleVersion: room.ruleVersion,
     status: room.status,
     ownerId: room.ownerId,
@@ -1102,6 +1193,8 @@ export function createInMemoryDependencies(input: {
   createUserId: () => string;
   createLedgerId: () => string;
   createRoomId: () => string;
+  /** 生成 6 位房间号；省略时用随机数。测试里注入确定序列才好断言。 */
+  createRoomNo?: () => string;
   createGroupId: () => string;
   createGroupNo: () => string;
   createMessageId: () => string;
@@ -1117,7 +1210,7 @@ export function createInMemoryDependencies(input: {
   friendService?: FriendService;
   groupService?: GroupService;
   roomStore?: Map<string, MatchRoom>;
-  createRoom?: (roomId: string, owner: UserAccount) => MatchRoom;
+  createRoom?: (roomId: string, roomNo: string, owner: UserAccount) => MatchRoom;
   matchHistory?: MatchHistoryReader;
   gameStateStore?: GameStateStore;
   blobStorage?: BlobStorage;
@@ -1157,6 +1250,8 @@ export function createInMemoryDependencies(input: {
     friendService: input.friendService ?? new FriendService(input.createFriendRequestId),
     groupEvents: new InMemoryGroupEventBus(),
     createRoomId: input.createRoomId,
+    // 6 位随机房间号；测试注入确定序列才好断言（与 createGroupNo 同理）。
+    createRoomNo: input.createRoomNo ?? (() => String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")),
     ...(input.database ? { database: input.database } : {}),
     ...(input.adminStore ? { adminStore: input.adminStore } : {}),
     ...(input.adminAccountStore ? { adminAccountStore: input.adminAccountStore } : {}),

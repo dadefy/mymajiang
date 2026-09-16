@@ -1,6 +1,7 @@
 import { ApiClient, type ApiError, type ApiResult } from "./api-client.js";
 import { MatchSocket, type SocketEvent } from "./match-socket.js";
 import type {
+  ActiveRoomView,
   GroupDetail,
   GroupMessagePage,
   GroupMessageView,
@@ -82,12 +83,19 @@ export type Screen =
        * 所以单独一个标记让页面说清楚，而不是弹一条让人以为系统坏了的错误。
        */
       matchesUnavailable: boolean;
+      /**
+       * 进行中的对局（登录时服务端告知）。有它就显示「回到房间」——
+       * 有人退出后重新登录，靠这个入口回去接着打。
+       */
+      activeRoom: ActiveRoomView | null;
       busy: boolean;
       error?: string | undefined;
     }
   | {
       name: "room";
       roomId: string;
+      /** 6 位房间号；进房时由调用方带上，之后以快照为准。 */
+      roomNo: string | null;
       snapshot: RoomSnapshot | null;
       /** 当前这一局；还没开局或还没收到第一帧时为空。 */
       match: MatchState | null;
@@ -133,6 +141,12 @@ function describe(error: ApiError): string {
   if (error.message === "All players must be ready") return "还有玩家没有准备";
   if (error.message === "Only the room owner can start the match") return "只有房主能开局";
   if (error.message === "Room is not waiting to start") return "这个房间已经开局了";
+  // 按房间号加入会遇到的几种：号码不存在、房间已开局、人满了、积分不够入场。
+  if (error.message === "ROOM_NOT_FOUND") return "没有这个房间号，可能房主已经解散了";
+  if (error.message === "Room has already started") return "这局已经开始了，回去接着打吧";
+  if (error.message === "Player is already in the room") return "你已经在这间房里了";
+  if (error.message === "Room is full") return "房间满了，一桌只能坐四个人";
+  if (error.message === "Active account with at least 500 points is required") return "积分不足 500，暂时进不了牌局";
   if (error.message) return error.message;
   return `操作失败（${error.code}）`;
 }
@@ -164,6 +178,14 @@ export class ClientFlow {
   private socket: MatchSocket | null = null;
   /** 登录后记住「我是谁」，离开房间回主页时不用再调接口。 */
   private me: { userId: string; nickname: string; points: number } | undefined;
+  /**
+   * 进行中的对局，来自登录响应。
+   *
+   * 之所以留一份在客户端：`leaveRoom` 回主页时不该再登一次录，而主页要显示什么
+   * 得有个依据 —— 这份值就是。它只在两处失效：账号换人（登录/登出），
+   * 以及**自己看到这一局已经结束**（快照或结算帧），那时入口就该消失。
+   */
+  private activeRoom: ActiveRoomView | null = null;
   private roomId: string | null = null;
   /**
    * 群聊往更早翻页的游标。
@@ -200,6 +222,7 @@ export class ClientFlow {
     this.roomId = null;
     this.earlierCursor = undefined;
     this.me = undefined;
+    this.activeRoom = null;
     this.api.setToken(undefined);
     this.set({ name: "key-entry", busy: false });
   }
@@ -248,6 +271,7 @@ export class ClientFlow {
       groups: groups.ok ? groups.value.groups : [],
       matches: matches.ok ? matches.value.matches : [],
       matchesUnavailable,
+      activeRoom: this.screen.activeRoom,
       busy: false,
       ...(failure ? { error: describe(failure) } : {}),
     });
@@ -263,27 +287,55 @@ export class ClientFlow {
       this.set({ ...this.screen, busy: false, error: describe(created.error) });
       return;
     }
-    await this.enterRoom(created.value.roomId);
+    await this.enterRoom(created.value.roomId, created.value.roomNo);
   }
 
-  async joinRoom(roomId: string): Promise<void> {
+  /**
+   * 按 6 位房间号加入。
+   *
+   * 本地先查一遍格式：服务端也会拒（6 位数字），但它返回的是通用的「参数不合法」，
+   * 不如在这里直接说清楚该输什么 —— 输错号码是内测里最常见的一种「点了没反应」。
+   */
+  async joinRoom(rawRoomNo: string): Promise<void> {
     if (this.screen.name !== "home") return;
+    const roomNo = rawRoomNo.trim();
+    if (!/^\d{6}$/.test(roomNo)) {
+      this.set({ ...this.screen, busy: false, error: "房间号是 6 位数字，请再确认一下" });
+      return;
+    }
     this.set({ ...this.screen, busy: true });
-    const joined = await this.api.joinRoom(roomId.trim());
+    const joined = await this.api.joinRoom(roomNo);
     if (!joined.ok) {
       this.set({ ...this.screen, busy: false, error: describe(joined.error) });
       return;
     }
-    await this.enterRoom(roomId.trim());
+    await this.enterRoom(joined.value.roomId, joined.value.roomNo);
+  }
+
+  /**
+   * 回到进行中的那一局。
+   *
+   * **不再调「加入」**：人本来就在房间里，而对局中调 join 会被域层拒绝
+   * （`Players cannot leave after the match starts` 那一类规则）；
+   * 服务端在登录时已经确认过这间房还能回去（见 `activeRoomView`）。
+   * 重连本身由实时通道负责 —— `enterRoom` 会带上同一间房重新握手。
+   */
+  async rejoinActiveRoom(): Promise<void> {
+    if (this.screen.name !== "home") return;
+    const active = this.screen.activeRoom;
+    if (!active) return;
+    await this.enterRoom(active.roomId, active.roomNo);
   }
 
   /** 离开房间并断开该房间的实时通道，然后回主页。 */
   async leaveRoom(): Promise<void> {
+    // 对局中离开会被服务端拒绝（规则不允许中途走人），那就留在这一局里 ——
+    // 主页因此要照旧显示「回到房间」，所以 `activeRoom` 原样带着走。
     if (this.roomId) await this.api.leaveRoom(this.roomId);
     this.closeSocket();
     this.roomId = null;
     // 不能用 refreshHome()：当前页面还是 room，它会在原地返回。
-    await this.enterHome(this.meOrFail());
+    await this.enterHome({ ...this.meOrFail(), activeRoom: this.activeRoom });
   }
 
   /**
@@ -298,11 +350,23 @@ export class ClientFlow {
     if (this.screen.name !== "room") return;
     const snapshot = await this.api.room(this.screen.roomId);
     if (this.screen.name !== "room") return;
+    if (snapshot.ok) this.forgetActiveRoomIfOver(snapshot.value.status);
     this.set({
       ...this.screen,
+      roomNo: snapshot.ok ? snapshot.value.roomNo : this.screen.roomNo,
       snapshot: snapshot.ok ? snapshot.value : this.screen.snapshot,
       ...(snapshot.ok ? {} : { notice: describe(snapshot.error) }),
     });
+  }
+
+  /**
+   * 这一局已经结束：把「回到房间」的入口撤掉。
+   *
+   * 服务端那边 `activeMatchId` 一并被清了（见 `MatchRoom.finalize`），
+   * 客户端不该比它记得更久 —— 否则主页会一直挂着一个回不去、或者回去了也没得打的房间。
+   */
+  private forgetActiveRoomIfOver(status: RoomSnapshot["status"]): void {
+    if (status === "finished" || status === "dissolved") this.activeRoom = null;
   }
 
   async setReady(ready: boolean): Promise<void> {
@@ -398,7 +462,8 @@ export class ClientFlow {
     if (this.screen.name === "chat") this.socket?.unsubscribeGroup(this.screen.groupId);
     this.closeSocket();
     this.earlierCursor = undefined;
-    await this.enterHome(this.meOrFail());
+    // 带着进行中的对局回主页：从群聊退回主页时，那个入口不该消失。
+    await this.enterHome({ ...this.meOrFail(), activeRoom: this.activeRoom });
   }
 
   /**
@@ -551,10 +616,21 @@ export class ClientFlow {
 
   // ---------- 内部 ----------
 
-  private async enterHome(me: { userId: string; nickname: string; points: number }): Promise<void> {
-    // 令牌在登录那一刻就已由 ApiClient 自动持有；这里只记住「我是谁」，离开房间回主页时要用。
-    this.me = me;
-    this.set({ name: "home", me: this.me, groups: [], matches: [], matchesUnavailable: false, busy: true });
+  private async enterHome(session: { userId: string; nickname: string; points: number; activeRoom: ActiveRoomView | null }): Promise<void> {
+    // 令牌在登录那一刻就已由 ApiClient 自动持有；这里只记住「我是谁」与「有没有对局在等我」，
+    // 离开房间回主页时要用。
+    this.me = { userId: session.userId, nickname: session.nickname, points: session.points };
+    // `?? null` 是防御性的：万一对面是还没带这个字段的旧版本，页面不该因此拿到 undefined。
+    this.activeRoom = session.activeRoom ?? null;
+    this.set({
+      name: "home",
+      me: this.me,
+      groups: [],
+      matches: [],
+      matchesUnavailable: false,
+      activeRoom: this.activeRoom,
+      busy: true,
+    });
     const [groups, matches] = await Promise.all([this.api.groups(), this.api.matches()]);
     // 同 refreshHome：战绩不可用（没配数据库）是预期状态，不算失败。
     const matchesUnavailable = !matches.ok && matches.error.kind === "unavailable";
@@ -565,6 +641,7 @@ export class ClientFlow {
       groups: groups.ok ? groups.value.groups : [],
       matches: matches.ok ? matches.value.matches : [],
       matchesUnavailable,
+      activeRoom: this.activeRoom,
       busy: false,
       ...(failure ? { error: describe(failure) } : {}),
     });
@@ -575,7 +652,7 @@ export class ClientFlow {
     return this.me;
   }
 
-  private async enterRoom(roomId: string): Promise<void> {
+  private async enterRoom(roomId: string, roomNo: string | null = null): Promise<void> {
     // 令牌由 ApiClient 在登录那一刻自动持有；实时通道要带上同一个令牌。
     const token = this.api.token;
     if (!token) throw new Error("Not signed in");
@@ -584,15 +661,17 @@ export class ClientFlow {
     this.closeSocket();
     this.earlierCursor = undefined;
     this.roomId = roomId;
-    this.set({ name: "room", roomId, snapshot: null, match: null, actions: [], lastResult: null, busy: true });
+    this.set({ name: "room", roomId, roomNo, snapshot: null, match: null, actions: [], lastResult: null, busy: true });
     const socket = new MatchSocket({ url: this.socketUrl, token, factory: this.sockets });
     socket.on((event) => this.dispatchSocketEvent(event));
     this.socket = socket;
     await socket.connect(roomId);
     const snapshot = await this.api.room(roomId);
+    if (snapshot.ok) this.forgetActiveRoomIfOver(snapshot.value.status);
     this.set({
       name: "room",
       roomId,
+      roomNo: snapshot.ok ? snapshot.value.roomNo : roomNo,
       snapshot: snapshot.ok ? snapshot.value : null,
       match: null,
       actions: [],
@@ -631,6 +710,8 @@ export class ClientFlow {
         this.set({ ...this.screen, lastResult: event.result });
         return;
       case "match-finished":
+        // 打完了就没有「回到这一局」可言了，入口同快照一起失效。
+        this.activeRoom = null;
         this.set({ ...this.screen, lastResult: event.result, match: null, actions: [] });
         return;
       case "error":

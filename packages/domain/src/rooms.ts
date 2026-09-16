@@ -53,6 +53,13 @@ export class MatchRoom {
 
   constructor(
     readonly roomId: string,
+    /**
+     * 6 位数字房间号：**给人念、给人输的那串**。
+     *
+     * 与 `roomId`（内部 uuid）分开是有意的 —— 让人输入或口头转述一串 uuid 不现实，
+     * 而房间号要能在微信里发一句话说清楚。群聊那边是同一套做法（8 位群号）。
+     */
+    readonly roomNo: string,
     owner: UserAccount,
     private readonly now: () => Date = () => new Date(),
     /**
@@ -65,6 +72,7 @@ export class MatchRoom {
     mode: "create" | "restore" = "create",
   ) {
     this.createdAt = this.now();
+    if (!/^\d{6}$/.test(roomNo)) throw new Error("Room number must contain exactly 6 digits");
     if (mode === "create") this.assertCanJoin(owner);
     this.ownerId = owner.userId;
     this.players.set(owner.userId, {

@@ -111,6 +111,8 @@ function encodeClientFrame(payload: string): Buffer {
 }
 
 let idCounter = 1234567890;
+/** 房间号发号器：递增才不会在 `nextRoomNo` 里撞号空转。 */
+let roomNoCounter = 200_000;
 
 function fixture() {
   const tokens = new TokenService("test-jwt-secret-that-is-longer-than-32-characters");
@@ -121,6 +123,8 @@ function fixture() {
     createUserId: () => String(idCounter++),
     createLedgerId: () => `ledger-${idCounter}`,
     createRoomId: () => `room-${idCounter}`,
+    // 递增而不是固定值：一间 app 里可能建多间房，撞号会让 `nextRoomNo` 一直重抽。
+    createRoomNo: () => String((roomNoCounter += 1)),
     createGroupId: () => `group-${idCounter}`,
     createGroupNo: () => "12345678",
     createMessageId: () => `msg-${idCounter++}`,
@@ -144,7 +148,8 @@ function createBetaUser(dependencies: AppDependencies, nickname: string): string
 
 function makeRoom(dependencies: AppDependencies, userIds: string[]): MatchRoom {
   const owner = dependencies.accountStore.findAccountById(userIds[0]!)!;
-  const room = new MatchRoom(`room-${idCounter++}`, owner);
+  // 房间号走依赖里的发号器，和真实建房路径保持一致（递增，不会撞号）。
+  const room = new MatchRoom(`room-${idCounter++}`, dependencies.createRoomNo(), owner);
   dependencies.roomStore.set(room.roomId, room);
   for (const id of userIds.slice(1)) room.join(dependencies.accountStore.findAccountById(id)!);
   for (const id of userIds) room.setReady(id, true);

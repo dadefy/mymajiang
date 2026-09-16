@@ -15,7 +15,7 @@ function account(userId: string, points = 500): UserAccount {
 function readyRoom(points = [600, 500, 500, 500]): { room: MatchRoom; users: UserAccount[] } {
   const users = [account("A", points[0]), account("B", points[1]), account("C", points[2]), account("D", points[3])];
   let joinedAt = 0;
-  const room = new MatchRoom("room-1", users[0]!, () => new Date(joinedAt++));
+  const room = new MatchRoom("room-1", "123456", users[0]!, () => new Date(joinedAt++));
   room.join(users[1]!);
   room.join(users[2]!);
   room.join(users[3]!);
@@ -25,10 +25,18 @@ function readyRoom(points = [600, 500, 500, 500]): { room: MatchRoom; users: Use
 
 describe("match room", () => {
   it("requires an active account with at least 500 points", () => {
-    expect(() => new MatchRoom("room-1", account("A", 499))).toThrow("at least 500 points");
+    expect(() => new MatchRoom("room-1", "123456", account("A", 499))).toThrow("at least 500 points");
     const banned = account("B", 500);
     banned.status = "temporarily_banned";
-    expect(() => new MatchRoom("room-2", banned)).toThrow("Active account");
+    expect(() => new MatchRoom("room-2", "123456", banned)).toThrow("Active account");
+  });
+
+  it("房间号必须是 6 位数字", () => {
+    // 这串是给人念、给人输的，格式不对就等于没法进房 —— 所以在域层就挡住。
+    for (const bad of ["12345", "1234567", "abcdef", "12345a", ""]) {
+      expect(() => new MatchRoom("room-1", bad, account("A"))).toThrow("exactly 6 digits");
+    }
+    expect(new MatchRoom("room-1", "012345", account("A")).roomNo).toBe("012345");
   });
 
   it("requires four ready players and only allows the owner to start", () => {
@@ -52,8 +60,8 @@ describe("match room", () => {
     const player = account("B", 500);
     player.activeMatchId = "room-1";
     // 入场校验只属于「入场」那一刻；重建的是已经在房间里、正在打的人。
-    expect(() => new MatchRoom("room-1", player)).toThrow("Active account");
-    expect(new MatchRoom("room-1", player, () => new Date(0), "restore").ownerId).toBe("B");
+    expect(() => new MatchRoom("room-1", "123456", player)).toThrow("Active account");
+    expect(new MatchRoom("room-1", "123456", player, () => new Date(0), "restore").ownerId).toBe("B");
   });
 
   it("fixes seats densely from join order when the match starts", () => {
@@ -112,7 +120,7 @@ describe("match room", () => {
   it("allows reconnection for 120 seconds after a playing-room disconnect", () => {
     let now = Date.parse("2026-09-15T00:00:00.000Z");
     const users = [account("A"), account("B"), account("C"), account("D")];
-    const room = new MatchRoom("room-reconnect", users[0]!, () => new Date(now));
+    const room = new MatchRoom("room-reconnect", "123456", users[0]!, () => new Date(now));
     for (const user of users.slice(1)) room.join(user);
     for (const user of users) room.setReady(user.userId, true);
     room.start("A");

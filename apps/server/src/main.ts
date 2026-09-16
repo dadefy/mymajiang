@@ -126,7 +126,8 @@ const dependencies = createInMemoryDependencies({
   ...(roomStore
     ? {
         roomStore: roomStore.rooms,
-        createRoom: (roomId: string, owner: UserAccount) => roomStore.createRoom(roomId, owner),
+        createRoom: (roomId: string, roomNo: string, owner: UserAccount) =>
+          roomStore.createRoom(roomId, roomNo, owner),
       }
     : {}),
   ...(matchHistory ? { matchHistory } : {}),

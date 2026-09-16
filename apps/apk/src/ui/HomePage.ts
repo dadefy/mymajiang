@@ -1,5 +1,5 @@
-import type { ClientFlow, GroupSummary, MatchSummary, Screen } from "@mianyang-mahjong/client";
-import { THEME, box, field, fmtDelta, label, refill, scrollList, textButton } from "./widgets.js";
+import type { ActiveRoomView, ClientFlow, GroupSummary, MatchSummary, Screen } from "@mianyang-mahjong/client";
+import { THEME, box, field, fmtDelta, label, refill, scrollList, setButtonText, textButton } from "./widgets.js";
 
 const ROLE_NAMES: Record<GroupSummary["role"], string> = { owner: "群主", admin: "管理员", member: "" };
 
@@ -20,6 +20,7 @@ export class HomePage {
   private readonly matchList: Laya.VBox;
   private readonly groupEmpty: Laya.Label;
   private readonly matchEmpty: Laya.Label;
+  private readonly rejoinButton: Laya.Box;
   private busy = false;
 
   constructor(
@@ -38,9 +39,15 @@ export class HomePage {
 
     // 建房 / 进房 / 刷新
     textButton(this.view, "创建房间", 75, 150, 220, 80, THEME.accentDark, () => void this.flow.createRoom());
-    this.roomInput = field(this.view, 320, 150, 240, 80, "房间号", 16).input;
+    // 房间号是 6 位数字：输入框直接限长，用户少输一位一眼就能看出来。
+    this.roomInput = field(this.view, 320, 150, 240, 80, "6 位房间号", 6).input;
     textButton(this.view, "加入", 585, 150, 90, 80, THEME.panelBg2, () => void this.joinRoom());
     textButton(this.view, "刷新列表", 75, 250, 220, 64, THEME.panelBg2, () => void this.flow.refreshHome());
+
+    // 进行中的对局入口：有人退出后重新进来，靠它直接回到牌桌接着打。
+    // 没有对局时整个按钮不显示，不用「点了才知道不行」。
+    this.rejoinButton = textButton(this.view, "", 320, 250, 355, 64, THEME.accentDark, () => void this.flow.rejoinActiveRoom());
+    this.rejoinButton.visible = false;
 
     this.errorLabel = label(this.view, "", 24, { width: 600, align: "center", color: THEME.bad, wordWrap: true });
     this.errorLabel.pos(75, 330);
@@ -68,14 +75,22 @@ export class HomePage {
     this.busyLabel.visible = screen.busy;
     this.errorLabel.visible = !screen.busy && screen.error !== undefined;
     this.errorLabel.text = screen.error ?? "";
+    this.renderRejoin(screen.activeRoom);
     this.renderGroups(screen.groups);
     this.renderMatches(screen.matches, screen.matchesUnavailable);
   }
 
+  /** 进行中的对局入口。服务端只在「这间房还能回去」时才给（见登录响应的 `activeRoom`）。 */
+  private renderRejoin(active: ActiveRoomView | null): void {
+    this.rejoinButton.visible = active !== null;
+    if (active) setButtonText(this.rejoinButton, `回到对局 ${active.roomNo}（${active.playerCount} 人）`);
+  }
+
   private async joinRoom(): Promise<void> {
-    const roomId = this.roomInput.text.trim();
-    if (this.busy || roomId.length === 0) return;
-    await this.flow.joinRoom(roomId);
+    const roomNo = this.roomInput.text.trim();
+    // 号码不对时由 flow 给出「房间号是 6 位数字」的提示，这里只是不白跑一趟。
+    if (this.busy || roomNo.length === 0) return;
+    await this.flow.joinRoom(roomNo);
   }
 
   private renderGroups(groups: GroupSummary[]): void {

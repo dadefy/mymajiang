@@ -17,6 +17,8 @@ import { PostgresWriteQueue, type SqlStatement } from "./postgres-write-queue.js
 
 interface RoomRow {
   room_id: string;
+  /** 6 位数字房间号，`CHAR(6)` 读回来可能带补空格，用前一律 trim。 */
+  room_no: string;
   status: MatchRoom["status"];
   owner_id: string;
   completed_rounds: number;
@@ -32,10 +34,14 @@ interface RoomPlayerRow {
   raw_delta: string | null;
 }
 
+/**
+ * `room_no` 只在插入时写：房间号是不可变的，而且它是「还在用的房间」的唯一键
+ * （部分唯一索引 `match_rooms_active_room_no`），冲突分支里再写一次没有意义。
+ */
 const UPSERT_ROOM_SQL = `INSERT INTO match_rooms (
-    room_id, rule_version, status, owner_id, completed_rounds,
+    room_id, room_no, rule_version, status, owner_id, completed_rounds,
     created_at, finalized_at, final_reason
-  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
   ON CONFLICT (room_id) DO UPDATE SET
     status = EXCLUDED.status, owner_id = EXCLUDED.owner_id,
     completed_rounds = EXCLUDED.completed_rounds,
@@ -83,11 +89,12 @@ export class PostgresMatchRoom extends MatchRoom {
     private readonly queue: PostgresWriteQueue,
     private readonly createLedgerId: () => string,
     roomId: string,
+    roomNo: string,
     owner: UserAccount,
     mode: "create" | "restore" = "create",
     private readonly clock: () => Date = () => new Date(),
   ) {
-    super(roomId, owner, clock, mode);
+    super(roomId, roomNo, owner, clock, mode);
   }
 
   /** Creates a room and records its room row plus the owner's membership row. */
@@ -95,10 +102,11 @@ export class PostgresMatchRoom extends MatchRoom {
     queue: PostgresWriteQueue,
     createLedgerId: () => string,
     roomId: string,
+    roomNo: string,
     owner: UserAccount,
     clock?: () => Date,
   ): PostgresMatchRoom {
-    const room = new PostgresMatchRoom(queue, createLedgerId, roomId, owner, "create", clock);
+    const room = new PostgresMatchRoom(queue, createLedgerId, roomId, roomNo, owner, "create", clock);
     room.queue.enqueueTransaction([
       { sql: UPSERT_ROOM_SQL, parameters: roomParameters(room, null) },
       { sql: UPSERT_ROOM_PLAYER_SQL, parameters: roomPlayerParameters(room, owner.userId, null) },
@@ -113,7 +121,15 @@ export class PostgresMatchRoom extends MatchRoom {
     row: RoomRow,
     owner: UserAccount,
   ): PostgresMatchRoom {
-    const room = new PostgresMatchRoom(queue, createLedgerId, row.room_id, owner, "restore");
+    const room = new PostgresMatchRoom(
+      queue,
+      createLedgerId,
+      row.room_id,
+      // CHAR(6) 读回来可能带补空格，交给域层前先去掉。
+      row.room_no.trim(),
+      owner,
+      "restore",
+    );
     room.ownerId = row.owner_id.trim();
     room.completedRounds = row.completed_rounds;
     return room;
@@ -269,7 +285,7 @@ export class PostgresRoomStore {
 
     const [roomRows, playerRows] = await Promise.all([
       database.pool.query<RoomRow>(
-        `SELECT room_id, status, owner_id, completed_rounds FROM match_rooms
+        `SELECT room_id, room_no, status, owner_id, completed_rounds FROM match_rooms
           WHERE status IN ('waiting', 'playing') ORDER BY created_at ASC, room_id ASC`,
       ),
       database.pool.query<RoomPlayerRow>(
@@ -322,8 +338,8 @@ export class PostgresRoomStore {
   }
 
   /** Factory for creating a room that records itself from the very first write. */
-  createRoom(roomId: string, owner: UserAccount): MatchRoom {
-    return PostgresMatchRoom.create(this.queue, this.createLedgerId, roomId, owner);
+  createRoom(roomId: string, roomNo: string, owner: UserAccount): MatchRoom {
+    return PostgresMatchRoom.create(this.queue, this.createLedgerId, roomId, roomNo, owner);
   }
 
   /**
@@ -346,6 +362,7 @@ function settlementReason(completedRounds: number, reason: RoomResult["reason"])
 function roomParameters(room: MatchRoom, finalizedAt: Date | null): readonly unknown[] {
   return [
     room.roomId,
+    room.roomNo,
     room.ruleVersion,
     room.status,
     room.ownerId,

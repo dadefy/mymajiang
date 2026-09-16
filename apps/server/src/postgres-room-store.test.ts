@@ -144,7 +144,7 @@ async function loadedStore(users: readonly UserAccount[], options: { rooms?: unk
 /** A room with four seated, ready players and the match already started. */
 async function startedRoom(users: readonly UserAccount[], options: { failOn?: string } = {}) {
   const loaded = await loadedStore(users, options);
-  const room = loaded.store.createRoom("room-1", users[0]!);
+  const room = loaded.store.createRoom("room-1", "123456", users[0]!);
   for (const user of users.slice(1)) room.join(user);
   for (const user of users) room.setReady(user.userId, true);
   room.start("A");
@@ -157,12 +157,13 @@ describe("PostgresMatchRoom", () => {
     const { store, timeline, mark } = await loadedStore([account("A", 600)]);
     const since = mark();
 
-    store.createRoom("room-1", account("A", 600));
+    store.createRoom("room-1", "123456", account("A", 600));
     await store.flush();
 
     expect(writes(timeline, since)).toEqual(["BEGIN", "insert:match_rooms", "insert:match_room_players", "COMMIT"]);
     expect(statements(timeline, "insert:match_rooms", since)[0]).toEqual([
       "room-1",
+      "123456",
       "MIANYANG_XZ_1_0",
       "waiting",
       "A",
@@ -186,7 +187,7 @@ describe("PostgresMatchRoom", () => {
   it("records seats and opening balances when the match starts", async () => {
     const users = fourUsers();
     const { store, timeline, mark } = await loadedStore(users);
-    const room = store.createRoom("room-1", users[0]!);
+    const room = store.createRoom("room-1", "123456", users[0]!);
     for (const user of users.slice(1)) room.join(user);
     for (const user of users) room.setReady(user.userId, true);
     // Queued writes only run on `flush`, so the mark must be taken after they have landed.
@@ -208,7 +209,7 @@ describe("PostgresMatchRoom", () => {
       ["room-1", "C", 2, expect.any(Date), true, 500],
       ["room-1", "D", 3, expect.any(Date), true, 500],
     ]);
-    expect(statements(timeline, "insert:match_rooms", since)[0]![2]).toBe("playing");
+    expect(statements(timeline, "insert:match_rooms", since)[0]![3]).toBe("playing");
   });
 
   it("records every round once, with its settlement events", async () => {
@@ -235,7 +236,7 @@ describe("PostgresMatchRoom", () => {
     expect(rounds[1]![2]).toBe(2);
     expect(rounds[0]![6]).toBe('[{"playerId":"A","delta":-100},{"playerId":"B","delta":100}]');
     expect(rounds[0]![7]).toContain('"type":"win"');
-    expect(statements(timeline, "insert:match_rooms", since)[1]![4]).toBe(2);
+    expect(statements(timeline, "insert:match_rooms", since)[1]![5]).toBe(2);
   });
 
   it("settles the match, writing each balance with its ledger row in one transaction", async () => {
@@ -279,7 +280,7 @@ describe("PostgresMatchRoom", () => {
       "insert:match_room_players",
       "COMMIT",
     ]);
-    expect(statements(timeline, "insert:match_rooms", since).at(-1)!.slice(2, 8)).toEqual([
+    expect(statements(timeline, "insert:match_rooms", since).at(-1)!.slice(3, 9)).toEqual([
       "finished",
       "A",
       8,
@@ -305,7 +306,7 @@ describe("PostgresMatchRoom", () => {
   it("dissolves a waiting room without touching balances", async () => {
     const users = [account("A", 600), account("B", 500)];
     const { store, timeline, mark } = await loadedStore(users);
-    const room = store.createRoom("room-1", users[0]!);
+    const room = store.createRoom("room-1", "123456", users[0]!);
     room.join(users[1]!);
     await store.flush();
     const since = mark();
@@ -314,7 +315,7 @@ describe("PostgresMatchRoom", () => {
     await store.flush();
 
     expect(writes(timeline, since)).toEqual(["insert:match_rooms"]);
-    expect(statements(timeline, "insert:match_rooms", since)[0]!.slice(2, 8)).toEqual([
+    expect(statements(timeline, "insert:match_rooms", since)[0]!.slice(3, 9)).toEqual([
       "dissolved",
       "A",
       0,
@@ -330,7 +331,7 @@ describe("PostgresRoomStore.load", () => {
   it("restores a waiting room with every ready flag cleared", async () => {
     const users = [account("A", 600), account("B", 500)];
     const { store, timeline } = await loadedStore(users, {
-      rooms: [{ room_id: "room-1", status: "waiting", owner_id: "A", completed_rounds: 0 }],
+      rooms: [{ room_id: "room-1", room_no: "123456", status: "waiting", owner_id: "A", completed_rounds: 0 }],
       players: [
         { room_id: "room-1", user_id: "A", seat: null, joined_at: new Date(0), ready: true, opening_balance: null, raw_delta: null },
         { room_id: "room-1", user_id: "B", seat: null, joined_at: new Date(1), ready: true, opening_balance: null, raw_delta: null },
@@ -339,6 +340,8 @@ describe("PostgresRoomStore.load", () => {
 
     const room = store.rooms.get("room-1")!;
     expect(room.status).toBe("waiting");
+    // CHAR(6) 读回来可能带补空格，房间号必须仍然是那 6 位数字。
+    expect(room.roomNo).toBe("123456");
     expect([...room.players.keys()]).toEqual(["A", "B"]);
     expect([...room.players.values()].map((player) => player.ready)).toEqual([false, false]);
     expect([...room.players.values()].map((player) => player.connected)).toEqual([false, false]);
@@ -351,7 +354,7 @@ describe("PostgresRoomStore.load", () => {
   it("brings a room that was mid-match back as playing, keeping its seats and deltas", async () => {
     const users = [account("A", 600, "room-1"), account("B", 500, "room-1")];
     const { store, timeline } = await loadedStore(users, {
-      rooms: [{ room_id: "room-1", status: "playing", owner_id: "A", completed_rounds: 3 }],
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 3 }],
       players: [
         { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "-300" },
         { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: true, opening_balance: "500", raw_delta: "300" },
@@ -360,6 +363,7 @@ describe("PostgresRoomStore.load", () => {
 
     const room = store.rooms.get("room-1")!;
     expect(room.status).toBe("playing");
+    expect(room.roomNo).toBe("654321");
     expect(room.completedRounds).toBe(3);
     expect([...room.players.values()].map((player) => player.seat)).toEqual([0, 1]);
     expect([...room.openingBalances.entries()]).toEqual([["A", 600], ["B", 500]]);
@@ -369,13 +373,13 @@ describe("PostgresRoomStore.load", () => {
     // 对局还没结束：不许结算，也不许把玩家从 activeMatchId 上摘下来。
     expect(statements(timeline, "insert:point_ledger")).toHaveLength(0);
     expect(users.map((user) => user.activeMatchId)).toEqual(["room-1", "room-1"]);
-    expect(statements(timeline, "insert:match_rooms")[0]!.slice(2, 4)).toEqual(["playing", "A"]);
+    expect(statements(timeline, "insert:match_rooms")[0]!.slice(3, 5)).toEqual(["playing", "A"]);
   });
 
   it("closes a room that has nobody left in it", async () => {
     const users = [account("A", 600)];
     const { store, timeline } = await loadedStore(users, {
-      rooms: [{ room_id: "room-1", status: "waiting", owner_id: "A", completed_rounds: 0 }],
+      rooms: [{ room_id: "room-1", room_no: "123456", status: "waiting", owner_id: "A", completed_rounds: 0 }],
       players: [],
     });
 
@@ -386,7 +390,7 @@ describe("PostgresRoomStore.load", () => {
 
   it("fails loudly when stored rows reference a user that does not exist", async () => {
     const { database } = fakeDatabase({
-      rooms: [{ room_id: "room-1", status: "waiting", owner_id: "A", completed_rounds: 0 }],
+      rooms: [{ room_id: "room-1", room_no: "123456", status: "waiting", owner_id: "A", completed_rounds: 0 }],
       players: [
         { room_id: "room-1", user_id: "GHOST", seat: null, joined_at: new Date(0), ready: false, opening_balance: null, raw_delta: null },
       ],

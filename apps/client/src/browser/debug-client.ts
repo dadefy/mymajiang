@@ -119,8 +119,9 @@ function renderBar(screen: Screen): void {
       button("退出登录", () => flow.signOut()),
     );
   } else if (screen.name === "room") {
+    // 给人看、给人念的是 6 位房间号；内部 roomId 在房间页里另有一处（调试用）。
     bar.append(
-      element("span", { text: `房间 ${screen.roomId}` }),
+      element("span", { text: `房间号 ${screen.roomNo ?? "读取中…"}` }),
       element("span", { className: "spacer" }),
       button("离开房间", () => void flow.leaveRoom()),
     );
@@ -165,10 +166,22 @@ function renderProfile(screen: Extract<Screen, { name: "profile" }>): void {
 
 function renderHome(screen: Extract<Screen, { name: "home" }>): void {
   const joinInput = element("input", { className: "text" });
-  joinInput.placeholder = "房间 ID（别人建房后告诉你）";
+  joinInput.placeholder = "6 位房间号（建房的人告诉你）";
+  joinInput.maxLength = 6;
 
   app.append(
     panel("开始打牌",
+      // 进行中的对局排在最前：有人退出后重新登录，第一眼就该看到「回去接着打」。
+      ...(screen.activeRoom
+        ? [
+            element("div", { className: "row" },
+              element("span", {
+                text: `你有一局没打完：房间号 ${screen.activeRoom.roomNo}（${screen.activeRoom.playerCount} 人）`,
+              }),
+              button("回到对局", () => void flow.rejoinActiveRoom(), "primary"),
+            ),
+          ]
+        : []),
       element("div", { className: "row" },
         button("建一个新房间", () => void flow.createRoom(), "primary"),
         joinInput,

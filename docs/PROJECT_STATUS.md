@@ -81,7 +81,8 @@ mianyang-mahjong/
 │  │  ├─ 004_invitation_keys.sql 内测邀请密钥，去掉短信与审核
 │  │  ├─ 005_group_soft_delete.sql 解散群改为软删除（dissolved_at）
 │  │  ├─ 006_admin_accounts.sql 管理员账号与密码哈希
-│  │  └─ 007_group_messages_pagination.sql 群消息键集分页索引
+│  │  ├─ 007_group_messages_pagination.sql 群消息键集分页索引
+│  │  └─ 008_room_no.sql 6 位数字房间号（加列 + 在用房间的唯一索引）
 │  └─ src/
 │     ├─ app.ts              REST API
 │     ├─ auth.ts             JWT 签发与校验
@@ -628,6 +629,44 @@ LayaAir 侧的渲染层（也就是最终 APK 里那套 UI）此前只在混元�
 - `/app` 跑的是 Web 平台，因此**验不到「原生 APK 上的选图与录音」** —— 那两个能力依赖
   标准 Web API，在 Web 平台下走浏览器实现，能验流程但不能证明原生环境可用。
 
+### 4.29 6 位房间号与「回到对局」
+
+验收时暴露的两个问题，一起改掉了。
+
+**一、房间号。** 以前进房要输的是 `roomId`（UUID）——**没人能念、也没人愿意输**。现在对外
+只认 **6 位数字房间号**（`MatchRoom.roomNo`），与群聊 8 位群号同一套做法：
+
+- 域层：`MatchRoom` 的构造参数加 `roomNo`，并校验 `^\d{6}$`。内部 `roomId` 仍是不变的标识，
+  两者分开是有意的 —— 房间号要能在一句话里说清楚。
+- 服务端：`createRoomNo` 作为依赖注入（测试注入确定序列才能断言，与 `createGroupNo` 同理由）；
+  `nextRoomNo()` 负责抽一个没被占用的号；新增 `POST /v1/rooms/join`（`{ roomNo }`）；
+  房间快照带 `roomNo`。`POST /v1/rooms/:roomId/join` 保留，客户端不再使用。
+- 持久化：迁移 `008_room_no.sql` 加列并回填历史行，再建**部分唯一索引**
+  `WHERE status IN ('waiting','playing')` —— 号码只约束「还在用的房间」，打完就该释放。
+  内存里的 `nextRoomNo` 是主判据，这个索引是兜底：真撞号时插入直接失败，比悄悄开出两个同号房间好。
+- 客户端：主页输入框改成 6 位（本地先查格式，否则服务端只会回一句「参数不合法」）；
+  房间页顶部显示房间号而不是 UUID。
+
+**二、退出后回不到对局。** 有人在对局中关掉页面，重新登录后**回不到牌桌** ——
+服务端其实早就有条件（对局快照、`activeMatchId`、WS 恢复都在），缺的只是入口。
+
+- 登录/激活响应新增 **`activeRoom`**：账号还记得 `activeMatchId`、房间还在服务端内存里、
+  且**还没打完**时才有值（见 `activeRoomView`）。三个条件缺一不可 —— 已结束或重启后未载入的
+  房间不能再把人往里面引，回去只会得到 404。
+- 客户端主页据此显示「你有一局没打完：房间号 XXXXXX」+「回到对局」按钮。
+  **点它直接进房间，不再调一次「加入」** —— 对局中 `join()` 本来就会被域层拒绝。
+- 入口只在两处消失：账号换人（登录/登出），以及**自己看到这一局已经结束**
+  （快照是 finished/dissolved，或收到 `match-finished` 帧）。服务端那边 `activeMatchId`
+  一并被清，客户端不该比它记得更久。
+- 顺带放宽一条：**已经在房里的人按房间号回来不算「加入」**（先判 `players.has`）。
+  他本来就有权待在这里，被 `Room has already started` 挡住没有意义；这也不放宽任何权限 ——
+  外人拿同一个号码进来，仍然会被「房间已开局」挡在门外。
+- 域层那几条英文错误（`ROOM_NOT_FOUND`、`Room is full`、`Room has already started`、
+  积分不足等）也一并翻成中文。
+
+**已知限制**：内存模式下重启会连 `activeMatchId` 一起丢，所以重启后**不会**再有「回到对局」
+入口 —— 那一局确实回不去了。要跨重启续打，得配 PostgreSQL。
+
 ## 5. 当前 REST API
 
 ### 邀请密钥登录
@@ -668,9 +707,13 @@ LayaAir 侧的渲染层（也就是最终 APK 里那套 UI）此前只在混元�
 
 ### 房间
 
-- `POST /v1/rooms`
+> `roomId`（内部 UUID）仍标识房间，但**对外只要求输入 6 位房间号**（`roomNo`），
+> 与群聊的 8 位群号同一个做法。见 4.29。
+
+- `POST /v1/rooms` — 建房，返回 `roomId` 与 `roomNo`
+- `POST /v1/rooms/join` — 按 `{ roomNo }` 加入（对外的主路径）
 - `GET /v1/rooms/:roomId`
-- `POST /v1/rooms/:roomId/join`
+- `POST /v1/rooms/:roomId/join` — 内部 id 加房；客户端已不再使用，保留给既有调用方与测试
 - `POST /v1/rooms/:roomId/leave`
 - `POST /v1/rooms/:roomId/ready`
 - `POST /v1/rooms/:roomId/start`

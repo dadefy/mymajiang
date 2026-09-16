@@ -47,6 +47,8 @@ export class RoomPage {
   private readonly resultTitle: Laya.Label;
   private readonly resultBody: Laya.Box;
   private roomId = "";
+  /** 6 位房间号：给玩家看、让玩家转述的那串。快照回来之前可能还不知道。 */
+  private roomNo = "";
   private snapshot: RoomSnapshot | null = null;
   private match: MatchState | null = null;
   private actions: string[] = [];
@@ -109,6 +111,8 @@ export class RoomPage {
     } else if (!this.snapshot && screen.snapshot) {
       this.snapshot = screen.snapshot;
     }
+    // 房间号进房时不一定知道（快照才带），所以每次都跟最新值走，别退回空字符串。
+    this.roomNo = screen.roomNo ?? this.roomNo;
     this.match = screen.match;
     this.actions = screen.actions;
     this.actionLocked = false;
@@ -127,7 +131,9 @@ export class RoomPage {
     this.noticeLabel.visible = notice !== undefined;
     this.noticeLabel.text = notice ?? "";
     const waiting = this.snapshot?.status === "waiting" && this.match === null;
-    this.statusLabel.text = `房间 ${this.roomId} · ${this.match ? STATUS_NAMES.playing : this.snapshot ? STATUS_NAMES[this.snapshot.status] : "连接中"}`;
+    // 显示房间号而不是内部 roomId —— 玩家要把它念给下一桌的人听。
+    const number = this.roomNo.length > 0 ? `房间号 ${this.roomNo}` : "房间号读取中";
+    this.statusLabel.text = `${number} · ${this.match ? STATUS_NAMES.playing : this.snapshot ? STATUS_NAMES[this.snapshot.status] : "连接中"}`;
     const inProgress = this.match !== null || this.snapshot?.status === "playing";
     this.exitButton.visible = !inProgress;
 

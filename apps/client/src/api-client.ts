@@ -171,7 +171,7 @@ export class ApiClient {
   // ---------- 房间 ----------
 
   /** 建房。带上幂等键，超时重试才不会建出两间房。 */
-  createRoom(idempotencyKey?: string): Promise<ApiResult<{ roomId: string; status: string }>> {
+  createRoom(idempotencyKey?: string): Promise<ApiResult<{ roomId: string; roomNo: string; status: string }>> {
     return this.call({ method: "POST", path: "/v1/rooms", ...(idempotencyKey ? { idempotencyKey } : {}) });
   }
 
@@ -179,8 +179,14 @@ export class ApiClient {
     return this.call({ method: "GET", path: `/v1/rooms/${encodeURIComponent(roomId)}` });
   }
 
-  joinRoom(roomId: string): Promise<ApiResult<{ roomId: string; status: string; playerCount: number }>> {
-    return this.call({ method: "POST", path: `/v1/rooms/${encodeURIComponent(roomId)}/join` });
+  /**
+   * 按 6 位房间号加入。
+   *
+   * 路径上没有房间号 —— 服务端对外只认房间号（内部 `roomId` 是它自己换回来的），
+   * 与群聊的 `/v1/groups/join` 同一个做法。
+   */
+  joinRoom(roomNo: string): Promise<ApiResult<{ roomId: string; roomNo: string; status: string; playerCount: number }>> {
+    return this.call({ method: "POST", path: "/v1/rooms/join", body: { roomNo } });
   }
 
   leaveRoom(roomId: string): Promise<ApiResult<unknown>> {

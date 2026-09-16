@@ -9,7 +9,15 @@ const SESSION = {
   avatarUrl: "avatar",
   status: "active" as const,
   points: 0,
+  /** 没有进行中的对局；要测「回到房间」的用例自己覆盖这一项。 */
+  activeRoom: null,
   token: "jwt-1",
+};
+
+/** 有对局在等着的登录响应：主页应当给出「回到对局」入口。 */
+const SESSION_WITH_ACTIVE_ROOM = {
+  ...SESSION,
+  activeRoom: { roomId: "room-1", roomNo: "654321", status: "playing" as const, playerCount: 4 },
 };
 
 function flowWith() {
@@ -28,10 +36,11 @@ function stubHome(transport: FakeHttpTransport, groups: unknown[] = [], matches:
   transport.onJson("GET", "/v1/matches", 200, { matches });
 }
 
-function stubRoom(transport: FakeHttpTransport, roomId: string): void {
-  transport.onJson("POST", "/v1/rooms", 201, { roomId, status: "waiting" });
+function stubRoom(transport: FakeHttpTransport, roomId: string, roomNo = "123456"): void {
+  transport.onJson("POST", "/v1/rooms", 201, { roomId, roomNo, status: "waiting" });
   transport.onJson("GET", `/v1/rooms/${roomId}`, 200, {
     roomId,
+    roomNo,
     ruleVersion: "MIANYANG_XZ_1_0",
     status: "waiting",
     ownerId: SESSION.userId,
@@ -702,6 +711,10 @@ describe("ClientFlow", () => {
       ["All players must be ready", "还有玩家没有准备"],
       ["Only the room owner can start the match", "只有房主能开局"],
       ["Room is not waiting to start", "这个房间已经开局了"],
+      // 按房间号加入会遇到的那几种。
+      ["ROOM_NOT_FOUND", "没有这个房间号，可能房主已经解散了"],
+      ["Room is full", "房间满了，一桌只能坐四个人"],
+      ["Active account with at least 500 points is required", "积分不足 500，暂时进不了牌局"],
     ];
 
     for (const [raw, translated] of cases) {
@@ -717,5 +730,71 @@ describe("ClientFlow", () => {
 
       expect(flow.current).toMatchObject({ name: "room", notice: translated });
     }
+  });
+
+  it("按 6 位房间号加入：号码有效才发请求", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+
+    // 位数不对：本地就说清楚，不用白跑一趟服务端（那边只会回一句「参数不合法」）。
+    await flow.joinRoom("12345");
+    expect(flow.current).toMatchObject({ name: "home", error: "房间号是 6 位数字，请再确认一下" });
+    expect(http.requests.some((request) => request.path === "/v1/rooms/join")).toBe(false);
+
+    // 号码有效：服务端换回内部 roomId，客户端用它进房，房间号显示在界面上。
+    http.onJson("POST", "/v1/rooms/join", 201, { roomId: "room-9", roomNo: "654321", status: "waiting", playerCount: 2 });
+    stubRoom(http, "room-9", "654321");
+    await flow.joinRoom("654321");
+
+    expect(flow.current).toMatchObject({ name: "room", roomId: "room-9", roomNo: "654321" });
+    const sent = http.requests.find((request) => request.path === "/v1/rooms/join");
+    expect(sent?.body).toEqual({ roomNo: "654321" });
+  });
+
+  it("对局中途退出的人重新登录后能一键回到房间", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION_WITH_ACTIVE_ROOM);
+    stubHome(http);
+    stubRoom(http, "room-1", "654321");
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+
+    // 主页要给出入口，并且带上房间号与人数。
+    expect(flow.current).toMatchObject({
+      name: "home",
+      activeRoom: { roomId: "room-1", roomNo: "654321", status: "playing", playerCount: 4 },
+    });
+
+    await flow.rejoinActiveRoom();
+
+    expect(flow.current).toMatchObject({ name: "room", roomId: "room-1", roomNo: "654321" });
+    // 直接回到牌桌，**不再调一次「加入」**：对局中 join 会被域层拒绝。
+    expect(http.requests.some((request) => request.path === "/v1/rooms/join")).toBe(false);
+    // 实时通道带上同一间房重新握手，断线重连仍由它负责。
+    expect(sockets.last().sent[0]).toMatchObject({ type: "auth", roomId: "room-1" });
+  });
+
+  it("对局结束后主页不再显示「回到房间」", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION_WITH_ACTIVE_ROOM);
+    stubHome(http);
+    // 进房时快照显示这一局已经打完了。
+    http.onJson("GET", "/v1/rooms/room-1", 200, {
+      roomId: "room-1",
+      roomNo: "654321",
+      ruleVersion: "MIANYANG_XZ_1_0",
+      status: "finished",
+      ownerId: SESSION.userId,
+      completedRounds: 8,
+      players: [],
+      result: null,
+    });
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    await flow.rejoinActiveRoom();
+    http.onJson("POST", "/v1/rooms/room-1/leave", 204);
+    await flow.leaveRoom();
+
+    expect(flow.current).toMatchObject({ name: "home", activeRoom: null });
   });
 });

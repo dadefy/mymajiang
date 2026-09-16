@@ -14,7 +14,23 @@ export interface SessionView {
   avatarUrl: string;
   status: "active" | "temporarily_banned" | "permanently_banned" | "deleted";
   points: number;
+  /**
+   * 进行中的对局；没有对局、或那一局已经打完时为 null。
+   *
+   * 服务端只在这间房**还能回去**（waiting / playing，且房间还在）时才给 ——
+   * 客户端不必自己判断，直接据此显示「回到房间」入口。
+   */
+  activeRoom: ActiveRoomView | null;
   token: string;
+}
+
+/** 账号上挂着的、还能回去的那一局。 */
+export interface ActiveRoomView {
+  roomId: string;
+  /** 6 位数字房间号：显示给人看、让人念的就是它。 */
+  roomNo: string;
+  status: "waiting" | "playing";
+  playerCount: number;
 }
 
 export interface PublicUser {
@@ -46,6 +62,8 @@ export interface RoomPlayerView {
 
 export interface RoomSnapshot {
   roomId: string;
+  /** 6 位数字房间号：界面上要显示、要转述的都是它，`roomId` 只是内部标识。 */
+  roomNo: string;
   ruleVersion: string;
   status: "waiting" | "playing" | "finished" | "dissolved";
   ownerId: string;
