@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { ADMIN_LOGIN_POLICY, FriendService, GroupService } from "@mianyang-mahjong/domain";
 import { TokenService } from "./auth.js";
@@ -104,6 +105,19 @@ describe("server API", () => {
     expect(response.body).toContain("绵阳麻将管理后台");
     expect(response.body).toContain("/v1/admin/invitation-keys");
     expect(response.body).toContain("/v1/admin/audit-log");
+  });
+
+  it("后台页面的内联脚本语法必须正确（否则整个界面点不动）", async () => {
+    const { app } = fixture();
+    const response = await app.inject({ method: "GET", url: "/admin" });
+    const script = /<script[^>]*>([\s\S]*?)<\/script>/.exec(response.body)?.[1];
+    expect(script).toBeTruthy();
+
+    // 这段脚本是用 TS 模板字符串拼出来的，所以里面的字符串转义要**多写一层**：
+    // 想生成 JS 的 `'\n'`，源码里必须写 `'\\n'`。少写一层的话，生成的页面里是
+    // 一个跨行的字符串字面量 —— 整个脚本因此解析失败、**所有按钮都没反应**，
+    // 而且不会显示任何能搜索到的报错。所以这里必须真的解析一遍，不能只看响应头。
+    expect(() => new vm.Script(script!)).not.toThrow();
   });
 
   it("reports database health when persistence is configured", async () => {

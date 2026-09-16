@@ -189,7 +189,7 @@ export function adminConsoleHtml(): string {
       const count = Number(document.querySelector('#key-count').value);
       const note = document.querySelector('#key-note').value.trim();
       const result = await api('/v1/admin/invitation-keys', { method: 'POST', body: JSON.stringify({ count, note }) });
-      const plaintext = result.keys.map((item) => item.key + (item.note ? '  ' + item.note : '')).join('\n');
+      const plaintext = result.keys.map((item) => item.key + (item.note ? '  ' + item.note : '')).join('\\n');
       document.querySelector('#issued').textContent = plaintext;
       document.querySelector('#issued-wrap').hidden = false;
       showStatus('已签发 ' + result.keys.length + ' 把密钥，请立即保存明文。', 'ok');
@@ -209,7 +209,7 @@ export function adminConsoleHtml(): string {
       body.replaceChildren();
       for (const user of result.users) {
         const row = document.createElement('tr');
-        addCell(row, user.nickname + '\n' + user.userId).style.whiteSpace = 'pre-line';
+        addCell(row, user.nickname + '\\n' + user.userId).style.whiteSpace = 'pre-line';
         addCell(row, user.points);
         addCell(row, user.status);
         const actions = addCell(row, '');
