@@ -16,7 +16,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BASE = process.env.BASE ?? "https://mianyang-mahjong.app.workbuddy.host";
+const BASE = process.env.BASE ?? "https://mianyang-mahjong-table.app.workbuddy.host";
 const PAGE = `${BASE}/multi`;
 const OUT_DIR = fileURLToPath(new URL("./remote/", import.meta.url));
 const KEYS = (process.env.KEYS ?? "").split(",").map((each) => each.trim()).filter(Boolean);

@@ -7,7 +7,7 @@
  */
 import { JSDOM } from "jsdom";
 
-const PAGE = process.env.PAGE ?? "https://mianyang-mahjong.app.workbuddy.host/multi";
+const PAGE = process.env.PAGE ?? "https://mianyang-mahjong-table.app.workbuddy.host/multi";
 // 客户端产物，先跑 pnpm build。路径相对本文件，不写死绝对路径。
 const MODULE = new URL("../../apps/client/dist/browser/multi-client.js", import.meta.url).href;
 

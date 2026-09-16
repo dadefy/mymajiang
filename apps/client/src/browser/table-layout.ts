@@ -3,7 +3,7 @@ export function installTableLayout(): void {
   const style = document.createElement("style");
   style.textContent = `
     main{max-width:1680px;width:100%;padding:12px;overflow:auto}
-    #board{position:relative;display:block;width:min(100%,calc((100dvh - 90px)*16/9));margin:0 auto;min-width:960px;aspect-ratio:16/9;background:radial-gradient(ellipse at center,#205a49,#123d32 65%,#102d26);border:10px solid #493b29;border-radius:28px;box-shadow:inset 0 0 0 2px #947c4b,inset 0 0 80px #061b1690;overflow:hidden}
+    #board{position:relative;display:block;width:min(100%,calc((100dvh - 90px)*16/9));margin:0 auto;min-width:960px;aspect-ratio:16/9;background:radial-gradient(ellipse at center,#205a49,#123d32 65%,#102d26);border:10px solid #493b29;border-radius:28px;box-shadow:inset 0 0 0 2px #947c4b,inset 0 0 80px #061b1690;overflow:hidden;container-type:size}
     #board .seat,#board .seat-card,#board .tiles-area,#board .center{display:contents}
     #board .seat-card>.hint{display:none}
     #board .hand,#board .seat>.seat-card>.seat-head,#board .seat-card>.ops,#board .tiles-area>.melds{position:absolute;margin:0}
@@ -15,18 +15,25 @@ export function installTableLayout(): void {
     #board .seat.bottom .hand{left:12%;top:84%;width:76%;height:8%}
     #board .seat.top .hand{left:26%;top:6%;width:48%;height:5.5%}
     #board .seat.top button.tile{font-size:clamp(12px,1.5vw,22px)}
-    #board .seat.left .hand,#board .seat.right .hand{top:21%;width:5%;height:49%;flex-direction:column;gap:3px;overflow:visible}
+    /* 左右两家竖排手牌。
+       牌的宽度不能写成 100%：这一列是百分比宽，牌会被拉成 3:1 的长条
+       （量过：60.7×20.8，而上下两家是 37.9×37.1 / 62.2×53.9）。
+       改成让宽度跟着高度走，比例才和其他两家一致。 */
+    #board .seat.left .hand,#board .seat.right .hand{top:21%;width:2.6%;height:49%;flex-direction:column;gap:3px;overflow:visible}
     #board .seat.left .hand{left:16%}#board .seat.right .hand{right:16%}
-    #board .seat.left button.tile,#board .seat.right button.tile{width:100%;height:calc((100% - 39px)/14);font-size:clamp(12px,1.2vw,18px);flex:none;box-shadow:2px 2px 0 #b6b099}
+    #board .seat.left button.tile,#board .seat.right button.tile{width:auto;aspect-ratio:1.15;height:calc((100% - 39px)/14);font-size:clamp(8px,.8vw,12px);flex:none;box-shadow:2px 2px 0 #b6b099}
     #board .seat.left button.tile.chosen{transform:translateX(8px)}#board .seat.right button.tile.chosen{transform:translateX(-8px)}
     #board .tiles-area>.melds{display:flex;align-items:center;justify-content:center;gap:6px;border:1px solid #c9ab6533;background:#071e1733;border-radius:8px;padding:4px;min-height:5%}
     #board .seat.top .tiles-area>.melds{left:29%;top:20%;width:42%;height:6%}
     #board .seat.bottom .tiles-area>.melds{left:27%;top:73%;width:46%;height:6%}
-    #board .seat.left .tiles-area>.melds,#board .seat.right .tiles-area>.melds{top:28%;height:40%;width:8%;flex-direction:column;flex-wrap:nowrap}
-    #board .seat.left .tiles-area>.melds{left:21%;width:7%}#board .seat.right .tiles-area>.melds{right:21%;width:7%}
-    #board .seat.left .meld-group,#board .seat.right .meld-group{flex-direction:row}
+    /* 内圈碰杠：左右两家跟着手牌竖着摆 —— 组与组竖排，**组内也竖排**。
+       横着摆和这一列的方位不符（左侧那副会横在手牌旁边），所以钉死 column。
+       牌块高度用 cqh（1% 牌桌高）算，和手牌同一个公式，缩放时才不会各走各的。 */
+    #board .seat.left .tiles-area>.melds,#board .seat.right .tiles-area>.melds{top:21%;height:49%;width:2.6%;flex-direction:column;flex-wrap:nowrap;justify-content:flex-start;overflow:auto}
+    #board .seat.left .tiles-area>.melds{left:19%;width:2.6%}#board .seat.right .tiles-area>.melds{right:19%;width:2.6%}
+    #board .seat.left .meld-group,#board .seat.right .meld-group{flex-direction:column}
     #board .seat.left .meld-group .kind,#board .seat.right .meld-group .kind{display:none}
-    #board .seat.left .meld-group .chip,#board .seat.right .meld-group .chip{width:clamp(11px,1.05vw,16px);height:27px;font-size:8px;white-space:nowrap}
+    #board .seat.left .meld-group .chip,#board .seat.right .meld-group .chip{width:auto;aspect-ratio:1.15;height:17px;height:calc((49cqh - 39px)/14*.8);font-size:clamp(8px,.8vw,12px);white-space:nowrap}
     #board .seat.top .tiles-area>.melds,#board .seat.bottom .tiles-area>.melds{flex-wrap:nowrap}
     #board .seat.top .meld-group .kind,#board .seat.bottom .meld-group .kind{display:none}
     #board .seat.top .meld-group .chip,#board .seat.bottom .meld-group .chip{width:clamp(17px,1.8vw,25px);height:28px;font-size:11px;white-space:nowrap}
