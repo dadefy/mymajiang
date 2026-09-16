@@ -708,6 +708,13 @@ describe("server API", () => {
     expect(multi.body).toContain("/debug/browser/multi-client.js");
     expect(multi.body).toContain('"socketUrl":""');
 
+    // 静态模块也必须 no-store。文件名里没有内容哈希、URL 每次部署都不变，
+    // 一旦被 CDN 缓存住，**部署完成后用户加载到的仍是旧 JS**（HTML 是新的、模块是旧的），
+    // 看起来就像「改的东西没生效」。实测踩过：源站已是新版，CDN 仍返回 32 分钟前的副本。
+    const asset = await app.inject({ method: "GET", url: "/debug/browser/multi-client.js" });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers["cache-control"]).toBe("no-store");
+
     // 这两个页面都是**模板字符串**拼出来的，而 CSS 注释里写一个反引号就会把字符串
     // 截断：症状是 HTML 只剩前半截、样式整段消失，而且不一定报错。
     // 「收尾标签在不在」是最省事的一道闸 —— 这个坑已经踩过两次了。

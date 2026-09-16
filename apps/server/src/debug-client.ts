@@ -285,6 +285,11 @@ export async function serveDebugAsset(path: string, reply: FastifyReply): Promis
     });
   }
   return reply
+    // 必须显式声明不可缓存。这些文件名里没有内容哈希，URL 每次部署都不变，
+    // 一旦被 CDN / 浏览器按默认策略缓存住，**部署完成后用户看到的仍然是旧的 JS** ——
+    // 现象很隐蔽：HTML（`/debug`）是 no-store，所以页面是新的，而页面里加载的模块是旧的，
+    // 看起来就像「改的东西没生效」。实际踩过：线上源站已是新版，CDN 却还在返回 32 分钟前的副本。
+    .header("Cache-Control", "no-store")
     .type(CONTENT_TYPES[extname(target)] ?? "application/octet-stream")
     .send(body);
 }
