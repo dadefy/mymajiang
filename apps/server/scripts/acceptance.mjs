@@ -250,6 +250,12 @@ class AutoPlayer {
 
 // ---------- 步骤 ----------
 
+/** 台账里的时间戳一律用**本地时间** —— 与 `seed-testers.mjs` 保持一致。 */
+function stamp(date = new Date()) {
+  const pad = (value) => (value < 10 ? `0${value}` : String(value));
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 async function prepareAccounts(adminToken) {
   const nicknames = [...PLAYERS, OUTSIDER];
   const issued = await must("/v1/admin/invitation-keys", {
@@ -258,13 +264,15 @@ async function prepareAccounts(adminToken) {
     body: { count: nicknames.length, note: "验收脚本" },
   });
   const keys = issued.keys.map((item) => item.key);
-  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  // 时间戳用本地时间：toISOString() 给的是 UTC，写进台账会比本地时间早 8 小时，
+  // 让人以为那是很早以前的记录（实测确实把「哪批最新」看反了）。
+  const now = stamp();
   const header = existsSync(LEDGER)
     ? ""
     : "## 内测邀请密钥台账（明文，勿提交、勿外传）\n## 一把密钥只能建一个账号；丢失等于账号丢失。\n\n";
 
   // 先记账再激活：密钥在签发那一刻就已经是账号凭据了，脚本中途失败也不该丢明文。
-  await appendFile(LEDGER, `${header}### ${stamp}  验收脚本签发 ${keys.length} 把（下面逐个补上账号）\n${keys.join("\n")}\n`, "utf8");
+  await appendFile(LEDGER, `${header}### ${now}  验收脚本签发 ${keys.length} 把（下面逐个补上账号）\n${keys.join("\n")}\n`, "utf8");
 
   const rows = [];
   for (const [index, nickname] of nicknames.entries()) {
