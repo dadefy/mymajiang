@@ -105,6 +105,11 @@ mianyang-mahjong/
 │     ├─ ws.ts               零依赖 WebSocket 协议层
 │     ├─ ws-server.ts        实时对局协议与重启续打
 │     └─ main.ts             服务启动入口
+│  └─ scripts/               运维与验收脚本（不进运行时）
+│     ├─ smoke.mjs           启动后自检：接口、调试页、直传地址
+│     ├─ issue-keys.mjs      签发邀请密钥并记进本地台账
+│     ├─ seed-testers.mjs    一条命令重建内测账号（签发→建号→发积分）
+│     └─ acceptance.mjs      端到端验收：四人打完 8 局、零和、退出回房、群聊实时
 ├─ packages/domain/          账号、好友、群聊、房间、积分领域逻辑
 ├─ packages/rules/           麻将规则、牌型、番数、对局引擎与状态快照
 ├─ apps/client/              客户端业务骨架：协议类型、REST 调用、实时通道、页面流
@@ -667,6 +672,29 @@ LayaAir 侧的渲染层（也就是最终 APK 里那套 UI）此前只在混元�
 **已知限制**：内存模式下重启会连 `activeMatchId` 一起丢，所以重启后**不会**再有「回到对局」
 入口 —— 那一局确实回不去了。要跨重启续打，得配 PostgreSQL。
 
+### 4.30 「开始对局」必须走实时通道（阻塞性缺陷）
+
+验收脚本跑通之后暴露出来的：**四个人到齐、全都准备了，点「开始对局」也不会开局**。
+
+原因是分层错位。`POST /v1/rooms/:roomId/start`（REST）只把房间状态改成 `playing`，
+**而"这一局"活在实时层**（`ActiveMatch`）。实时层只在两条路上建局：
+
+1. 收到实时通道的 `{type:"start"}`（会做完 `room.start()` + 建局 + 向四个座位广播首帧）；
+2. 有人带着 `roomId` 重新握手时，发现房间是 `playing` 但内存里没有对局 → `resumeMatch()`
+   （它的注释里就写着「要么是服务重启……要么是房主刚通过 REST 开局、还没有人连上来」）。
+
+而真实客户端的连接是在**开局之前**（进房间页的时候）就建好的，之后不会再握手 ——
+于是谁都收不到首帧，界面表现就是「点了开始，什么都没发生」。
+以前用 4 个标签页自测，也会撞上这个。
+
+修法：`ClientFlow.startMatch()` 改成在实时通道上发 `{type:"start"}`。
+REST 的 `/start` 保留（脚本、排查用），但 `ApiClient` 上加了注释说清它**只改房间状态**，
+免得下一个人再拿它当「开始对局」。实时通道的失败以 `error` 帧回来，
+所以英语原文→中文的翻译也补到了那条路上（`translateDomainError`）。
+
+`acceptance.mjs` 现在正是按这个顺序验的：先进房间连上实时通道 → 四人准备 → 房主发 `start`
+→ 四个座位都收到首帧。**这一步以前从未被端到端验证过。**
+
 ## 5. 当前 REST API
 
 ### 邀请密钥登录
@@ -716,7 +744,8 @@ LayaAir 侧的渲染层（也就是最终 APK 里那套 UI）此前只在混元�
 - `POST /v1/rooms/:roomId/join` — 内部 id 加房；客户端已不再使用，保留给既有调用方与测试
 - `POST /v1/rooms/:roomId/leave`
 - `POST /v1/rooms/:roomId/ready`
-- `POST /v1/rooms/:roomId/start`
+- `POST /v1/rooms/:roomId/start` — ⚠️ **只把房间状态改成 `playing`，不会建局**；
+  真正开始一局要在实时通道发 `{type:"start"}`（见 4.30）
 - `POST /v1/rooms/:roomId/dissolve`
 - `POST /v1/rooms/:roomId/dissolve/vote`
 - `GET /v1/rooms/:roomId/history`

@@ -690,18 +690,25 @@ describe("ClientFlow", () => {
     expect(flow.current).toMatchObject({ name: "room", notice: "操作失败（ROOM_NOT_WAITING）" });
   });
 
-  it("开局失败要把服务端的话显示出来（最常见的是还有人没准备）", async () => {
-    const { flow, http } = flowWith();
+  it("开局走实时通道，失败时把服务端的话显示出来", async () => {
+    const { flow, http, sockets } = flowWith();
     http.onJson("POST", "/v1/auth/login", 200, SESSION);
     stubHome(http);
     await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
     stubRoom(http, "room-1");
     await flow.createRoom();
-    http.onJson("POST", "/v1/rooms/room-1/start", 409, { code: "NOT_ALL_READY" });
+    const socket = sockets.last();
 
     await flow.startMatch();
 
-    expect(flow.current).toMatchObject({ name: "room", notice: "操作失败（NOT_ALL_READY）" });
+    // 对局活在实时层：REST 的 /start 只改房间状态，实时层不会知道要开局，
+    // 而四个人的连接早就在开局前建好了、之后不会再有握手 —— 那样谁都收不到首帧。
+    expect(socket.sent.at(-1)).toEqual({ type: "start" });
+    expect(http.requests.some((request) => request.path === "/v1/rooms/room-1/start")).toBe(false);
+
+    // 服务端拒绝（例如还有人没准备）时要把原话显示出来。
+    socket.serverSends({ type: "error", message: "All players must be ready" });
+    expect(flow.current).toMatchObject({ name: "room", notice: "还有玩家没有准备" });
   });
 
   it("房间规则类的拒绝要翻成中文，不能把英文原文甩给用户", async () => {
@@ -718,15 +725,15 @@ describe("ClientFlow", () => {
     ];
 
     for (const [raw, translated] of cases) {
-      const { flow, http } = flowWith();
+      const { flow, http, sockets } = flowWith();
       http.onJson("POST", "/v1/auth/login", 200, SESSION);
       stubHome(http);
       await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
       stubRoom(http, "room-1");
       await flow.createRoom();
-      http.onJson("POST", "/v1/rooms/room-1/start", 409, { code: "DOMAIN_CONFLICT", message: raw });
 
-      await flow.startMatch();
+      // 开局被拒：服务端以 error 帧回话。
+      sockets.last().serverSends({ type: "error", message: raw });
 
       expect(flow.current).toMatchObject({ name: "room", notice: translated });
     }

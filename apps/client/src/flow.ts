@@ -130,24 +130,46 @@ function isClaimAction(action: string): boolean {
   return ["hu", "peng", "kong", "pass"].includes(action);
 }
 
+/**
+ * 服务端透传的英文错误 → 中文。
+ *
+ * 域层抛的是英文句子，服务端**原样透传**，而它有两条出口：REST 放在 `message` 里、
+ * 实时通道放在 `error` 帧的 `message` 里。所以翻译只能放在客户端，而且两个入口都要过。
+ */
+const DOMAIN_ERROR_TEXT: Record<string, string> = {
+  // 开局与准备
+  "Four players are required": "要四个人才能开局",
+  "All players must be ready": "还有玩家没有准备",
+  "Only the room owner can start the match": "只有房主能开局",
+  "Room is not waiting to start": "这个房间已经开局了",
+  "Match has already started": "这局已经在打了",
+  "Match has not started": "对局还没开始",
+  "Room is not playable": "这个房间现在不能开局",
+  "Ready state is locked after the match starts": "开局之后不能再改准备状态",
+  // 进出房间
+  "ROOM_NOT_FOUND": "没有这个房间号，可能房主已经解散了",
+  "Room has already started": "这局已经开始了，回去接着打吧",
+  "Player is already in the room": "你已经在这间房里了",
+  "Player is not in the room": "你不在这个房间里",
+  "Room is full": "房间满了，一桌只能坐四个人",
+  "Players cannot leave after the match starts": "开局之后不能退出房间",
+  "Active account with at least 500 points is required": "积分不足 500，暂时进不了牌局",
+  // 连接与身份
+  "Not authenticated": "登录状态已失效，请重新登录",
+  "ACCOUNT_NOT_ACTIVE": "账号已被停用",
+};
+
+function translateDomainError(message: string): string | undefined {
+  return DOMAIN_ERROR_TEXT[message];
+}
+
 function describe(error: ApiError): string {
   if (error.kind === "network") return "连不上服务器，请稍后再试";
   if (error.code === "KEY_INVALID") return "邀请密钥不存在";
   if (error.code === "KEY_REVOKED") return "邀请密钥已被撤销";
   if (error.code === "KEY_MALFORMED") return "邀请密钥格式不对";
   if (error.code === "ACCOUNT_NOT_ACTIVE") return "账号已被停用";
-  // 房间规则类的失败：服务端给的是英文句子（域层的错误信息），翻成人话再说。
-  if (error.message === "Four players are required") return "要四个人才能开局";
-  if (error.message === "All players must be ready") return "还有玩家没有准备";
-  if (error.message === "Only the room owner can start the match") return "只有房主能开局";
-  if (error.message === "Room is not waiting to start") return "这个房间已经开局了";
-  // 按房间号加入会遇到的几种：号码不存在、房间已开局、人满了、积分不够入场。
-  if (error.message === "ROOM_NOT_FOUND") return "没有这个房间号，可能房主已经解散了";
-  if (error.message === "Room has already started") return "这局已经开始了，回去接着打吧";
-  if (error.message === "Player is already in the room") return "你已经在这间房里了";
-  if (error.message === "Room is full") return "房间满了，一桌只能坐四个人";
-  if (error.message === "Active account with at least 500 points is required") return "积分不足 500，暂时进不了牌局";
-  if (error.message) return error.message;
+  if (error.message) return translateDomainError(error.message) ?? error.message;
   return `操作失败（${error.code}）`;
 }
 
@@ -380,15 +402,27 @@ export class ClientFlow {
     await this.refreshRoom();
   }
 
+  /**
+   * 房主开始对局。
+   *
+   * **走实时通道，不走 REST。** 对局本身活在实时层（`ActiveMatch`），而 REST 的
+   * `POST /v1/rooms/:roomId/start` 只把房间状态改成 `playing` —— 实时层不会因此知道要开局，
+   * 而四个人的连接早在开局之前就建好了，之后不会再有握手，于是**谁都收不到首帧**，
+   * 表现就是「点了开始，什么都没发生」。`{type:"start"}` 那条路会做完
+   * `room.start()` + 建局 + 向四个座位广播首帧（见 `ws-server` 的 start 分支）。
+   *
+   * 失败（人不够、有人没准备、只有房主能开局）会以 `error` 帧回来，由房间页显示。
+   */
   async startMatch(): Promise<void> {
     if (this.roomId === null) return;
-    const started = await this.api.startMatch(this.roomId);
-    if (!started.ok) {
-      // 开局失败最常见的原因是「还有人没准备」，得把服务端的话显示出来。
-      if (this.screen.name === "room") this.set({ ...this.screen, notice: describe(started.error) });
+    if (!this.socket) {
+      // 没有实时通道就开不了局，别让它静默失败。
+      if (this.screen.name === "room") {
+        this.set({ ...this.screen, notice: "连接已断开，请重新进入房间后再开局" });
+      }
       return;
     }
-    await this.refreshRoom();
+    this.socket.send({ type: "start" });
   }
 
   // ---------- 行牌：都走实时通道 ----------
@@ -715,7 +749,8 @@ export class ClientFlow {
         this.set({ ...this.screen, lastResult: event.result, match: null, actions: [] });
         return;
       case "error":
-        this.set({ ...this.screen, notice: event.message });
+        // 实时通道的失败也要翻译：它和 REST 一样透传域层的英文原文。
+        this.set({ ...this.screen, notice: translateDomainError(event.message) ?? event.message });
         return;
       case "disconnected":
         this.set({ ...this.screen, notice: "连接已断开，正在重连…" });
@@ -767,7 +802,7 @@ export class ClientFlow {
         this.set({ ...this.screen, notice: undefined });
         return;
       case "error":
-        this.set({ ...this.screen, notice: event.message });
+        this.set({ ...this.screen, notice: translateDomainError(event.message) ?? event.message });
         return;
       default:
         return;

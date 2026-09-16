@@ -197,6 +197,12 @@ export class ApiClient {
     return this.call({ method: "POST", path: `/v1/rooms/${encodeURIComponent(roomId)}/ready`, body: { ready } });
   }
 
+  /**
+   * REST 的开局：**只把房间状态改成 `playing`**，不会让实时层建局。
+   *
+   * 所以客户端不用它 —— 开局走实时通道的 `{type:"start"}`（见 `ClientFlow.startMatch`）。
+   * 留着是为了让这个类型化客户端仍然覆盖完整的 REST 接口（脚本、排查用）。
+   */
   startMatch(roomId: string): Promise<ApiResult<{ roomId: string; status: string; completedRounds: number }>> {
     return this.call({ method: "POST", path: `/v1/rooms/${encodeURIComponent(roomId)}/start` });
   }
