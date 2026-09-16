@@ -10,4 +10,6 @@ storage/
 
 # 邀请密钥台账：里面是**明文密钥**，等同于账号凭据。绝对不要提交。
 # 由 scripts/issue-keys.mjs 生成。
-.keys-ledger.txt
+# 用通配是为了覆盖 `.keys-ledger.local.txt` 这类自建变体 ——
+# 本地预览时用 KEYS_LEDGER 指过另一个文件名，那条规则单独的 .txt 挡不住。
+.keys-ledger*.txt
