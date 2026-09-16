@@ -96,15 +96,16 @@ while (Date.now() - playStartedAt < 150_000) {
 
   const phase = metaText();
   if (phase.includes("换三张")) {
-    clickAll(["四家全部自动换三张"]);
+    clickAll(["自动"]);
   } else if (phase.includes("定缺")) {
-    clickAll(["四家全部自动定缺"]);
+    clickAll(["自动"]);
   } else if (phase.includes("行牌")) {
     const card = actingCard();
     const tiles = card ? [...card.querySelectorAll(".hand button")] : [];
     // 有缺门牌时必须先打缺门牌，否则引擎会拒。
     const pick = tiles.find((tile) => tile.classList.contains("missing-suit")) ?? tiles[0];
     pick?.click();
+    pick?.click(); // 同一张牌第二次点击才出牌
   } else if (phase.includes("等待别人确认")) {
     // 优先碰/杠 —— 这正是副露牌块要验证的来源。不点胡，免得本局提前结束。
     if (clickAll(["碰", "杠"]) === 0) clickAll(["过"]);

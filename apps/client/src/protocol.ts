@@ -249,6 +249,7 @@ export interface VisibleMeld {
 
 /** 一局进行中，服务端只发给本人的脱敏快照（见 ws-server.ts 的 playerSnapshot）。 */
 export interface MatchState {
+  dealerSeat?: number;
   /** 服务端当前操作的超时截止时间（Unix 毫秒）。 */
   actionDeadlineAt?: number;
   roomId: string;
@@ -266,6 +267,9 @@ export interface MatchState {
   players: Array<{
     seat: number;
     handSize: number;
+    /** 本局事件账本累计净输赢，不是账户余额。 */
+    roundDelta?: number;
+    avatarUrl?: string;
     melds: VisibleMeld[];
     discards: Tile[];
     won: boolean;

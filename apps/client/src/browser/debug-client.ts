@@ -1,3 +1,4 @@
+import { DiscardSelection } from "./discard-selection.js";
 import { SwapSelection } from "./swap-selection.js";
 import { roundResultPanel } from "./round-result.js";
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
@@ -63,6 +64,7 @@ mediaCache.onChange(() => repaintMessages?.());
 
 /** 手动换三张时已选中的牌。 */
 const selected = new SwapSelection();
+const discardSelection = new DiscardSelection();
 
 /** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
 let lastHandSize: number | null = null;
@@ -537,16 +539,17 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
     box.append(row);
   }
 
-  // 我的手牌：换三张阶段可点选，行牌阶段点击即出牌。按牌面排好，好找牌。
+  // 我的手牌：换三张阶段可点选，行牌阶段点两次同一张才出牌。按牌面排好，好找牌。
   // 刚摸到的那张单独标出来 —— 摸牌是服务端自动做的，牌桌上唯一的痕迹就是
   // 「手里多了一张」，不标出来会像凭空多一张。
   if (match.phase === "playing") trackDrawnTile(match.hand);
   else forgetDrawnTile();
   selected.sync(match, actions, flow.current.name === "room" ? flow.current.notice : undefined);
+  discardSelection.sync(match, actions, flow.current.name === "room" ? flow.current.notice : undefined);
   const hand = element("div", { className: "hand" });
   let drawnMarked = false;
   for (const [index, tile] of sortedHand(match.hand).entries()) {
-    const chosen = selected.has(index);
+    const chosen = match.phase === "swapping" ? selected.has(index) : discardSelection.index === index;
     const isDrawn = !drawnMarked && drawnTile !== null && tile === drawnTile;
     if (isDrawn) drawnMarked = true;
     const node = element("button", {
@@ -558,17 +561,24 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
           selected.toggle(index);
           render(flow.current);
         } else if (match.phase === "playing" || match.phase === "claiming") {
-          flow.discard(tile);
+          const discard = discardSelection.click(match, index);
+          if (discard !== undefined) flow.discard(discard);
+          render(flow.current);
         }
       },
     });
-    if (match.phase === "swapping") node.disabled = !selected.enabled;
+    node.disabled = match.phase === "swapping" ? !selected.enabled : !discardSelection.canSelect(match, tile);
+    if (chosen) node.style.transform = "translateY(-8px)";
     if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
     hand.append(node);
   }
 
   const row = element("div", { className: "row" });
-  if (match.phase === "swapping" && !selected.enabled) row.append(element("span", { text: "已提交换牌，等待其他玩家" }));
+  // 交了换三张之后服务端不再下发 `swap`，按钮会全部消失 —— 补一句状态，
+  // 免得看起来像卡住了（与四家同屏页保持一致）。
+  if (match.phase === "swapping" && !selected.enabled) {
+    row.append(element("span", { text: "已提交换牌，等待其他玩家" }));
+  }
   if (match.phase === "swapping" && selected.enabled) {
     row.append(
       button(`换这三张（已选 ${selected.length}/3）`, () => {
@@ -581,7 +591,7 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
       button("自动换三张", () => { selected.submit(() => flow.autoSwap()); render(flow.current); }),
     );
   }
-  if (match.phase === "missing") {
+  if (match.phase === "missing" && actions.includes("choose-missing")) {
     for (const suit of SUITS) {
       row.append(button(`定缺 ${SUIT_LABEL[suit]}`, () => flow.chooseMissing(suit)));
     }
@@ -592,7 +602,8 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
     row.append(button(spec.label, () => runAction(flow, spec.kind), spec.primary ? "primary" : ""));
   }
 
-  box.append(hand, row, element("p", { className: "hint", text: `我的副露：${match.melds.map((meld) => `${meld.kind}${tileLabel(meld.tile)}`).join(" ") || "无"}` }),
+  if (row.childElementCount > 0) box.append(row);
+  box.append(hand, element("p", { className: "hint", text: `我的副露：${match.melds.map((meld) => `${meld.kind}${tileLabel(meld.tile)}`).join(" ") || "无"}` }),
     element("p", { className: "hint", text: `我已出：${match.discards.map(tileLabel).join(" ") || "无"}` }));
   return box;
 }

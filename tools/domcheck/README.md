@@ -24,6 +24,7 @@ pnpm build          # 客户端产物 apps/client/dist，下面多数脚本要�
 | --- | --- | --- | --- | --- |
 | `check-countdown.mjs` | 不连服务端 | 本地 dist | — | 倒计时节点会不会被画出来、秒数真的在往下走 |
 | `check-meld-dom.mjs` | 不连服务端 | 本地 dist | — | 暗杠只亮一张、其余三张扣着；牌数守恒 |
+| `check-two-click.mjs` | 不连服务端 | 本地 dist | — | 出牌要点两次、四家头像、只在有操作时显示按钮 |
 | `check-multi-page.mjs` | `PAGE`（默认线上） | 本地 dist | — | 页面加载后 DOM 被正确填充（输入框/按钮/顶栏） |
 | `check-multi-play.mjs` | `PAGE`（默认本机 3000） | 本地 dist | ✓ 4 把 | 真打完一局：弃牌在中央、副露挨着手牌、牌块真被画出来 |
 | `check-settlement.mjs` | `PAGE`（默认本机 3000） | 本地 dist | ✓ 4 把 | 结算界面显示番型与「谁给的牌」 |
@@ -48,11 +49,12 @@ pnpm build          # 客户端产物 apps/client/dist，下面多数脚本要�
 
 ## 跑法
 
-不需要服务端的两项：
+不需要服务端的三项：
 
 ```powershell
 node tools/domcheck/check-countdown.mjs
 node tools/domcheck/check-meld-dom.mjs
+node tools/domcheck/check-two-click.mjs
 ```
 
 要 4 把密钥的先建号（`seed-testers` 走的是管理接口，需要在 `apps/server` 下有 `.env`）：

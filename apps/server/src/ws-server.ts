@@ -67,6 +67,7 @@ export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom,
     actionDeadlineAt,
     seat,
     phase: game.phase,
+    dealerSeat: game.dealerSeat,
     currentPlayerSeat: game.currentPlayerSeat,
     tilesLeft: game.tilesLeft,
     hand: [...(player.won ? player.winningHand : player.hand)],
@@ -76,6 +77,8 @@ export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom,
     won: player.won,
     players: game.players.map((other) => ({
       seat: other.seat,
+      avatarUrl: room.players?.get(other.id)?.account.avatarUrl,
+      roundDelta: game.events.reduce((total, event) => total + (event.payee === other.id ? event.points : 0) - (event.payer === other.id ? event.points : 0), 0),
       handSize: other.won ? other.winningHand.length : other.handSize,
       // 别人的暗杠是扣着的，牌值不下发（见 meld-visibility.ts）——
       // 否则任何打开开发者工具的人都能读出对手暗杠的是哪张牌。

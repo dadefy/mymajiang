@@ -68,13 +68,14 @@ while (Date.now() < until) {
     if (summaries.length > 0) break;
   }
 
-  if (meta.includes("换三张")) clickAll(["四家全部自动换三张"]);
-  else if (meta.includes("定缺")) clickAll(["四家全部自动定缺"]);
+  if (meta.includes("换三张")) clickAll(["自动"]);
+  else if (meta.includes("定缺")) clickAll(["自动"]);
   else if (meta.includes("行牌")) {
     const card = [...document.querySelectorAll(".seat-card")].find((each) => each.querySelector(".tag.acting"));
     const tiles = card ? [...card.querySelectorAll(".hand button")] : [];
     const pick = tiles.find((tile) => tile.classList.contains("missing-suit")) ?? tiles[0];
     pick?.click();
+    pick?.click(); // 同一张牌第二次点击才出牌
   } else if (meta.includes("等待别人确认")) {
     // 优先碰/杠（能更快推进并能验到副露），否则过。
     if (clickAll(["碰", "杠", "胡"]) === 0) clickAll(["过"]);

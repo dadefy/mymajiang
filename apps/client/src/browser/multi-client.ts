@@ -1,3 +1,5 @@
+import { DiscardSelection } from "./discard-selection.js";
+import { playerProfile } from "./player-profile.js";
 import { installTableLayout } from "./table-layout.js";
 import { SwapSelection } from "./swap-selection.js";
 import { roundResultPanel } from "./round-result.js";
@@ -62,6 +64,7 @@ interface SeatState {
   nickname: string;
   /** 换三张已选中的牌。每家独立，所以不能像单人版那样放模块级变量。 */
   selected: SwapSelection;
+  discardSelection: DiscardSelection;
   /** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
   lastHandSize: number | null;
   /**
@@ -83,6 +86,7 @@ function makeSeat(slot: number): SeatState {
     userId: null,
     nickname: `玩家 ${slot + 1}`,
     selected: new SwapSelection(),
+    discardSelection: new DiscardSelection(),
     lastHandSize: null,
     drawnTile: null,
   };
@@ -260,6 +264,10 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
     if (match.missingSuit) head.append(element("span", { className: "tag", text: `缺${SUIT_LABEL[match.missingSuit]}` }));
   }
   card.append(head);
+  const currentDelta = match?.players.find((player) => player.seat === seatNo)?.roundDelta;
+  const settledDelta = room?.roundFinished ? room.lastResult?.deltas.find((entry) => entry.playerId === seat.userId)?.delta : undefined;
+  card.append(playerProfile({ nickname: seat.nickname, avatarUrl: match?.players.find((player) => player.seat === seatNo)?.avatarUrl ?? "",
+    delta: settledDelta ?? currentDelta, dealer: match?.dealerSeat === seatNo, missingSuit: match?.missingSuit ?? null }));
 
   if (!match) {
     card.append(element("p", { className: "hint", text: room?.snapshot?.status === "waiting" ? "等待开局" : "连接中…" }));
@@ -268,7 +276,8 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
     card.append(element("p", { className: "hint", text: `已出 ${match.discards.length} 张（见中央弃牌区）` }));
   }
 
-  card.append(opsRow(seat, seatNo));
+  const operations = opsRow(seat, seatNo);
+  if (operations.childElementCount > 0) card.append(operations);
 
   if (room?.notice) card.append(element("p", { className: "error", text: room.notice }));
   return card;
@@ -294,7 +303,7 @@ function tilesArea(seat: SeatState, match: MatchState): HTMLElement {
  * 这一家的手牌。
  *
  * `match.hand` 是**这条连接自己的**手牌 —— 服务端只把它发给本人。
- * 点牌：换三张阶段是选中，行牌阶段直接打出（与单人版一致，少一次确认点击）。
+ * 点牌：换三张阶段是选中，行牌阶段先选中抬高，再点同一张才打出。
  */
 function handBox(seat: SeatState, match: MatchState): HTMLElement {
   const box = element("div", { className: "hand" });
@@ -305,10 +314,11 @@ function handBox(seat: SeatState, match: MatchState): HTMLElement {
   // 刚摸到的那张单独标出来 —— 真牌桌上它就是插在手里、要打出去的那张。
   // 手牌是排好序的，所以标「同值的任意一张」与标原来那张看不出区别。
   seat.selected.sync(match, roomOf(seat)?.actions ?? [], roomOf(seat)?.notice);
+  seat.discardSelection.sync(match, roomOf(seat)?.roundFinished ? [] : roomOf(seat)?.actions ?? [], roomOf(seat)?.notice);
   const drawn = seat.drawnTile;
   let drawnMarked = false;
   for (const [index, tile] of sortedHand(match.hand).entries()) {
-    const chosen = seat.selected.has(index);
+    const chosen = match.phase === "swapping" ? seat.selected.has(index) : seat.discardSelection.index === index;
     const isDrawn = !drawnMarked && drawn !== null && tile === drawn;
     if (isDrawn) drawnMarked = true;
     const node = element("button", {
@@ -316,7 +326,7 @@ function handBox(seat: SeatState, match: MatchState): HTMLElement {
       className: `tile${chosen ? " chosen" : ""}${isDrawn ? " drawn" : ""}`,
       onClick: () => onTileClick(seat, match, tile, index),
     });
-    if (match.phase === "swapping") node.disabled = !seat.selected.enabled;
+    node.disabled = match.phase === "swapping" ? !seat.selected.enabled : !seat.discardSelection.canSelect(match, tile);
     if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
     box.append(node);
   }
@@ -330,7 +340,9 @@ function onTileClick(seat: SeatState, match: MatchState, tile: Tile, index: numb
     scheduleRender();
     return;
   }
-  if (match.phase === "playing" || match.phase === "claiming") seat.flow.discard(tile);
+  const discard = seat.discardSelection.click(match, index);
+  if (discard !== undefined) seat.flow.discard(discard);
+  scheduleRender();
 }
 
 /** 这一家现在能做什么。按钮用的是**这条连接自己的** `actions`，不是公共的。 */
@@ -358,11 +370,17 @@ function opsRow(seat: SeatState, seatNo: number): HTMLElement {
     return row;
   }
 
+  if (room.roundFinished) return row;
+  // 换三张交上去之后，服务端就不再给这条连接下发 `swap` 动作了。
+  // 若只按「没有动作就不画这一行」处理，交完牌的人会看到一片空白 ——
+  // 分不清是在等别人还是在等自己。所以这里补一句状态文字。
+  // 它是 `span` 不是 `button`，不违反「只在有操作时显示按钮」。
+  if (match.phase === "swapping" && !seat.selected.enabled) {
+    row.append(element("span", { className: "hint", text: "已提交换牌，等待其他玩家" }));
+    return row;
+  }
+  if (room.actions.length === 0) return row;
   if (match.phase === "swapping") {
-    if (!seat.selected.enabled) {
-      row.append(element("span", { className: "hint", text: "已提交换牌，等待其他玩家" }));
-      return row;
-    }
     row.append(
       button(`换这三张（${seat.selected.length}/3）`, () => {
         const hand = sortedHand(match.hand);
@@ -377,7 +395,7 @@ function opsRow(seat: SeatState, seatNo: number): HTMLElement {
       }),
     );
   }
-  if (match.phase === "missing") {
+  if (match.phase === "missing" && room.actions.includes("choose-missing")) {
     for (const suit of SUITS) {
       row.append(button(SUIT_LABEL[suit], () => seat.flow.chooseMissing(suit)));
     }
@@ -428,12 +446,6 @@ function renderCenter(): void {
     element("p", { className: "meta", text:
       `第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)} · 牌墙剩 ${match.tilesLeft} 张` }),
   );
-
-  // 四个人都要做的动作，一次点完 —— 省掉四次点击。
-  const ops = element("div", { className: "ops" });
-  if (match.phase === "swapping") ops.append(button("四家全部自动换三张", () => autoAll("swap"), "primary"));
-  if (match.phase === "missing") ops.append(button("四家全部自动定缺", () => autoAll("missing"), "primary"));
-  if (ops.childElementCount > 0) centerHost.append(ops);
 
   // 打出去的牌集中在中央 —— 以前它们只是每家卡片里的一串文字，
   // 想看一眼「7万 打过了没有」得在四行文字里找。
@@ -534,17 +546,6 @@ function bannerText(match: MatchState, snapshot: RoomSnapshot | null, drawnTile:
   // 所以这里直接把它报出来，否则看起来像牌凭空多了一张。
   const drew = drawnTile !== null ? ` · 刚摸到 ${tileLabel(drawnTile)}` : "";
   return `轮到 ${who} 出牌${drew}`;
-}
-
-function autoAll(kind: "swap" | "missing"): void {
-  for (const seat of seats) {
-    const room = roomOf(seat);
-    if (!room?.match) continue;
-    seat.selected.sync(room.match, room.actions, room.notice);
-    if (kind === "swap") seat.selected.submit(() => seat.flow.autoSwap());
-    else if (room.actions.includes("choose-missing")) seat.flow.autoMissing();
-  }
-  scheduleRender();
 }
 
 function phaseLabel(phase: MatchState["phase"]): string {

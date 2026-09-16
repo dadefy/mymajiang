@@ -126,13 +126,14 @@ while (Date.now() < until) {
 
   // 只做最小驱动：让牌局往前走。碰到「碰/杠」就点（顺便验证点下去真的能成），
   // 否则点「过」。
-  if (meta.includes("换三张")) clickAll(["四家全部自动换三张"]);
-  else if (meta.includes("定缺")) clickAll(["四家全部自动定缺"]);
+  if (meta.includes("换三张")) clickAll(["自动"]);
+  else if (meta.includes("定缺")) clickAll(["自动"]);
   else if (meta.includes("行牌")) {
     const card = [...document.querySelectorAll(".seat-card")].find((each) => each.querySelector(".tag.acting"));
     const tiles = card ? [...card.querySelectorAll(".hand button")] : [];
     const pick = tiles.find((tile) => tile.classList.contains("missing-suit")) ?? tiles[0];
     pick?.click();
+    pick?.click(); // 同一张牌第二次点击才出牌
   } else if (inClaiming) {
     const clicked = clickAll(["碰", "杠"]);
     if (clicked > 0) claimClicks.peng += clicked;

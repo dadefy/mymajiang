@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+import {multiClientHtml} from '../../apps/server/dist/debug-client.js';
+import {ClientFlow} from '../../apps/client/dist/flow.js';
+const entries=[],sends=[];
+ClientFlow.prototype.onChange=function(listener){entries.push({flow:this,listener});return ()=>{};};
+ClientFlow.prototype.discard=function(tile){sends.push(tile);};
+const dom=new JSDOM(multiClientHtml({}),{url:'http://127.0.0.1:3000/multi'});
+Object.assign(globalThis,{document:dom.window.document,window:dom.window,location:dom.window.location,requestAnimationFrame:cb=>setTimeout(cb,0)});
+await import('../../apps/client/dist/browser/multi-client.js');
+document.querySelector('#board').hidden=false;
+const players=[0,1,2,3].map(seat=>({seat,handSize:4,melds:[],discards:[],missingSuit:null,won:false}));
+for(const [seat,entry] of entries.entries()){
+ const screen={name:'room',roomId:'r',snapshot:null,actions:seat===0?['discard','hu']:[],roundFinished:false,lastResult:null,lastMatchResult:null,match:{roomId:'r',roundNumber:1,seat,phase:'playing',currentPlayerSeat:0,hand:[0,0,2,9],melds:[],discards:[],missingSuit:null,won:false,tilesLeft:55,players}};
+ entry.flow.screen=screen;entry.listener(screen);
+}
+const tick=()=>new Promise(r=>setTimeout(r,25));await tick();
+const bottom=()=>document.querySelector('.seat.bottom');
+assert.equal(document.querySelectorAll('.seat-card>.ops').length,1);
+assert.match(bottom().querySelector('.ops').textContent,/自摸/);
+bottom().querySelectorAll('.tile')[0].click();await tick();assert.equal(sends.length,0);assert.equal(bottom().querySelectorAll('.chosen').length,1);
+bottom().querySelectorAll('.tile')[1].click();await tick();assert.equal(sends.length,0);assert.equal(bottom().querySelectorAll('.tile')[1].classList.contains('chosen'),true);
+bottom().querySelectorAll('.tile')[1].click();await tick();assert.deepEqual(sends,[0]);
+entries[0].flow.screen={...entries[0].flow.screen,actions:[]};entries[0].listener(entries[0].flow.screen);await tick();assert.equal(document.querySelectorAll('.seat-card>.ops').length,0);
+assert.equal(document.querySelectorAll('.player-profile').length,4);
+const opsOf=()=>bottom().querySelector('.ops');
+const swapping={...entries[0].flow.screen,match:{...entries[0].flow.screen.match,phase:'swapping',hand:[0,0,2,9],currentPlayerSeat:0},actions:['swap']};
+entries[0].flow.screen=swapping;entries[0].listener(swapping);await tick();
+assert.equal(opsOf().querySelectorAll('button').length,2);
+assert.equal(opsOf().textContent.includes('已提交换牌'),false);
+const submitted={...swapping,actions:[]};
+entries[0].flow.screen=submitted;entries[0].listener(submitted);await tick();
+assert.ok(opsOf(),'换三张已提交后应留一行状态，而不是整行消失（否则看不出在等别人）');
+assert.equal(opsOf().querySelectorAll('button').length,0);
+assert.equal(opsOf().textContent.includes('已提交换牌'),true);
+console.log('PASS: 4家头像；只有操作方显示按钮；单击抬高/同值牌改选均不出牌；二次确认只发送一次；等待时隐藏按钮；换三张已提交后显示等待状态');
+dom.window.close();process.exit(0);

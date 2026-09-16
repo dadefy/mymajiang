@@ -5,6 +5,23 @@ import { playerSnapshot, roundSettlement } from "./ws-server.js";
 
 const ids = ["p0", "p1", "p2", "p3"] as [string, string, string, string];
 describe("round reveal", () => {
+  it("publishes dealer, public avatars and current round net scores from the event ledger", () => {
+    const game = new MahjongGame(1, ids, 2);
+    game.events.push(
+      { eventId: "a", type: "win", payer: "p1", payee: "p0", points: 6, note: "test" },
+      { eventId: "b", type: "kong", payer: "p0", payee: "p2", points: 4, note: "test" },
+      { eventId: "c", type: "tax_refund", payer: "p2", payee: "p0", points: 2, note: "test" },
+    );
+    const room = { roomId: "r", players: new Map(ids.map(id => [id, { account: { avatarUrl: `https://example.invalid/${id}.png` } }])) } as unknown as MatchRoom;
+    const view = playerSnapshot(game, 0, room, 1) as { dealerSeat: number; players: Array<{ roundDelta: number; avatarUrl: string }> };
+    expect(view.dealerSeat).toBe(2);
+    expect(view.players.map(player => player.roundDelta)).toEqual([4, -6, 2, 0]);
+    expect(view.players[0]!.avatarUrl).toBe("https://example.invalid/p0.png");
+    const next = playerSnapshot(new MahjongGame(2, ids, 1), 0, room, 2) as typeof view;
+    expect(next.dealerSeat).toBe(1);
+    expect(next.players.map(player => player.roundDelta)).toEqual([0, 0, 0, 0]);
+  });
+
   it("keeps the first two winners private, survives restore, and reveals all four only at settlement", () => {
     const observed = new Set<number>();
     const reasons = new Set<string>();
