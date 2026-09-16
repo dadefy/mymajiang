@@ -28,6 +28,14 @@ interface ActiveMatch {
 export interface RealtimeOptions {
   playTimeoutMs?: number;
   claimTimeoutMs?: number;
+  /**
+   * 一局打完到开下一局之间的**停留**（毫秒），默认 5000。
+   *
+   * 留这段时间是给四家看清结算：不加停留时，服务端在同一轮广播里就开了下一局，
+   * 局间只有几十毫秒 —— 结算界面（含四家牌面）几乎没人看得见。
+   * 设 0 表示立刻开下一局（测试用，避免每个跨局用例白等 5 秒）。
+   */
+  interRoundPauseMs?: number;
   /** 快照落盘的最小间隔（毫秒）。同一时间窗内的多次行动合并成一次写；默认 2000。 */
   saveIntervalMs?: number;
 }
@@ -141,6 +149,10 @@ function buildRealtimeServer(
   const saveTimers = new Map<ActiveMatch, ReturnType<typeof setTimeout>>();
   const playTimeoutMs = options.playTimeoutMs ?? 15_000;
   const claimTimeoutMs = options.claimTimeoutMs ?? 8_000;
+  /** 局间停留：一局打完到开下一局之间留给结算展示的时间。 */
+  const interRoundPauseMs = options.interRoundPauseMs ?? 5_000;
+  /** 每个进行中对局的"局间停留"定时器。至多一个 —— 它同时是 reentry 的保护。 */
+  const interRoundTimers = new Map<ActiveMatch, ReturnType<typeof setTimeout>>();
   /** 快照落盘的最小间隔；一个时间窗内的多次行动合并成一次写。 */
   const SAVE_INTERVAL_MS = options.saveIntervalMs ?? 2_000;
 
@@ -229,6 +241,15 @@ function buildRealtimeServer(
     actionTimers.delete(active);
   }
 
+  /** 撤掉局间停留的定时器（整场结束、房间被删时用，免得 5 秒后又去广播一个已消失的对局）。 */
+  function clearInterRoundTimer(active: ActiveMatch): void {
+    const timer = interRoundTimers.get(active);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      interRoundTimers.delete(active);
+    }
+  }
+
   function scheduleAutoActions(active: ActiveMatch): void {
     const timers = new Map<number, ReturnType<typeof setTimeout>>();
     const game = active.game;
@@ -310,6 +331,10 @@ function buildRealtimeServer(
     const seatMap = seatConnections.get(active);
     const game = active.game;
     if (game.phase === "finished" && game.result) {
+      // ⚠️ 幂等闸：局间停留期间 `active.game` **仍然是刚结束的那一局**，
+      // 而「剩余动作 / 托管定时器 / 重连」都还会再走到这里 —— 没有这道闸就会重复发
+      // round-finished、重复 +1 completedRounds、并开出好几局新牌。
+      if (interRoundTimers.has(active)) return;
       const roundResult = roundSettlement(game);
       for (const connection of seatMap?.values() ?? []) {
         connection.send({
@@ -326,6 +351,7 @@ function buildRealtimeServer(
           connection.send({ type: "match-finished", result: matchResult });
         }
         dependencies.gameStateStore?.clear(active.room.roomId);
+        clearInterRoundTimer(active);
         cancelSaveTimer(active);
         activeMatches.delete(active.room.roomId);
         seatConnections.delete(active);
@@ -334,12 +360,34 @@ function buildRealtimeServer(
       active.roundNumber += 1;
       // 旧局已结算，其存档不再有意义；取消悬挂的延迟写，交给新局重新安排。
       cancelSaveTimer(active);
-      active.game = new MahjongGame(
-        randomInt(0, 2 ** 31),
-        [...active.seatsByUser.keys()] as [string, string, string, string],
-        roundResult.nextDealerSeat,
-      );
-      await broadcastState(active);
+      const nextDealerSeat = roundResult.nextDealerSeat;
+
+      // 局间停留：先把这一局的结算看清楚，再开下一局。
+      //
+      // 不在这里 `await sleep` —— `broadcastState` 被多方调用（每次动作、每个托管定时器），
+      // 睡在里面会把整个房间的响应一起拖住。改成定时器，并用「每个对局至多一个定时器」
+      // （就是上面那道闸）保证重入幂等。
+      if (interRoundPauseMs <= 0) {
+        // 测试路径：与加停留之前完全一致，立刻开下一局。
+        active.game = new MahjongGame(
+          randomInt(0, 2 ** 31),
+          [...active.seatsByUser.keys()] as [string, string, string, string],
+          nextDealerSeat,
+        );
+        await broadcastState(active);
+        return;
+      }
+      const timer = setTimeout(() => {
+        interRoundTimers.delete(active);
+        active.game = new MahjongGame(
+          randomInt(0, 2 ** 31),
+          [...active.seatsByUser.keys()] as [string, string, string, string],
+          nextDealerSeat,
+        );
+        void broadcastState(active).catch(() => undefined);
+      }, interRoundPauseMs);
+      timer.unref();
+      interRoundTimers.set(active, timer);
       return;
     }
     for (const [seat, connection] of seatMap ?? []) {

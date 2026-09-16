@@ -29,8 +29,13 @@ const LEDGER = process.env.KEYS_LEDGER ?? fileURLToPath(new URL("../.keys-ledger
 const PLAYERS = ["张三", "李四", "王五", "赵六"];
 const OUTSIDER = "外人";
 
-/** 整场验收的硬上限：正常 15 秒内跑完，卡住时不要无限等。 */
-const MATCH_TIMEOUT_MS = 180_000;
+/**
+ * 整场验收的硬上限：实测一场约 2 分 15 秒，卡住时不要无限等。
+ *
+ * 其中包含**局间停留**：服务端每局打完停 5 秒再开下一局（给结算留展示时间），
+ * 8 局就是 7 × 5 = 35 秒。这个上限要把它算进去，否则网络稍慢就会误报超时。
+ */
+const MATCH_TIMEOUT_MS = 240_000;
 const STEP_INTERVAL_MS = 20;
 
 const suite = [];
@@ -495,7 +500,14 @@ async function main() {
 
   const deltas = leader.matchResult?.accountDeltas ?? [];
   check("整场结算的账户增减之和为 0", deltas.reduce((sum, entry) => sum + entry.delta, 0) === 0, JSON.stringify(deltas));
-  check("结算只落在四个玩家身上", deltas.length === 4, `实际 ${deltas.length} 条`);
+  // 意图是「不出现第五个玩家（外人）」。不能写成 `length === 4`：
+  // `capLossesByOpeningBalance` 只保留 delta > 0 与 delta < 0 的条目，
+  // 所以整场**净变化为 0** 的那一家本来就不会出现在结算里（不写账、余额也不变）。
+  // 实测撞到过：三家有增减、第四家恰好不输不赢，于是这里假红。
+  const knownIds = new Set(accounts.slice(0, PLAYERS.length).map((account) => account.userId));
+  check("结算只落在这场对局的四个玩家身上（净 0 的不写账）",
+    deltas.length > 0 && deltas.every((entry) => knownIds.has(entry.playerId)),
+    `${deltas.length} 条，全部属于本场四家`);
 
   // 用「重新登录后的积分」核对：开局前记下的余额 + 结算增减 = 现在看到的余额。
   let balancesMatch = true;
