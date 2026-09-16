@@ -304,7 +304,10 @@ export class RoomPage {
   }
 
   private renderResult(): void {
-    if (!this.lastResult || this.resultDismissed) {
+    // 新一局已经开始（`this.match` 非空）就收起浮层。
+    // 服务端一局结束后会**立刻**开下一局，所以 `lastResult` 在新局里依然有值 ——
+    // 只看它会让上一局的结算一直压在新牌局上面（两个浏览器客户端同一处坑）。
+    if (!this.lastResult || this.resultDismissed || this.match !== null) {
       this.resultOverlay.visible = false;
       return;
     }

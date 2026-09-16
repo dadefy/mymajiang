@@ -6,7 +6,7 @@ import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } fro
 import { actionButtons, runAction } from "./action-buttons.js";
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { matchResultText } from "./result-text.js";
+import { matchResultText, roundResultText, winLines } from "./result-text.js";
 import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
 import { meldBox } from "./tile-chips.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
@@ -439,7 +439,19 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   );
 
   if (screen.match) app.append(renderTable(screen.match, screen.actions, screen.snapshot));
-  if (screen.lastResult) app.append(roundResultPanel(screen.lastResult, screen.snapshot));
+  // 结算浮层带遮罩、会盖住整页，所以只在**局间**显示。新一局已经开始时退化成摘要行：
+  // 服务端一局结束就立刻开下一局，`lastResult` 在新局里依然有值，只看它会让
+  // 上一局的结算一直浮在新牌局上面（与 /multi 同一处坑）。
+  if (screen.lastResult && !screen.match) {
+    app.append(roundResultPanel(screen.lastResult, screen.snapshot));
+  } else if (screen.lastResult) {
+    const summary = panel("上一局");
+    summary.append(element("p", { className: "hint", text: roundResultText(screen.lastResult, screen.snapshot) }));
+    for (const line of winLines(screen.lastResult, screen.snapshot)) {
+      summary.append(element("p", { className: "hint", text: line }));
+    }
+    app.append(summary);
+  }
   // 整场结算与单局结算是两个形状，分开渲染（见 result-text.ts）。
   if (screen.lastMatchResult) {
     app.append(panel("整场结束", element("p", { className: "turn other", text:
