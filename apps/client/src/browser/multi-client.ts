@@ -60,6 +60,12 @@ function makeSeat(slot: number): SeatState {
       seat.userId = screen.me.userId;
       seat.nickname = screen.me.nickname;
     }
+    // 离开换三张阶段就清掉选牌。不清的话，靠超时托管过掉换三张（没点按钮）
+    // 这一家的选择会留到下一局 —— 那时手里凑巧有同样的牌，就会有一张牌
+    // 一进换三张阶段就是选中状态，看着像「我不记得点过它」。
+    if (screen.name === "room" && screen.match?.phase !== "swapping" && seat.selected.length > 0) {
+      seat.selected = [];
+    }
     scheduleRender();
   });
   return seat;
