@@ -1,6 +1,7 @@
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
-import type { GroupMessageView, MatchState, RoomResult, Suit, Tile } from "../protocol.js";
+import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Suit, Tile } from "../protocol.js";
+import { activeRing, nicknameOf, relationLabel, turnOrder } from "./table-order.js";
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 import { BrowserVoiceRecorder } from "./voice-recorder.js";
 import { MediaCache } from "./media-cache.js";
@@ -445,18 +446,75 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
     ),
   );
 
-  if (screen.match) app.append(renderTable(screen.match, screen.actions));
+  if (screen.match) app.append(renderTable(screen.match, screen.actions, screen.snapshot));
   if (screen.lastResult) app.append(renderResult(screen.lastResult));
 }
 
-function renderTable(match: MatchState, actions: string[]): HTMLElement {
+/** 顶部那行大字：轮到谁。 */
+function turnBanner(match: MatchState, snapshot: RoomSnapshot | null): HTMLElement {
+  const seat = match.currentPlayerSeat;
+
+  if (match.phase === "finished") {
+    return element("div", { className: "turn other", text: "本局已结束" });
+  }
+  // 换三张与定缺是四个人同时做，没有「轮到谁」这回事。
+  if (match.phase === "swapping" || match.phase === "missing") {
+    return element("div", { className: "turn other", text: `${phaseLabel(match.phase)}阶段 · 四人同时进行，不分先后` });
+  }
+  if (seat === null) {
+    return element("div", { className: "turn other", text: "等待服务端推进…" });
+  }
+  if (seat === match.seat) {
+    return element("div", { className: "turn mine", text: "轮到你出牌" });
+  }
+  // claiming 阶段 currentPlayerSeat 仍然是刚出牌的那个人，但他并不在等自己 ——
+  // 这里不能说「轮到他出牌」，要说清大家到底在等什么。
+  if (match.phase === "claiming") {
+    return element("div", { className: "turn other", text:
+      `${seat} 号位（${nicknameOf(snapshot, seat)}）刚打出一张，其余人可以考虑碰 / 杠 / 胡` });
+  }
+  return element("div", { className: "turn other", text: `轮到 ${seat} 号位（${nicknameOf(snapshot, seat)}）出牌` });
+}
+
+/** 出牌顺序一行：从我开始走一圈，标出当前行动者与已胡的人。 */
+function orderLine(match: MatchState, snapshot: RoomSnapshot | null): HTMLElement {
+  const line = element("p", { className: "order" });
+  line.append(element("span", { text: "出牌顺序（座位号递增）：" }));
+  turnOrder(match).forEach((seat, index) => {
+    if (index > 0) line.append(element("span", { text: " → " }));
+    const who = seat === match.seat ? `我（${seat} 号位）` : `${nicknameOf(snapshot, seat)}（${seat} 号位）`;
+    line.append(element("b", { text: seat === match.currentPlayerSeat ? `${who} ← 当前` : who }));
+  });
+  const won = match.players.filter((player) => player.won).map((player) => `${player.seat} 号位`);
+  if (won.length > 0) line.append(element("span", { text: `　（已胡，不在轮转：${won.join("、")}）` }));
+  return line;
+}
+
+function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapshot | null): HTMLElement {
   const box = panel(`第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)} · 我坐 ${match.seat} 号位 · 牌墙剩 ${match.tilesLeft}`);
 
-  // 其它三家的概况：只给张数与副露，这是服务端脱敏后能给的。
+  // 谁该出牌必须一眼看到，所以先给顶部大字，再给一整圈顺序。
+  box.append(turnBanner(match, snapshot), orderLine(match, snapshot));
+
+  // 四家各一行。别的三家只给张数与副露，这是服务端脱敏后能给的。
+  // 轮到谁就把那一行框出来 —— 只看顶部大字的话，还得自己把座位号换成方位。
+  const ring = activeRing(match);
   for (const player of match.players) {
-    if (player.seat === match.seat) continue;
-    box.append(element("p", { className: "hint", text:
-      `${player.seat} 号位：手牌 ${player.handSize} 张 · 副露 ${player.melds.length} · 缺 ${player.missingSuit ? SUIT_LABEL[player.missingSuit] : "未定"} · 已出 ${player.discards.map(tileLabel).join(" ")}` }));
+    const isMe = player.seat === match.seat;
+    const relation = isMe ? "我" : (ring.includes(player.seat) ? relationLabel(ring, ring.indexOf(player.seat)) : "已胡");
+    const detail = [
+      `手牌 ${player.handSize} 张`,
+      `副露 ${player.melds.length}`,
+      `缺 ${player.missingSuit ? SUIT_LABEL[player.missingSuit] : "未定"}`,
+      ...(isMe ? [] : [`已出 ${player.discards.map(tileLabel).join(" ") || "无"}`]),
+      ...(player.won ? ["已胡"] : []),
+    ].join(" · ");
+    box.append(element("div", {
+      className: `seat${player.seat === match.currentPlayerSeat ? " acting" : ""}${player.won ? " won" : ""}`,
+    },
+      element("span", { className: "tag", text: `${relation}·${player.seat} 号位` }),
+      element("span", { text: detail }),
+    ));
   }
 
   // 我的手牌：换三张阶段可点选，行牌阶段点击即出牌。

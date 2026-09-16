@@ -61,6 +61,19 @@ export function debugClientHtml(options: DebugClientOptions): string {
     /* 语音：浏览器原生控件最省事，手机上也能直接播。 */
     .voice-wrap { display: inline-flex; align-items: center; gap: 6px; }
     audio.voice { height: 32px; max-width: 240px; vertical-align: middle; }
+    /* 回合指示：谁该出牌要一眼看到。顶部大字用底色区分「轮到我自己」（金色）
+       与「轮到别人」（深绿）—— 只靠文字的话，打牌时eye要去读才知道是不是自己。 */
+    .turn { border-radius: 8px; padding: 9px 12px; margin: 10px 0 4px; font-weight: bold; }
+    .turn.mine { background: #d8a13a; color: #241a05; }
+    .turn.other { background: #16302a; color: #cfe9de; border: 1px solid #2d5347; }
+    /* 四家各占一行；轮到谁就把那一行框出来。 */
+    .seat { padding: 6px 10px; border-radius: 7px; border: 1px solid transparent; margin: 4px 0; font-size: 13px; color: #b9d6c9; }
+    .seat.acting { border-color: #d8a13a; background: #1e2f28; }
+    .seat.won { opacity: .5; }
+    .seat .tag { display: inline-block; min-width: 4.4em; font-weight: bold; color: #8fb3a5; }
+    .seat.acting .tag { color: #d8a13a; }
+    .order { font-size: 13px; color: #8fb3a5; margin: 8px 0 2px; }
+    .order b { color: #d8a13a; font-weight: normal; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
     .error { color: #ff9b9b; margin: 8px 0; }
     code { background: #0d1613; padding: 1px 5px; border-radius: 4px; }
