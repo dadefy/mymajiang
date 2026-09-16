@@ -192,6 +192,26 @@ node --env-file=.env scripts/acceptance.mjs
 > 它一秒能走几十步，某个动作到达时服务端状态已经推进了。真正的问题会直接判失败，
 > 所以看到这个不用紧张；想确认可以看它打印的上下文（会写明当时轮到了谁）。
 
+### 它验不到的那一层：界面到底画出来没有
+
+`acceptance.mjs` 走协议层（HTTP + 实时通道），它证明**服务端算得对**，证明不了**屏幕上画得对**。
+那一层交给 `tools/domcheck/` 下的 jsdom 探针：把真实页面与真实客户端模块跑起来，
+再去数 DOM 里的节点。最常用的两个**不需要服务端**，只要有构建产物：
+
+```powershell
+pnpm build
+node tools/domcheck/check-countdown.mjs     # 倒计时节点画没画出来、秒数在不在走
+node tools/domcheck/check-meld-dom.mjs      # 暗杠只亮一张、其余三张扣着
+```
+
+需要四个人的那几个（`check-multi-play` / `check-settlement` / `probe-claims` / `check-remote`）
+用 `KEYS` 传四把密钥；各自的覆盖范围与跑法见 `tools/domcheck/README.md`。
+
+**为什么值得单独留一层**：这一轮挖出的两个真问题 ——
+「结算浮层其实从来没显示过」与「探针的局间检查被整个跳过、报了一条假绿」——
+都属于这一层。两者都不是服务端算错，`acceptance.mjs` 全绿也照样漏。
+**断言本身也会错**：新加的检查要能真的失败一次再算数。
+
 ## 七、逐项验收清单
 
 > 建议照这个表走一遍，边做边打勾。**"两台设备"的意思是操作的那台和另一台观察的**，
