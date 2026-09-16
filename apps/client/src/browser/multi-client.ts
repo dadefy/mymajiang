@@ -426,7 +426,16 @@ async function loginSeat(seat: SeatState, key: string): Promise<void> {
 }
 
 /**
- * 一个人把开局做完：四家登录 → 一家建房 → 三家加入 → 全部准备 → 房主开局。
+ * 一个人把开局做完。
+ *
+ * 两条路：
+ *   * **四家都还挂在同一间房里** → 直接回去。服务端不允许「已在一间房里再建一间」
+ *     （建房会返回 409），而「重来」只关连接、不调 `leaveRoom`，
+ *     所以点了重来再点自动开局必然撞上这条路；
+ *   * 否则 → 一家建房、三家按房间号加入。
+ *
+ * 之后再看房间状态：还在等人 → 四家准备 + 房主开局；已经在打 → 什么都不做，
+ * 重连的对局帧会自己到。
  *
  * 每一步都 `await` 到位再走下一步 —— 中间任何一步失败，画面会停在出问题的那一步，
  * 而不是四个连接各自走一半、留下一个看不出原因的半开局。
@@ -439,23 +448,44 @@ async function autoStart(): Promise<void> {
     setStatus("① 四个账号登录中…");
     await Promise.all(seats.map((seat) => loginSeat(seat, keyInputs[seat.slot]?.value.trim() ?? "")));
 
-    const owner = seats[0];
-    if (!owner) throw new Error("没有可用的连接");
+    // 登录响应会带上「还有哪一局没打完」，四家都指着同一间就说明不必新建。
+    const activeRooms = seats.map((seat) => {
+      const screen = seat.flow.current;
+      return screen.name === "home" ? screen.activeRoom : null;
+    });
+    const roomId = activeRooms[0]?.roomId ?? null;
+    const allInOneRoom = roomId !== null && activeRooms.every((room) => room?.roomId === roomId);
+    const sharedRoomNo = activeRooms.find((room) => room !== null)?.roomNo;
 
-    setStatus("② 建一个新房间…");
-    await owner.flow.createRoom();
-    const roomNo = roomOf(owner)?.roomNo;
-    if (!roomNo) throw new Error("建房失败：没有拿到房间号");
+    if (allInOneRoom) {
+      setStatus(`② 四家都还在一间房里（${sharedRoomNo ?? "?"}），直接回去接着打…`);
+      await Promise.all(seats.map((seat) => seat.flow.rejoinActiveRoom()));
+    } else {
+      const creator = seats[0];
+      if (!creator) throw new Error("没有可用的连接");
+      setStatus("② 建一个新房间…");
+      await creator.flow.createRoom();
+      const roomNo = roomOf(creator)?.roomNo;
+      if (!roomNo) throw new Error("建房失败：没有拿到房间号");
 
-    setStatus(`③ 其余三家加入房间 ${roomNo}…`);
-    await Promise.all(seats.slice(1).map((seat) => seat.flow.joinRoom(roomNo)));
+      setStatus(`③ 其余三家加入房间 ${roomNo}…`);
+      await Promise.all(seats.slice(1).map((seat) => seat.flow.joinRoom(roomNo)));
+    }
 
-    setStatus("④ 四家准备…");
-    await Promise.all(seats.map((seat) => seat.flow.setReady(true)));
+    const snapshot = anySnapshot();
+    if (snapshot?.status === "waiting") {
+      setStatus("④ 四家准备…");
+      await Promise.all(seats.map((seat) => seat.flow.setReady(true)));
 
-    setStatus("⑤ 房主开局…");
-    owner.flow.startMatch();
-    await waitFor(() => anyMatch() !== null, 10_000, "等待开局首帧");
+      setStatus("⑤ 房主开局…");
+      // 房主不一定是 0 号连接：走「回去」那条路时，房主多半是别人。
+      const ownerSeat = seats.find((seat) => seat.userId === snapshot.ownerId) ?? seats[0];
+      ownerSeat?.flow.startMatch();
+    } else {
+      setStatus("④ 已经在一局里了，接着打…");
+    }
+
+    await waitFor(() => anyMatch() !== null, 12_000, "等待牌桌出现");
     setStatus("");
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));

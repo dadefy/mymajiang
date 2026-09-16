@@ -722,6 +722,9 @@ describe("ClientFlow", () => {
       ["ROOM_NOT_FOUND", "没有这个房间号，可能房主已经解散了"],
       ["Room is full", "房间满了，一桌只能坐四个人"],
       ["Active account with at least 500 points is required", "积分不足 500，暂时进不了牌局"],
+      // 和上一条同源（都出自 canEnterMatch 的三个条件），但原因完全不同：
+      // 这条是「已经有一局在进行中」，域层已单独拆出来。
+      ["Active account already has a match in progress", "这个账号还在一局没打完的牌局里，先回那一局打完再来"],
     ];
 
     for (const [raw, translated] of cases) {

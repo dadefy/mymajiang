@@ -184,6 +184,9 @@ export function multiClientHtml(options: DebugClientOptions): string {
       <p class="hint">填四把邀请密钥，点「自动开局」会依次完成：四家登录 → 一家建房 → 三家加入 →
         全部准备 → 房主开局。之后四家的手牌分列上、下、左、右（0 号位在下，按出牌顺序顺时针排开），
         每家的出牌与碰杠胡各自独立 —— 服务端是按座位脱敏的，这里看到的每张牌都来自对应那家自己的连接。</p>
+      <p class="hint">⚠️ 「重来」只断开连接、<strong>不会退出房间</strong>：四家仍挂在原来那一局上，
+        重连窗口内再点「自动开局」会自动回到同一局接着打；超过窗口就回不去了，
+        而且那一局没结束前这四个账号建不了新房（服务端会拒），需要换一批账号。</p>
       <div id="keys" class="keys"></div>
       <div class="row">
         <button id="auto" class="primary">自动开局</button>

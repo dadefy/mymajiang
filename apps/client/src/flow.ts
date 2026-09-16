@@ -154,9 +154,15 @@ const DOMAIN_ERROR_TEXT: Record<string, string> = {
   "Room is full": "房间满了，一桌只能坐四个人",
   "Players cannot leave after the match starts": "开局之后不能退出房间",
   "Active account with at least 500 points is required": "积分不足 500，暂时进不了牌局",
+  // 「已经有一局在进行中」原本和上一条共用英文原文，报出来是「积分不足」——
+  // 完全指错方向。域层已把它们拆开（见 packages/domain 的 assertCanJoin）。
+  "Active account already has a match in progress": "这个账号还在一局没打完的牌局里，先回那一局打完再来",
   // 连接与身份
   "Not authenticated": "登录状态已失效，请重新登录",
   "ACCOUNT_NOT_ACTIVE": "账号已被停用",
+  // 断线重连有时间窗（见 packages/domain 的 reconnect）：窗口内回来能接着打，
+  // 超时就回不去了。这条原先会原样显示英文码给用户。
+  "RECONNECT_WINDOW_EXPIRED": "离开太久，那一局已经回不去了",
 };
 
 function translateDomainError(message: string): string | undefined {

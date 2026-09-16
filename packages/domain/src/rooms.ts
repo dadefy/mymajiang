@@ -227,6 +227,17 @@ export class MatchRoom {
   }
 
   private assertCanJoin(account: UserAccount): void {
+    // `canEnterMatch` 是三个条件的 AND（账号可用 + **没有进行中的对局** + 积分够），
+    // 但它们原先共用一条消息，而那条消息只提「积分 500」——
+    // 于是「已经有一局没打完」这种最常见的拒绝，看到的却是「积分不足」，
+    // 排查时会被带到完全相反的方向（实测：账号还挂在上一局里时建房返回 409，
+    // 消息是 `Active account with at least 500 points is required`）。
+    // 这里把对局中这一条单独拆出来，其余仍旧走原来的判断。
+    // 消息仍以 `Active account` 开头：与上一条同属一族，
+    // `rooms.test.ts` 也是按这个前缀断言「入场校验拒绝了」的。
+    if (account.activeMatchId) {
+      throw new Error("Active account already has a match in progress");
+    }
     if (!canEnterMatch(account, MIANYANG_XZ_1_0.minimumEntryPoints)) {
       throw new Error("Active account with at least 500 points is required");
     }
