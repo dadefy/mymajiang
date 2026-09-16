@@ -1,6 +1,6 @@
 import type { MatchResult, MatchResultPlayer, RoomResult, RoomSnapshot } from "../protocol.js";
 import { element } from "./dom.js";
-import { scoreBoard, scoreColor, seatScores } from "./score-board.js";
+import { matchScoreBoard, scoreColor, seatScores } from "./score-board.js";
 import { matchResultText, matchTimeText, signed, winLines } from "./result-text.js";
 
 const dismissed = new WeakSet<MatchResult>();
@@ -128,7 +128,7 @@ export function matchResultPanel(
   if (time !== null) panel.append(element("p", { className: "match-time", text: time }));
 
   const scores = seatScores({ result: round, matchResult: result }, snapshot);
-  panel.append(scoreBoard(scores, { primary: "match", showAccount: true }));
+  panel.append(matchScoreBoard(scores));
 
   // 四行明细，顺序由服务端定（按座位）。缺 `players` 时整块不显示 ——
   // 那样至少上面那排分数还在，不至于整屏空白。
@@ -147,7 +147,8 @@ export function matchResultPanel(
   // 权威摘要：带上封顶/负分保护造成的「实际结算分」差异（见 matchResultText）。
   panel.append(element("p", { className: "hint", text: matchResultText(result, snapshot) }));
 
-  // 最后一小场怎么胡的也留一份：小场弹窗是可以按掉的，按掉之后这一屏就是唯一的落点。
+  // 最后一小场怎么胡的也留一份：小场那屏只弹四个数字、放完就没了（不展示牌型），
+  // 所以这一屏是「怎么胡的」唯一的落点。
   if (round) {
     for (const line of winLines(round, snapshot)) {
       panel.append(element("p", { className: "hint", text: `最后一小场　${line}` }));

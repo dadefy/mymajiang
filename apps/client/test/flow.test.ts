@@ -905,7 +905,7 @@ describe("ClientFlow", () => {
         deltas: [{ playerId: SESSION.userId, delta: 12 }],
         players: [{ playerId: SESSION.userId, seat: 0, won: true, hand: [], melds: [], matchDelta: 12 }],
       },
-      nextRoundInMs: 0,
+      nextRoundInMs: 3_000,
     });
 
     const mid = flow.current;
@@ -913,6 +913,8 @@ describe("ClientFlow", () => {
     if (mid.name !== "room") return;
     expect(mid.lastResult?.roundNumber).toBe(3);
     expect(mid.lastResult?.players?.[0]?.matchDelta).toBe(12);
+    // 停留时长换算成「这一屏显示到几时」：牌桌上那组数字到点自己收。
+    expect(mid.roundPopUntil).toBeGreaterThan(Date.now() + 2_000);
     // 一小场结束**不出**结算记录：那要等一整局打满。
     expect(mid.lastMatchResult).toBeNull();
     // 结算帧里没有账号余额 —— 打的过程中账号积分根本不该动。
@@ -933,7 +935,7 @@ describe("ClientFlow", () => {
         deltas: [{ playerId: SESSION.userId, delta: -4 }],
         players: [{ playerId: SESSION.userId, seat: 0, won: false, hand: [], melds: [], matchDelta: 40 }],
       },
-      nextRoundInMs: 0,
+      nextRoundInMs: 3_000,
     });
     socket.serverSends({
       type: "match-finished",
@@ -969,6 +971,9 @@ describe("ClientFlow", () => {
     expect(done.lastMatchResult?.startedAt).toBe(1_700_000_000_000);
     expect(done.lastMatchResult?.finishedAt).toBe(1_700_002_600_000);
     expect(done.lastMatchResult?.players?.[0]?.playerId).toBe(SESSION.userId);
+    // ⚠️ 整局结算到了之后，这一屏的显示时限**仍然保留** —— 打满 8 小场时没有下一小场，
+    // 但最后一小场那组数字仍要放满停留时长再交接给结算记录。清掉它，结算记录就永远不出现。
+    expect(done.roundPopUntil).toBeGreaterThan(Date.now() + 2_000);
 
     // 回首页：账号积分跟着结算后的余额走。
     // 不重新拉 /v1/me 的话，剩下的就是登录那一刻的 0 分 —— 看得出「分没进账」。

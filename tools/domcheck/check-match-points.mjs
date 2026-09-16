@@ -1,14 +1,15 @@
 /**
- * 一整局的积分口径：**头像记整局、跨小场不清零**；一小场只弹本小场分数；
- * 打满 8 小场、按掉那一屏之后才出**整局结算记录**（账号积分正是在那一刻改的），
+ * 一整局的积分口径：**头像记整局、跨小场不清零**；一小场只弹四个数字；
+ * 停留时长走完、**自动**交接给**整局结算记录**（账号积分正是在那一刻改的），
  * 记录顶部写「开始时间 / 耗时」，下面四行是「头像 + 昵称 + 10 位 id 号 + 本局积分变化」。
  *
  * 为什么要单开一条：这些缺陷单测全绿也照样漏。
  *   * 头像那两个数的口径（本小场 / 整局累计）都在**服务端下发**的字段里，
  *     客户端把它们接错（例如继续读 `roundDelta`）时数据没错、只是显示错；
- *   * 「按掉小场弹窗 → 再出结算记录」这条顺序完全长在渲染层里：
- *     服务端在打满 8 小场那一刻已经不再发任何帧，少了 `onDismiss` 就没人重画，
+ *   * 「弹四个数字 → 到点自动出结算记录」这条顺序完全长在渲染层里：
+ *     服务端在打满 8 小场那一刻已经不再发任何帧，少了到点回调就没人重画，
  *     结算记录永远不出现（页面看着像「打完了没结算」）；
+ *   * 「小场那屏不展示牌型/牌面」也是渲染层的取舍：帧里照样带着 `wins` 与四家手牌；
  *   * 那四行明细只在**整局结算**这一个时刻有数据（头像与 id 在房间成员上、入账分与余额
  *     要等 `finalize()` 写完账号），拼错了在打的过程中完全看不出来。
  *
@@ -58,7 +59,8 @@ function push(state) {
       roomNo: '123456',
       busy: false,
       actions: [],
-      nextRoundAt: null,
+      // 这一小场那屏数字显示到什么时候；`state` 里没给就是不限时（一直显示到下一小场开局）。
+      roundPopUntil: null,
       ...state,
       snapshot: {
         roomId: 'r',
@@ -170,24 +172,36 @@ push({
   },
   roundFinished: true,
   lastResult: round3,
-  nextRoundAt: null,
+  roundPopUntil: null,
 });
 await tick();
 
-assert.match(centerText(), /第 3\/8 小场结束 · 三家胡/, '小场弹窗要说清这是第几小场');
-assert.deepEqual(centerValues(), ['+24', '-8', '-8', '-8'], '弹窗主数字是**本小场**的四家变化');
+// 一小场那一屏：**在牌桌上弹一下四个数字**，不弹面板、不亮牌、不写牌型。
+assert.equal(document_.querySelectorAll('#center .round-pop').length, 1, '小场结束要在牌桌上弹一块数字');
+assert.equal(textOf('#center .round-pop .round-pop-title'), '第 3/8 小场', '弹出来的那块要说清这是第几小场');
+assert.deepEqual(centerValues(), ['+24', '-8', '-8', '-8'], '弹出来的数字是**本小场**的四家变化');
 assert.deepEqual(centerNames(), ['0 号位 张三', '1 号位 李四', '2 号位 王五', '3 号位 赵六'],
   '四家的分数要按座位排，不能按 playerId 或到达顺序');
-assert.equal(document_.querySelectorAll('#center .score-total').length, 4, '每家下面要带一行「本场累计」');
-assert.equal(document_.querySelectorAll('#center .score-board').length, 1, '一小场只该有一个分数面板');
-assert.equal(document_.querySelectorAll('#center .score-account').length, 0,
-  '打的过程中不许出现「账号」字样：账号积分要等整局结算才改');
+// 「小局结算时都不用展示牌型等」：帧里带着 winLines/牌面，渲染层一个都不该画。
+// ⚠️ 判据限定在弹出来的那一块里（`#center .round-pop <selector>`）：
+// 牌桌本身的副露也是 `.meld-group`，全局选择器会把牌桌上的正常副露误判成「亮了牌」。
+for (const selector of ['.win-summary', '.result-player', '.meld-group', '.score-total', '.score-account']) {
+  assert.equal(document_.querySelectorAll(`#center .round-pop ${selector}`).length, 0, `小场这一屏不该出现 ${selector}`);
+}
+// 连整屏面板都不该有 —— 旧版就是 `.panel` 那个盖住牌桌的大浮层。
+assert.equal(document_.querySelectorAll('#center .panel').length, 0, '小场这一屏不该有结算面板');
+assert.equal(document_.querySelectorAll('#center .round-pop button').length, 0,
+  '这一屏不该有按钮：数字到点自己收，不用玩家按任何东西');
+// 它得是**压在牌桌上**的一块，不是盖住整屏的浮层（旧版是 position:fixed + 10vmax 遮罩）。
+// 用 CSSOM 属性而不是 style 字符串：jsdom 会把内联样式规范化（`position:absolute` → `position: absolute`），
+// 拿原文比会莫名其妙地失败。
+const popStyle = document_.querySelector('#center .round-pop').style;
+assert.equal(popStyle.position, 'absolute', '这一屏该绝对定位压在牌桌上');
+assert.ok(!popStyle.boxShadow.includes('10vmax'), '不该有挡住整屏的遮罩');
 // 还没打满，**不能**出整局结算记录。
 assert.equal(centerText().includes('本局结算记录'), false, '第 3/8 小场就出结算记录是错的');
-// 小场弹窗按掉之后只是收起来，不该冒出结算记录。
-assert.equal(textOf('#center .panel > button'), '继续');
 
-// ---------- ③ 打满 8 小场：先出最后一小场那一屏，按掉之后才出整局结算记录 ----------
+// ---------- ③ 打满 8 小场：先弹最后一小场那四个数字，放满停留时长才出整局结算记录 ----------
 //
 // 最后一小场：0 号位 +6、其余 -2。整局累计 [28, -8, -14, -6]（零和）。
 // 账号入账与场上的净胜负**故意不一样**（0 号位被扣了 6 分、2 号位少输 6 分）——
@@ -255,18 +269,27 @@ push({
   roundFinished: true,
   lastResult: round8,
   lastMatchResult: finalResult,
-  nextRoundAt: null,
+  // 停留截止时刻。服务端给的是 3 秒（`interRoundPauseMs`），这里缩到 250 毫秒，
+  // 只为让探针把「到点自动交接」这一步也真跑到，不用白等 3 秒。
+  roundPopUntil: Date.now() + 250,
 });
 await tick();
 
-assert.match(textOf('#center h2') ?? '', /第 8\/8 小场结束/, '打满时最后一小场那一屏照样要出');
-assert.equal(textOf('#center .panel > button'), '看本局结算', '最后一小场的按钮要写明下一步是结算记录');
-assert.equal(centerText().includes('本局结算记录'), false, '还没按掉最后一小场那一屏，结算记录不该同时压上来');
-assert.equal(document_.querySelectorAll('#center .score-board').length, 1, '两屏不该同时出现');
+// 最后一小场照样是「弹四个数字」那一屏：不是面板、没有按钮。
+assert.equal(textOf('#center .round-pop .round-pop-title'), '第 8/8 小场', '打满时最后一小场那一屏照样要出');
+assert.equal(document_.querySelectorAll('#center .panel > button').length, 0, '这一屏不该有按钮');
+assert.equal(document_.querySelectorAll('#center .match-player-row').length, 0,
+  '数字还没放完，结算记录不该同时压上来');
+assert.equal(centerText().includes('本局结算记录'), false, '两屏不该同时出现');
 
-// 按掉它。
-document_.querySelector('#center .panel > button').click();
+// 停留时长走完 → **自动**交接给整局结算记录，不用玩家按任何东西。
+// 打满 8 小场时服务端在那之后已经不再发任何帧，靠的就是这一屏自己的到点回调
+// （少了它，结算记录永远不出现 —— 这是这条探针最该守住的一条）。
+await new Promise((resolve) => setTimeout(resolve, 400));
 await tick();
+
+assert.match(centerText(), /本局结算记录 · 打满 8 小场/, '整局结算记录要在数字放完之后自动出');
+assert.equal(document_.querySelectorAll('#center .round-pop').length, 0, '结算记录出来时数字那一屏该退场');
 
 assert.match(centerText(), /本局结算记录 · 打满 8 小场/, '整局结算记录只在打满 8 小场后出');
 const finalValues = centerValues();
@@ -303,6 +326,6 @@ assert.deepEqual([...document_.querySelectorAll('#center .match-player-account')
 assert.deepEqual(avatarScores(), ['本场 +28', '本场 -8', '本场 -14', '本场 -6'],
   '打完之后头像必须还是整局的账，不能清零');
 
-console.log('PASS: 头像记整局累计（跨小场不清零）；一小场弹本小场四家分数（按座位、带本场累计、不含账号）；打满 8 小场后按掉最后一屏才出整局结算记录（顶部写开始时间与耗时，下面四行是头像 + 昵称 + 10 位 id 号 + 本局积分变化，并含账号入账与余额）');
+console.log('PASS: 头像记整局累计（跨小场不清零）；一小场结束只在牌桌上弹四个数字（按座位、不弹面板、不亮牌、不写牌型、无按钮），停留时长走完自动交接给整局结算记录（顶部写开始时间与耗时，下面四行是头像 + 昵称 + 10 位 id 号 + 本局积分变化，并含账号入账与余额）');
 dom.window.close();
 process.exit(0);

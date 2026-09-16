@@ -1,6 +1,6 @@
 import { DiscardSelection } from "./discard-selection.js";
 import { SwapSelection } from "./swap-selection.js";
-import { roundResultPanel, isRoundResultDismissed } from "./round-result.js";
+import { roundScorePop } from "./round-result.js";
 import { matchResultPanel } from "./match-result.js";
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
@@ -8,7 +8,7 @@ import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } fro
 import { actionButtons, runAction } from "./action-buttons.js";
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { roundLabel, roundResultText, winLines } from "./result-text.js";
+import { roundLabel, roundResultText } from "./result-text.js";
 import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
 import { meldBox } from "./tile-chips.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
@@ -442,37 +442,39 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   );
 
   if (screen.match) app.append(renderTable(screen.match, screen.actions, screen.snapshot));
-  // 结算浮层带遮罩、会盖住整页，所以只在**局间**显示。新一局已经开始时退化成摘要行：
-  // 服务端一局结束就立刻开下一局，`lastResult` 在新局里依然有值，只看它会让
-  // 上一局的结算一直浮在新牌局上面（与 /multi 同一处坑）。
-  // 局间的可靠信号是 `roundFinished`（收到结算帧、还没等到下一局的第一帧），
-  // **不是** `match.phase === "finished"` —— 服务端一局结束时只发结算帧、不发 game 帧，
+  // 那一屏数字只在**局间**显示（服务端给的停留时长内）。新一小场已经开始时退化成摘要行：
+  // 服务端一小场结束就开下一小场，`lastResult` 在新局里依然有值，只看它会让
+  // 上一小场的数字一直压在新牌局上面（与 /multi 同一处坑）。
+  // 局间的可靠信号是 `roundFinished`（收到结算帧、还没等到新一小场的第一帧），
+  // **不是** `match.phase === "finished"` —— 服务端一小场结束时只发结算帧、不发 game 帧，
   // 客户端的 match 永远停在结束之前的状态，那个判据一次都不会成立。
   const roundOver = screen.match === null || screen.roundFinished;
-  // 按掉弹窗之后要**重画一次**：打满 8 小场时接着要显示整局结算记录，
-  // 而那一刻服务端已经不再发帧，没人重画的话结算记录永远不出现。
+  // 数字到点自动收（服务端给的停留时长）之后要**重画一次**：打满 8 小场时接着要显示
+  // 整局结算记录，而那一刻服务端已经不再发帧，没人重画的话结算记录永远不出现。
   const repaint = (): void => {
     const current = flow.current;
     if (current.name === "room") renderRoom(current);
   };
-  if (screen.lastResult && roundOver) {
-    // 一小场结束弹的是那一小场的分数；打满 8 小场、按掉它之后才出整局结算记录
-    // （账号积分正是在后者那一刻改的，两件事不能同时压在屏幕上）。
-    app.append(screen.lastMatchResult && isRoundResultDismissed(screen.lastResult)
-      ? matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint)
-      : roundResultPanel(screen.lastResult, screen.snapshot, screen.nextRoundAt, repaint));
-  } else if (screen.lastResult) {
-    const summary = panel("上一小场");
-    summary.append(element("p", { className: "hint", text: roundResultText(screen.lastResult, screen.snapshot) }));
-    for (const line of winLines(screen.lastResult, screen.snapshot)) {
-      summary.append(element("p", { className: "hint", text: line }));
+  // 显示到 `roundPopUntil` 为止；没有时限就一直显示到新一局的 `game` 帧把 `roundOver` 清掉。
+  // ⚠️ `match-finished` 之后这个值仍然有（见 flow 里的说明）—— 最后一小场那屏靠它
+  // 放满停留时长，然后交接给结算记录。
+  const popUntil = screen.roundPopUntil;
+  const popping = screen.lastResult !== null && roundOver && (popUntil === null || Date.now() < popUntil);
+  if (popping && screen.lastResult) {
+    // 只在牌桌上弹四个数字：不弹面板、不亮牌面、不写牌型（见 `round-result.ts`）。
+    app.append(roundScorePop(screen.lastResult, screen.snapshot, popUntil, repaint));
+  } else {
+    if (screen.lastResult) {
+      // 数字收掉之后留一行摘要（各家得失分与谁胡了），牌型明细不在这屏出现。
+      const summary = panel("上一小场");
+      summary.append(element("p", { className: "hint", text: roundResultText(screen.lastResult, screen.snapshot) }));
+      app.append(summary);
     }
-    app.append(summary);
-  }
-  // 结算记录与上面那两块分开：它的形状来自域包（`rawDeltas` + `accountDeltas`），
-  // 与单局的 `deltas` 完全不同（见 result-text.ts）。
-  if (screen.lastMatchResult && !(screen.lastResult && roundOver)) {
-    app.append(matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint));
+    // 结算记录与上面那块分开：它的形状来自域包（`rawDeltas` + `accountDeltas`），
+    // 与单局的 `deltas` 完全不同（见 result-text.ts）。
+    if (screen.lastMatchResult) {
+      app.append(matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint));
+    }
   }
 }
 

@@ -200,7 +200,7 @@ node --env-file=.env scripts/acceptance.mjs
 
 ```powershell
 pnpm build
-node tools/domcheck/check-countdown.mjs     # 倒计时节点画没画出来、秒数在不在走
+node tools/domcheck/check-countdown.mjs     # 小场那屏：只在牌桌上弹数字、不展示牌型/牌面、倒计时在走、到点自己收
 node tools/domcheck/check-meld-dom.mjs      # 暗杠只亮一张、其余三张扣着
 ```
 
@@ -235,7 +235,7 @@ node tools/domcheck/check-meld-dom.mjs      # 暗杠只亮一张、其余三张�
 - [ ] 定缺：选定后，缺门牌没打完之前只能打缺门牌
 - [ ] 行牌：轮到自己时点手牌即出牌，别的玩家手牌看不到
 - [ ] 碰 / 直杠 / 暗杠 / 补杠 / 点炮胡 / 自摸胡：出现操作按钮时点击生效
-- [ ] 单局结算浮层显示分数变化
+- [ ] 单局结算：牌桌上弹出四个数字（3 秒后自动开下一小局，不展示牌型）
 - [ ] 打满 8 局 → 整场结算
 - [ ] **四个人把分加起来等于 0**（零和，这是最该核对的数字）
 - [ ] 战绩里能看到这一场

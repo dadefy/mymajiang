@@ -31,11 +31,12 @@ export interface RealtimeOptions {
   playTimeoutMs?: number;
   claimTimeoutMs?: number;
   /**
-   * 一局打完到开下一局之间的**停留**（毫秒），默认 5000。
+   * 一小场打完到开下一小场之间的**停留**（毫秒），默认 3000。
    *
-   * 留这段时间是给四家看清结算：不加停留时，服务端在同一轮广播里就开了下一局，
-   * 局间只有几十毫秒 —— 结算界面（含四家牌面）几乎没人看得见。
-   * 设 0 表示立刻开下一局（测试用，避免每个跨局用例白等 5 秒）。
+   * 留这段时间只是给四家看清「这一小场各赢输多少」那四个数字 ——
+   * 不加停留时服务端在同一轮广播里就开了下一小场，局间只有几十毫秒，数字一闪而过。
+   * 3 秒是玩法定的（客户端那边也靠这个数决定数字什么时候收）。
+   * 设 0 表示立刻开下一小场（测试用，避免每个跨局用例白等 3 秒）。
    */
   interRoundPauseMs?: number;
   /** 快照落盘的最小间隔（毫秒）。同一时间窗内的多次行动合并成一次写；默认 2000。 */
@@ -245,7 +246,7 @@ function buildRealtimeServer(
   const playTimeoutMs = options.playTimeoutMs ?? 15_000;
   const claimTimeoutMs = options.claimTimeoutMs ?? 8_000;
   /** 局间停留：一局打完到开下一局之间留给结算展示的时间。 */
-  const interRoundPauseMs = options.interRoundPauseMs ?? 5_000;
+  const interRoundPauseMs = options.interRoundPauseMs ?? 3_000;
   /** 每个进行中对局的"局间停留"定时器。至多一个 —— 它同时是 reentry 的保护。 */
   const interRoundTimers = new Map<ActiveMatch, ReturnType<typeof setTimeout>>();
   /** 快照落盘的最小间隔；一个时间窗内的多次行动合并成一次写。 */

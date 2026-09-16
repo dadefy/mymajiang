@@ -108,26 +108,17 @@ export function seatScores(
 }
 
 /**
- * 那一排分数：四家并排、数字放大。
+ * 整局结算记录里那一排分数：四家并排、**整局累计**当大字、本小场当副行，再带上账号入账。
  *
- * 玩法上它是结算界面的第一信息 —— 玩家第一眼要找的就是「这一小场（或这一整局）谁赢了多少」。
- * 早先分数混在下面每家的文字行里（「张三 · 已胡 赢 +6 分 · 自摸 平胡」），
- * 四家要一行行读完才知道输赢。
- *
- * `primary` 决定那个大字是**本小场**的变化（小场弹窗）还是**整局累计**（结算记录）：
- * 两处的第一信息不同。另一个数当小字跟在下面。
- *
- * `showAccount` 只在整局结算时打开：打的过程中账号积分还没变（要等结算才入账），
- * 那时把「入账」摆出来会让人以为分已经进账号了。
+ * 只给整局结算记录用。一小场那一屏**不用它**：那一屏是「在牌桌上弹 3 秒」的四个数字，
+ * 有自己的紧凑排法（见 `round-result.ts`）—— 这里这套带副行与账号的排法在小场那屏
+ * 既挤（3 秒看不完）又容易误解（账号分那时还没变）。
  *
  * **样式内联**：这份面板是 `/multi` 与 `/debug` 共用的，而两个页面各有一套自己的样式表
  * （`/debug` 根本没装牌桌那份 `installTableLayout`）—— 靠外部 class 的话
  * `/debug` 上会退化成没有边框、字号大小不分的裸文本。
  */
-export function scoreBoard(
-  scores: readonly SeatScore[],
-  options: { primary: "round" | "match"; showAccount: boolean },
-): HTMLElement {
+export function matchScoreBoard(scores: readonly SeatScore[]): HTMLElement {
   const board = element("div");
   board.className = "score-board";
   board.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0 16px";
@@ -141,22 +132,21 @@ export function scoreBoard(
     name.style.cssText = "font-size:13px;color:#b9c9bd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
     cell.append(name);
 
-    const main = options.primary === "match" ? score.matchDelta : score.delta;
+    const main = score.matchDelta;
     const value = element("div", { className: "score-value", text: signedOr(main) });
     value.style.cssText = `font-size:clamp(24px,3.4vw,46px);font-weight:800;line-height:1.2;font-variant-numeric:tabular-nums;color:${main === undefined ? "#c5d7cd" : scoreColor(main)}`;
-    value.setAttribute("aria-label", `${score.name} ${options.primary === "match" ? "本场累计" : "本小场"} ${signedOr(main)} 分`);
+    value.setAttribute("aria-label", `${score.name} 本场累计 ${signedOr(main)} 分`);
     cell.append(value);
 
-    // 副行放另一个口径的数：小场弹窗里是「本场累计」，结算记录里是「本小场」。
-    if (options.primary === "match") {
-      if (score.delta !== undefined) {
-        cell.append(line("score-round", `本小场 ${signed(score.delta)}`, scoreColor(score.delta)));
-      }
-    } else if (score.matchDelta !== undefined) {
-      cell.append(line("score-total", `本场累计 ${signed(score.matchDelta)}`, scoreColor(score.matchDelta)));
+    // 副行是**本小场**（最后一小场）：大字是整局累计，与前面每小场弹的数字口径不同，
+    // 不写出来玩家会拿它去对上一屏，然后以为数字算错了。
+    if (score.delta !== undefined) {
+      cell.append(line("score-round", `本小场 ${signed(score.delta)}`, scoreColor(score.delta)));
     }
 
-    if (options.showAccount && (score.accountDelta !== undefined || score.balance !== undefined)) {
+    // 账号这一行只在整局结算时存在（`accountDelta` / `balance` 只有那一帧才下发）：
+    // 打的过程中账号积分还没变，把「入账」摆出来会让人以为分已经进账号了。
+    if (score.accountDelta !== undefined || score.balance !== undefined) {
       // 只有入账分与累计分不一样时才点明「结算」——否则一排数字里全是重复值，反而看不清。
       const paid = score.accountDelta !== undefined && score.accountDelta !== score.matchDelta
         ? `入账 ${signed(score.accountDelta)} · `

@@ -1,18 +1,19 @@
 /**
- * 打一局到结算，看**结算界面上到底显示了什么**。
+ * 真打完一小场，看**牌桌上到底弹了什么出来**。
  *
- * 验两件事：
- *   ① 胡牌类型（番型明细）—— 玩家要能看出是清一色还是对对胡；
- *   ② 是谁给的牌 —— 点炮时指明放炮者与那张牌，自摸时写「自摸」。
+ * 按玩法，一小场结束时只做一件事：在牌桌上弹一下四家的得失分，停留一会儿就开下一小场。
+ * 所以这条探针要守住的是**它不做什么**：
+ *   * 不弹面板、不压遮罩（不是 `position:fixed` 的大浮层）；
+ *   * 不展示牌型、不亮四家手牌与副露、不列玩家明细；
+ *   * 不用玩家按任何按钮（数字到点自己收）。
+ * 这些取舍全在渲染层，而且帧里**照样带着** `wins` 与四家手牌 ——
+ * 单测与构造帧的离线探针都只能证明「该画的画了」，证明不了「不该画的没画」。
+ * 这里跑的是真对局、真帧。
  *
- * `FULL_MATCH=1` 再往前推一步：**一直打到整局结算**（8 小场打完、按掉最后一屏），
+ * `FULL_MATCH=1` 再往前推一步：**一直打到整局结算**（8 小场打完），
  * 验结算记录顶部的「开始时间 / 耗时」与下面那四行玩家明细
  * （头像 + 昵称 + 10 位 id 号 + 本局积分变化 + 入账后的账号余额）。
- * 默认不打开（打满 8 小场要几分钟），但**改整局结算那条路径时必须跑一次**：
- * 那一屏的数据只有真打完一整局才存在，离线探针用的是构造帧，覆盖不了这一跳。
- *
- * 单测只能证明文案拼接对；证明不了「结算面板真的把它画出来了」——
- * 少一个 append、旧的结算实现把面板整个换掉，单测照样全绿。
+ * 默认不打开（打满 8 小场要几分钟），但**改整局结算那条路径时必须跑一次**。
  */
 import { JSDOM } from "jsdom";
 
@@ -22,12 +23,8 @@ const MODULE = new URL("../../apps/client/dist/browser/multi-client.js", import.
 const KEYS = (process.env.KEYS ?? "").split(",").map((each) => each.trim()).filter(Boolean);
 const SECONDS = Number(process.env.SECONDS ?? 120);
 /**
- * `FULL_MATCH=1` 时**一直打到整局结算**（8 小场打完、按掉最后一屏），
- * 并断言结算记录顶部的「开始 / 耗时」与下面四行玩家明细。
- *
- * 默认不打开：打满 8 小场要几分钟，日常改结算文案时跑一小场就够。
- * 但「四行明细」只在整局结算这一个时刻有数据（头像与 id 在房间成员上、
- * 入账分与余额要等 `finalize()` 写完账号），所以**改那条路径必须跑一次 FULL_MATCH**。
+ * `FULL_MATCH=1` 时一直打到整局结算并验那一屏。默认只打一小场 ——
+ * 日常改小场那屏的文案时不用等几分钟。
  */
 const FULL = process.env.FULL_MATCH === "1";
 
@@ -67,20 +64,46 @@ const clickAll = (labels) => {
   return count;
 };
 
-/** 结算面板上「胡了什么」的那些行。 */
-const winSummaries = () => [...document.querySelectorAll(".win-summary")].map((node) => node.textContent ?? "");
-/** 结算面板里每位玩家的行（含自家「怎么胡的」）。 */
-const playerRows = () => [...document.querySelectorAll(".result-player p")].map((node) => node.textContent ?? "");
-/** 弹窗顶上那一排四家分数：本小场的变化，按座位排。 */
-const scoreValues = () => [...document.querySelectorAll("#center .score-value")].map((node) => node.textContent.trim());
-/** 弹窗标题：「第 N/8 小场结束 · 三家胡」。 */
-const panelTitle = () => document.querySelector("#center h2")?.textContent?.trim() ?? "";
-/** 弹窗上那个按钮：最后一小场的是「看本局结算」，其余是「继续」。 */
-const panelButton = () => document.querySelector("#center .panel > button")?.textContent?.trim() ?? "";
+/** 牌桌上弹出来的那一块在不在。 */
+const popVisible = () => document.querySelector("#center .round-pop") !== null;
+/** 那一块的标题：「第 3/8 小场」。 */
+const popTitle = () => document.querySelector("#center .round-pop-title")?.textContent?.trim() ?? "";
+/** 那一块里的四家得失分（本小场），按座位排。 */
+const popValues = () => [...document.querySelectorAll("#center .round-pop .score-value")].map((node) => node.textContent.trim());
+/**
+ * 这一屏**不该**出现的东西。命中就报出来 —— 「不该画的没画」才是这条探针的重点。
+ *
+ * ⚠️ 判据要**限定在那一块里面**（`#center .round-pop <selector>`）：
+ * 牌桌本身的副露也是 `.meld-group`，拿全局选择器会把牌桌上的正常副露误判成「结算屏亮了牌」
+ * （实机踩到过）。
+ *
+ * `.score-total` / `.score-account` 是整局结算记录那套（本场累计 / 账号入账）；
+ * `.win-summary` / `.result-player` / `.meld-group` 是牌型与牌面；
+ * 最后两条守的是「不是面板、也不用按按钮」—— 旧版是 `.panel` 的大浮层加一颗「继续」。
+ * 按钮**不能**写成 `#center button`：牌桌上的操作按钮也在 `#center` 里，会误伤。
+ */
+const FORBIDDEN = [
+  ["牌型/胡牌说明", ".win-summary"],
+  ["玩家明细行", ".result-player"],
+  ["四家牌面与副露", ".meld-group"],
+  ["本场累计那一行", ".score-total"],
+  ["账号入账那一行", ".score-account"],
+];
+const forbiddenOnPop = () => [
+  ...FORBIDDEN
+    .map(([label, selector]) => [label, document.querySelectorAll(`#center .round-pop ${selector}`).length])
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => `${label}(${count})`),
+  // 整屏浮层与它里面那颗按钮：旧版是 `.panel` + 「继续 / 看本局结算」。
+  ...(document.querySelectorAll("#center .panel").length > 0 ? ["结算面板"] : []),
+  ...(document.querySelectorAll("#center .round-pop button").length > 0 ? ["那一块里的按钮"] : []),
+];
+
 /** 整局结算记录顶部的「开始 … 耗时 …」。 */
 const matchTime = () => document.querySelector("#center .match-time")?.textContent?.trim() ?? "";
 /** 整局结算记录下面那四行玩家明细（头像 + 昵称 + 10 位 id 号 + 本局积分变化 + 入账余额）。 */
 const matchRows = () => [...document.querySelectorAll("#center .match-player-row")].map((row) => ({
+  title: document.querySelector("#center h2")?.textContent?.trim() ?? "",
   name: row.querySelector(".match-player-name")?.textContent?.trim() ?? "",
   id: row.querySelector(".match-player-id")?.textContent?.trim() ?? "",
   delta: row.querySelector(".match-player-delta")?.textContent?.trim() ?? "",
@@ -92,28 +115,19 @@ let captured = null;
 let matchCaptured = null;
 const until = Date.now() + SECONDS * 1000;
 while (Date.now() < until) {
-  // 打满 8 小场后，最后一小场那一屏的按钮变成「看本局结算」——**必须按掉它**，
-  // 否则整局结算记录按设计就不会出现（两屏不能同时压上来，见 match-result.ts）。
-  if (panelButton() === "看本局结算") {
-    document.querySelector("#center .panel > button").click();
-    await sleep(50);
+  // 一小场那屏只存在几秒（服务端给的停留时长），抓到的第一份就是它。
+  if (captured === null && popVisible()) {
+    captured = { title: popTitle(), scores: popValues(), forbidden: forbiddenOnPop() };
   }
 
-  // 整局结算记录（只有 FULL_MATCH=1 才走得到）。
+  // 整局结算记录：数字放完之后**自动**出现，不用按任何东西（只有 FULL_MATCH=1 才走得到）。
   if (matchCaptured === null && document.querySelector("#center .match-player-row")) {
-    matchCaptured = { title: panelTitle(), time: matchTime(), rows: matchRows() };
-    if (FULL) break;
+    matchCaptured = { time: matchTime(), rows: matchRows(), popLeftOver: popVisible() };
+    break;
   }
+  if (!FULL && captured !== null) break;
 
   const meta = metaText();
-  // 本小场一结束就抓一次（面板只在结算那一刻存在）。**抓到有胡牌行的那一次就冻结**：
-  // 往后整局结算记录里也含「本局结束」这几个字，不冻结就会被覆盖成一份空的。
-  const summaries = winSummaries();
-  if (summaries.length > 0 || (captured === null && meta.includes("本局结束"))) {
-    captured = { summaries, rows: playerRows(), meta, scores: scoreValues(), title: panelTitle() };
-  }
-  if (!FULL && summaries.length > 0) break;
-
   if (meta.includes("换三张")) clickAll(["自动"]);
   else if (meta.includes("定缺")) clickAll(["自动"]);
   else if (meta.includes("行牌")) {
@@ -129,17 +143,13 @@ while (Date.now() < until) {
   await sleep(50);
 }
 
-console.log("=== 结算界面上的胡牌说明 ===");
+console.log("=== 一小场结束时牌桌上弹出的那一块 ===");
 if (!captured) {
-  console.log("  （采样期间没走到结算）");
+  console.log("  （采样期间没走到小场结算）");
 } else {
-  for (const line of captured.summaries) console.log(`  ${line}`);
-  if (captured.summaries.length === 0) console.log(`  （没有 .win-summary 行；阶段文本：${captured.meta}）`);
-  console.log("\n=== 结算面板里每位玩家那一行 ===");
-  for (const line of captured.rows) console.log(`  ${line}`);
-  console.log("\n=== 顶上那排四家分数（本小场）===");
-  console.log(`  标题：${captured.title || "（没有 h2）"}`);
+  console.log(`  标题：${captured.title || "（空）"}`);
   console.log(`  四个数字：${captured.scores.join("　") || "（一个都没有）"}`);
+  console.log(`  不该出现的：${captured.forbidden.join("、") || "（都没有 ✓）"}`);
 }
 
 if (FULL) {
@@ -147,7 +157,6 @@ if (FULL) {
   if (!matchCaptured) {
     console.log("  （采样期间没打到整局结算）");
   } else {
-    console.log(`  标题：${matchCaptured.title}`);
     console.log(`  时间：${matchCaptured.time}`);
     for (const row of matchCaptured.rows) {
       console.log(`  ${row.name} ｜ ${row.id} ｜ ${row.delta} ｜ ${row.account} ｜ 头像 ${row.avatars}`);
@@ -157,33 +166,32 @@ if (FULL) {
 
 const failures = [];
 if (crashes.length > 0) failures.push(...crashes);
-if (!captured) failures.push("采样期间没走到结算，无法验证");
-else if (captured.summaries.length === 0) failures.push("结算界面上没有「胡牌类型 / 谁给的牌」那一块");
+if (!captured) failures.push("采样期间没走到小场结算，无法验证");
 else {
-  for (const line of captured.summaries) {
-    if (!/番/.test(line)) failures.push(`缺番型：${line}`);
-    if (!/(自摸|打出的|抢杠)/.test(line)) failures.push(`没写清怎么胡的、谁给的牌：${line}`);
-  }
-  // 顶上那排分数：真实对局里也要画出来，而且是**零和**的四个数。
-  // 单测与离线探针都覆盖不到这里 —— 它们用的是构造出来的帧，这条走的是真结算。
+  if (!/^第 \d+\/8 小场$/.test(captured.title)) failures.push(`弹出的那一块没写清是第几小场：${captured.title || "（空）"}`);
+  // 真实对局里也要画出来，而且是**零和**的四个数。
   if (captured.scores.length !== 4) {
-    failures.push(`结算弹窗里应有四家分数，实际 ${captured.scores.length} 个`);
+    failures.push(`牌桌上应弹四家分数，实际 ${captured.scores.length} 个`);
   } else {
     const total = captured.scores.reduce((sum, text) => sum + Number(text), 0);
     if (!Number.isFinite(total)) failures.push(`分数不是数字：${captured.scores.join("　")}`);
     else if (total !== 0) failures.push(`四家分数不是零和：${captured.scores.join("　")}（合计 ${total}）`);
   }
-  if (!/^第 \d+\/8 小场结束/.test(captured.title)) failures.push(`弹窗标题没写清是第几小场：${captured.title}`);
+  if (captured.forbidden.length > 0) {
+    failures.push(`小场这一屏不该出现这些：${captured.forbidden.join("、")}`);
+  }
 }
 
-// 整局结算记录：只有 FULL_MATCH=1 才验。这一屏的四行明细**只在整局结算那一刻**有数据
+// 整局结算记录：只有 FULL_MATCH=1 才验。这一屏的数据**只有打满 8 小场那一刻**才有
 // （头像与 id 在房间成员上、入账分与余额要等 `finalize()` 写完账号），
-// 而且是「真打完 8 小场」才走得到 —— 离线探针用的是构造帧，覆盖不了这一跳。
+// 构造帧的离线探针覆盖不了这一跳。
 if (FULL) {
   if (!matchCaptured) {
     failures.push("采样期间没打到整局结算，无法验证四行明细");
   } else {
-    if (!/^本局结算记录/.test(matchCaptured.title)) failures.push(`结算记录标题不对：${matchCaptured.title}`);
+    const title = matchCaptured.rows[0]?.title ?? "";
+    if (!/^本局结算记录/.test(title)) failures.push(`结算记录标题不对：${title}`);
+    if (matchCaptured.popLeftOver) failures.push("结算记录出来时，小场那一屏还没退场");
     if (!/^开始 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(matchCaptured.time)) {
       failures.push(`结算记录顶部没写开始时间：${matchCaptured.time || "（空）"}`);
     }
@@ -203,7 +211,9 @@ if (FULL) {
 
 console.log("");
 if (failures.length === 0) {
-  console.log("结论：结算界面显示了胡牌类型与「谁给的牌」");
+  console.log(FULL
+    ? "结论：一小场只在牌桌上弹四个数字（无面板、无牌型牌面、无按钮），放完自动出整局结算记录（时间 + 四行明细）"
+    : "结论：一小场只在牌桌上弹四个数字（无面板、无牌型牌面、无按钮）");
 } else {
   console.log("结论：有问题");
   for (const line of failures) console.log(`  · ${line}`);

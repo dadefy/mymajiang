@@ -49,6 +49,11 @@ export class RoomPage {
   /** 整局结算的「开始时间 · 耗时」那行；只有整局结算才有内容，其余时候隐藏。 */
   private readonly resultTime: Laya.Label;
   private readonly resultBody: Laya.Box;
+  /** 一小场结束时**弹在牌桌上**的那一小块：只报四家的本小场得失分。 */
+  private readonly roundPop: Laya.Box;
+  private readonly roundPopTitle: Laya.Label;
+  private readonly roundPopBody: Laya.Label;
+  private readonly roundPopFoot: Laya.Label;
   private roomId = "";
   /** 6 位房间号：给玩家看、让玩家转述的那串。快照回来之前可能还不知道。 */
   private roomNo = "";
@@ -58,7 +63,17 @@ export class RoomPage {
   private lastResult: RoomResult | null = null;
   private lastMatchResult: MatchResult | null = null;
   private resultDismissed = false;
+  /**
+   * 一小场那屏数字要显示到什么时候（本地时刻，null = 没有时限）。
+   *
+   * 由服务端下发的停留时长换算而来（见 `roundPopUntil`）。打满 8 小场时**没有**下一小场，
+   * 但那一屏仍要放满停留时长再交接给整局结算记录 —— 所以这个值在 `match-finished` 之后
+   * 依然有效，不能顺手清掉。
+   */
+  private popUntil: number | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** 一小场那屏数字到点自己收的定时器（到点重画一次，好交接给整局结算记录）。 */
+  private popTimer: ReturnType<typeof setTimeout> | null = null;
   private selectedIndexes = new Set<number>();
   private handSignature = "";
   private actionLocked = false;
@@ -100,6 +115,18 @@ export class RoomPage {
     this.resultTime.pos(0, 70);
     this.resultTime.visible = false;
     this.resultBody = box(this.resultOverlay, 25, 100, 650, 840);
+    // 一小场那屏：**压在牌桌正中**的一小块，不是整屏浮层 —— 牌桌一直看得见，
+    // 也点不到任何按钮，3 秒（服务端给的停留时长）后自己收掉。
+    // 只有四行「号位 + 昵称 + 得失分」，牌型与牌面按玩法都不在这屏出现。
+    this.roundPop = box(this.view, 55, 600, 640, 260, THEME.panelBg2);
+    this.roundPopTitle = label(this.roundPop, "", 26, { width: 640, align: "center", color: THEME.accent });
+    this.roundPopTitle.pos(0, 14);
+    // 四家各一行（用显式换行而不是自动折行：四家的行数固定，自动折行反而会因昵称长度跑版）。
+    this.roundPopBody = label(this.roundPop, "", 34, { width: 640, align: "center", wordWrap: true, bold: true });
+    this.roundPopBody.pos(0, 56);
+    this.roundPopFoot = label(this.roundPop, "", 20, { width: 640, align: "center" });
+    this.roundPopFoot.pos(0, 222);
+    this.roundPop.visible = false;
     textButton(this.resultOverlay, "继续", 225, 980, 250, 70, THEME.accentDark, () => {
       this.resultDismissed = true;
       this.resultOverlay.visible = false;
@@ -128,6 +155,7 @@ export class RoomPage {
     if (screen.lastResult && screen.lastResult !== this.lastResult) this.resultDismissed = false;
     this.lastResult = screen.lastResult;
     this.lastMatchResult = screen.lastMatchResult;
+    this.popUntil = screen.roundPopUntil;
     this.renderAll(screen.notice);
     this.schedulePolling();
   }
@@ -310,24 +338,67 @@ export class RoomPage {
   }
 
   private renderResult(): void {
-    // 新一局已经开始（`this.match` 非空）就收起浮层。
-    // 服务端一局结束后会**立刻**开下一局，所以 `lastResult` 在新局里依然有值 ——
-    // 只看它会让上一局的结算一直压在新牌局上面（两个浏览器客户端同一处坑）。
-    if (!this.lastResult || this.resultDismissed || this.match !== null) {
+    const result = this.lastResult;
+    // 新一局已经开始（`this.match` 非空）就收掉。服务端一小场结束后会**立刻**开下一小场，
+    // 所以 `lastResult` 在新局里依然有值 —— 只看它会让上一小场那屏一直压在新牌局上面
+    // （两个浏览器客户端同一处坑）。
+    const live = result !== null && !this.resultDismissed && this.match === null;
+
+    // ---- 一小场那一屏：**弹在牌桌上**，只报四家的得失分 ----
+    // 牌型、四家牌面、胡牌明细都不在这屏出现（按玩法），也不用玩家按任何东西：
+    // 到点（服务端给的停留时长）自己收，随后开下一小场。
+    if (live && result && this.lastMatchResult === null) {
+      const left = this.popUntil === null ? null : this.popUntil - Date.now();
+      if (left !== null && left <= 0) {
+        // 时限到了（下一小场马上就来）：收掉，别再画。
+        this.roundPop.visible = false;
+        return;
+      }
+      this.roundPopTitle.text = roundLabel(result.roundNumber ?? 1, result.totalRounds);
+      // 四家按座位排：`deltas` 是服务端按座位顺序下发的，没有 `players` 时按下标兜底
+      // （与下面整局结算那一屏同一套兜底写法）。
+      const rows: NonNullable<RoomResult["players"]> = result.players
+        ?? result.deltas.map<NonNullable<RoomResult["players"]>[number]>((entry, seat) => ({ playerId: entry.playerId, seat, won: false, hand: [], melds: [] }));
+      this.roundPopBody.text = [...rows]
+        .sort((left0, right) => left0.seat - right.seat)
+        .map((player) => {
+          const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
+          const name = this.snapshot?.players.find((entry) => entry.userId === player.playerId)?.nickname ?? `${player.seat} 号位`;
+          return `${player.seat} 号位 ${name}  ${fmtDelta(delta)}`;
+        })
+        .join("\n");
+      this.roundPopFoot.text = left === null ? "" : `${Math.ceil(left / 1000)} 秒后开始下一小场`;
+      this.roundPop.visible = true;
+      this.resultOverlay.visible = false;
+      // 到点重画一次：打满 8 小场时那一刻要接着显示整局结算记录，
+      // 而服务端在那之后**已经不再发任何帧**（这里不像两个浏览器客户端那样
+      // 能等到新一局的 `game` 帧把手，所以必须自己定个闹钟）。
+      if (left !== null) {
+        if (this.popTimer !== null) clearTimeout(this.popTimer);
+        this.popTimer = setTimeout(() => {
+          this.popTimer = null;
+          this.renderResult();
+        }, left + 40);
+      }
+      return;
+    }
+    if (this.popTimer !== null) {
+      clearTimeout(this.popTimer);
+      this.popTimer = null;
+    }
+    this.roundPop.visible = false;
+
+    const settled = this.lastMatchResult;
+    if (!live || result === null || settled === null) {
       this.resultOverlay.visible = false;
       return;
     }
-    // 标题分两种：还在一整局里时这是**一小场**的分数（账号积分不动）；
-    // 打满 8 小场之后同一个浮层变成整局结算记录（账号积分正是在那一刻入账的）。
-    this.resultTitle.text = this.lastMatchResult
-      ? `本局结算记录 · 打满 ${this.lastMatchResult.completedRounds} 小场`
-      : `${roundLabel(this.lastResult.roundNumber ?? 1, this.lastResult.totalRounds)}结束`;
-    // 「开始时间 · 耗时」只有整局结算才有 —— 一小场结束时不存在「本场耗时」这回事。
-    // 文案与两个浏览器客户端共用一份（`matchTimeText` 收在 client 包里），
+
+    // ---- 整局结算记录（打满 8 小场 / 中途解散）----
+    this.resultTitle.text = `本局结算记录 · 打满 ${settled.completedRounds} 小场`;
+    // 「开始时间 · 耗时」。文案与两个浏览器客户端共用一份（`matchTimeText` 收在 client 包里），
     // 时间戳缺任一个时它返回 null，这里就整行隐藏。
-    const time = this.lastMatchResult
-      ? matchTimeText(this.lastMatchResult.startedAt, this.lastMatchResult.finishedAt)
-      : null;
+    const time = matchTimeText(settled.startedAt, settled.finishedAt);
     this.resultTime.text = time ?? "";
     this.resultTime.visible = time !== null;
     this.resultBody.removeChildren();
@@ -341,7 +412,6 @@ export class RoomPage {
       winY += 46;
     }
     const nickOf = (userId: string): string => this.snapshot?.players.find((player) => player.userId === userId)?.nickname ?? userId;
-    const result = this.lastResult;
     const players: NonNullable<RoomResult["players"]> = result.players ?? result.deltas.map<NonNullable<RoomResult["players"]>[number]>((entry, seat) => ({ playerId: entry.playerId, seat, won: false, hand: [], melds: [] }));
     const rowsTop = winY + 13;
     players.forEach((player, index) => {
@@ -349,7 +419,7 @@ export class RoomPage {
       const y = rowsTop + index * 190;
       // 整局结算那一侧的行数据（服务端按座位拼好的）：头像、昵称、10 位 id 号、
       // 实际入账分与入账后余额都在这里。一小场结束时没有这一份。
-      const settledPlayer = this.lastMatchResult?.players?.find((entry) => entry.playerId === player.playerId);
+      const settledPlayer = settled.players?.find((entry) => entry.playerId === player.playerId);
       // 这一行有两个数，别混：`delta` 是本小场，`cumulative` 是整局累计（头像下显示的那个）。
       const cumulative = player.matchDelta;
       const total = cumulative === undefined ? "" : ` · 本场累计 ${fmtDelta(cumulative)}`;

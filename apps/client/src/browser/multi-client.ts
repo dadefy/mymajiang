@@ -2,7 +2,7 @@ import { DiscardSelection } from "./discard-selection.js";
 import { playerProfile } from "./player-profile.js";
 import { installTableLayout } from "./table-layout.js";
 import { SwapSelection } from "./swap-selection.js";
-import { roundResultPanel, isRoundResultDismissed } from "./round-result.js";
+import { roundScorePop } from "./round-result.js";
 import { matchResultPanel } from "./match-result.js";
 import { ApiClient } from "../api-client.js";
 import { ClientFlow, type Screen } from "../flow.js";
@@ -10,7 +10,7 @@ import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js"
 import { button, element } from "./dom.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { roundLabel, roundResultText, winLines } from "./result-text.js";
+import { roundLabel, roundResultText } from "./result-text.js";
 import { nicknameOf, resolveSeat, sortedHand } from "./table-order.js";
 import { discardGroups, freshDiscardSeat } from "./tile-view.js";
 import { meldBox, tileChip } from "./tile-chips.js";
@@ -429,17 +429,25 @@ function renderCenter(): void {
   // 所以客户端的 `match` 永远停在结束**之前**的状态，那个判据一次都不会成立
   // （表现就是结算浮层压根不渲染，像「结算功能消失了」）。
   const roundOver = match === null || seats.some((seat) => roomOf(seat)?.roundFinished === true);
-  if (result && roundOver) {
-    // 倒计时的目标时刻取自任一连接（四条连接收的是同一份结算）。
-    const nextRoundAt = seats.map((seat) => roomOf(seat)?.nextRoundAt ?? null).find((each) => each !== null) ?? null;
-    // 两件事按顺序发生，不能同时压上来：一小场结束弹的是**那一小场**的分数，
-    // 打满 8 小场之后才出整局结算记录（账号积分正是在后者的那一刻改的）。
-    // 所以最后一小场的弹窗按掉之后，这一块换成结算记录。
-    centerHost.append(matchResult && isRoundResultDismissed(result)
-      ? matchResultPanel(matchResult, snapshot, result, scheduleRender)
-      : roundResultPanel(result, snapshot, nextRoundAt, scheduleRender));
+  // 这一小场那屏数字还该显示吗。
+  //
+  // 显示到 `roundPopUntil` 为止（服务端给的停留时长，玩法是 3 秒）—— 到点自动收，
+  // 不需要玩家按任何东西。没有时限（不停留、或对着不下发时长的旧服务端）就一直显示到
+  // 新一局的 `game` 帧把 `roundOver` 清掉。
+  //
+  // ⚠️ `roundPopUntil` 在 `match-finished` 之后**仍然有值**（flow 有意不清它）：
+  // 打满 8 小场时没有下一小场，但最后一小场那屏仍要放满 3 秒，之后才交接给结算记录 ——
+  // 它得知道那是什么时候。时限取四条连接里任一非空值（四家收的是同一份结算）。
+  const popUntil = seats.map((seat) => roomOf(seat)?.roundPopUntil ?? null).find((each) => each !== null) ?? null;
+  const popping = result !== null && roundOver && (popUntil === null || Date.now() < popUntil);
+  if (popping && result) {
+    // 只在牌桌上弹四个数字，不弹面板、不亮牌、不写牌型（见 `round-result.ts`）。
+    // `onExpire` 让到点时重画一次 —— 打满 8 小场那一刻要接着显示整局结算记录，
+    // 而服务端在那之后已经不再发任何帧。
+    centerHost.append(roundScorePop(result, snapshot, popUntil, scheduleRender));
   } else if (matchResult) {
-    // 万一没收到最后一小场的结算帧（例如中途解散），结算记录也要单独出得来。
+    // 打满 8 小场：3 秒数字放完才出结算记录（账号积分正是在这一刻改的）。
+    // 万一没收到最后一小场的结算帧（例如中途解散），这一条也要能单独出得来。
     centerHost.append(matchResultPanel(matchResult, snapshot, result, scheduleRender));
   }
 
@@ -463,13 +471,11 @@ function renderCenter(): void {
   centerHost.append(discardGrid(match, snapshot));
   centerHost.append(tableHub(match, roundOver));
 
-  // 浮层退场（新一局已经开始）之后留一行摘要：番型与「谁给的牌」不该因为下一局开始
-  // 就凭空消失。局间走的是上面的浮层分支，所以这里只在**局中**显示。
+  // 那一屏数字退场（新一局已经开始）之后留一行摘要：这一小场谁赢谁输不该凭空消失。
+  // 局间走的是上面的数字分支，所以这里只在**局中**显示。
+  // 牌型与四家牌面按要求不在小场这一屏出现（`#center>.hint` 在牌桌布局里本来也是隐藏的）。
   if (result && !roundOver) {
     centerHost.append(element("p", { className: "hint", text: roundResultText(result, snapshot) }));
-    for (const line of winLines(result, snapshot)) {
-      centerHost.append(element("p", { className: "hint", text: line }));
-    }
   }
 }
 
