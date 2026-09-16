@@ -281,12 +281,45 @@ export class ClientFlow {
     await this.enterHome(this.meOrFail());
   }
 
+  /**
+   * 重拉当前房间快照。
+   *
+   * 等待期的「谁准备了 / 谁刚加入」只能靠它刷新 —— 实时通道目前只推对局帧
+   * （`game` / `actions`），不推房间成员变化（见 `PROJECT_STATUS` 4.22）。
+   * 渲染层可以定时调它（LayaAir 的房间页就是这么做的），
+   * 而准备 / 开局这类自己发起的动作则应当**调完立刻拉一次**，否则界面不变、看起来像没反应。
+   */
+  async refreshRoom(): Promise<void> {
+    if (this.screen.name !== "room") return;
+    const snapshot = await this.api.room(this.screen.roomId);
+    if (this.screen.name !== "room") return;
+    this.set({
+      ...this.screen,
+      snapshot: snapshot.ok ? snapshot.value : this.screen.snapshot,
+      ...(snapshot.ok ? {} : { notice: describe(snapshot.error) }),
+    });
+  }
+
   async setReady(ready: boolean): Promise<void> {
-    if (this.roomId) await this.api.setReady(this.roomId, ready);
+    if (this.roomId === null) return;
+    const result = await this.api.setReady(this.roomId, ready);
+    if (!result.ok) {
+      // 失败必须有反馈。之前这里是静默的，看起来就是「点了没反应」。
+      if (this.screen.name === "room") this.set({ ...this.screen, notice: describe(result.error) });
+      return;
+    }
+    await this.refreshRoom();
   }
 
   async startMatch(): Promise<void> {
-    if (this.roomId) await this.api.startMatch(this.roomId);
+    if (this.roomId === null) return;
+    const started = await this.api.startMatch(this.roomId);
+    if (!started.ok) {
+      // 开局失败最常见的原因是「还有人没准备」，得把服务端的话显示出来。
+      if (this.screen.name === "room") this.set({ ...this.screen, notice: describe(started.error) });
+      return;
+    }
+    await this.refreshRoom();
   }
 
   // ---------- 行牌：都走实时通道 ----------

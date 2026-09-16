@@ -620,4 +620,78 @@ describe("ClientFlow", () => {
     // 三次都没发过消息。
     expect(http.requests.some((request) => request.method === "POST" && request.path === "/v1/groups/g1/messages")).toBe(false);
   });
+
+  it("准备之后立刻重拉快照 —— 否则界面上看不出变化，像「点了没反应」", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+
+    // 快照里的 ready 由变量控制：准备前 false、准备后 true。
+    let ready = false;
+    http.on(
+      (request) => request.method === "POST" && request.path === "/v1/rooms",
+      () => ({ status: 201, body: { roomId: "room-1", status: "waiting" } }),
+    );
+    http.on(
+      (request) => request.method === "GET" && request.path === "/v1/rooms/room-1",
+      () => ({
+        status: 200,
+        body: {
+          roomId: "room-1",
+          ruleVersion: "MIANYANG_XZ_1_0",
+          status: "waiting",
+          ownerId: SESSION.userId,
+          completedRounds: 0,
+          players: [{
+            userId: SESSION.userId, nickname: "张三", points: 2000, ready,
+            connected: true, disconnectedAt: null, reconnectDeadline: null,
+          }],
+          result: null,
+        },
+      }),
+    );
+    http.onJson("POST", "/v1/rooms/room-1/ready", 200, { userId: SESSION.userId, ready: true });
+
+    await flow.createRoom();
+    const before = flow.current;
+    expect(before.name === "room" ? before.snapshot?.players[0]?.ready : null).toBe(false);
+
+    ready = true; // 服务端那边已经改了
+    await flow.setReady(true);
+
+    const after = flow.current;
+    expect(after.name).toBe("room");
+    if (after.name !== "room") return;
+    // 没有再拉一次的话这里仍是 false —— 用户看到的就是「点了没反应」。
+    expect(after.snapshot?.players[0]?.ready).toBe(true);
+  });
+
+  it("准备失败要提示，不能静默吞掉", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubRoom(http, "room-1");
+    await flow.createRoom();
+    http.onJson("POST", "/v1/rooms/room-1/ready", 409, { code: "ROOM_NOT_WAITING" });
+
+    await flow.setReady(true);
+
+    expect(flow.current).toMatchObject({ name: "room", notice: "操作失败（ROOM_NOT_WAITING）" });
+  });
+
+  it("开局失败要把服务端的话显示出来（最常见的是还有人没准备）", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubRoom(http, "room-1");
+    await flow.createRoom();
+    http.onJson("POST", "/v1/rooms/room-1/start", 409, { code: "NOT_ALL_READY" });
+
+    await flow.startMatch();
+
+    expect(flow.current).toMatchObject({ name: "room", notice: "操作失败（NOT_ALL_READY）" });
+  });
 });

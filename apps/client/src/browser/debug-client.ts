@@ -82,9 +82,25 @@ let selected: Tile[] = [];
 
 // ---------- 渲染 ----------
 
+/** 房间快照的轮询定时器：等待期的成员与准备变化不走实时通道，只能定时拉。 */
+let roomPollTimer: ReturnType<typeof setInterval> | undefined;
+
+/** 进房间开始轮询、离开房间停掉（LayaAir 那边的房间页也是这么做的）。 */
+function syncRoomPolling(inRoom: boolean): void {
+  if (inRoom && roomPollTimer === undefined) {
+    roomPollTimer = setInterval(() => { void flow.refreshRoom(); }, 2500);
+    return;
+  }
+  if (!inRoom && roomPollTimer !== undefined) {
+    clearInterval(roomPollTimer);
+    roomPollTimer = undefined;
+  }
+}
+
 function render(screen: Screen): void {
   app.replaceChildren();
   renderBar(screen);
+  syncRoomPolling(screen.name === "room");
   switch (screen.name) {
     case "key-entry": return renderKeyEntry(screen);
     case "profile": return renderProfile(screen);
