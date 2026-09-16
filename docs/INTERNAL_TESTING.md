@@ -289,6 +289,24 @@ node --env-file=.env scripts/acceptance.mjs
 都依赖标准 Web API，打包成原生 APK 时没有对应实现，会退化成「发不了图 / 录不了音」——
 不报错、不崩，但功能不可用。要上真机发图发语音，得补原生相册与录音桥接。
 
+**为什么录音在 WebView 里会必然失败（做 APK 之前先看这条）**：Android WebView
+**不允许从 `file://` 使用 `getUserMedia`**。这不是我们的代码问题，是 WebView 的限制 ——
+Google 官方的 PermissionRequest 示例正是为此改用内置的 `SimpleWebServer`，
+把 assets 从 `http://localhost` 提供。注意区别：W3C 的 Secure Contexts 规范其实把
+`file` 也算作 trustworthy，**是 WebView 自己额外禁止**，所以「按规范应该可以」的判断在这里不成立。
+
+也就是说，如果 APK 用「WebView 壳 + `file:///android_asset/www/index.html`」打包，
+录音会必然失败；而且要让它可用，下面四件事一件都不能少：
+
+1. 把页面从 **`http://localhost:<port>`**（内嵌一个极简静态服务器）或
+   **`https://appassets.androidplatform.net`**（AndroidX 的 `WebViewAssetLoader`）提供，
+   **不能是 `file://`** —— 这是前提，选图同理；
+2. 宿主 Activity 持有 `RECORD_AUDIO` 运行时权限（WebView 自己不弹系统权限框）；
+3. 重写 `WebChromeClient.onPermissionRequest` 并显式 `request.grant(...)`（默认是拒绝）；
+4. `settings.mediaPlaybackRequiresUserGesture = false`。
+
+第 1 条会直接决定 APK 的打包方式，**在动手之前就要定下来**。
+
 ---
 
 ## 十、LayaAir Web 版（可选，但更接近上线版本）

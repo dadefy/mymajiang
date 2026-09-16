@@ -1117,8 +1117,11 @@ pnpm --filter @mianyang-mahjong/server db:migrate
 19. 改服务端响应形状时，必须同步 `apps/client/src/protocol.ts` ——
     两端协议漂移要在编译与测试阶段暴露，不要等到联调。
 20. `apps/apk` 的渲染代码只订阅 `Screen` 与调用 `ClientFlow`，页面用 750×1334 设计分辨率
-    纯色块布局，不引入皮肤资源；等待期房间状态靠房间页轮询（见 4.22）。
+    **纯代码布局，不引入第三方 UI 皮肤**；等待期房间状态靠房间页轮询（见 4.22）。
     场景里 `Main` 组件如果丢失，把 `src/Main.ts` 拖到场景根节点即可。
+    **唯一的素材例外是 `assets/resources/tiles/` 的 27 张牌面**（见 4.23）。新增任何第三方素材
+    必须先登记 `docs/ASSETS.md`（来源、授权、下载日期、加工方式）——
+    它同时是上架合规的追溯台账，且 CC BY-SA 这类授权还带着署名义务。
 21. **群聊页面的一切都从 `chat` 这个 `Screen` 来**：渲染层不要自己去调 `ApiClient` 拉消息或订阅群，
     也不要自己维护一份消息数组 —— 那会和 `ClientFlow` 里的那份不一致，
     连「自己发的消息按 `messageId` 去重」都会失效。新增页面时记得同时在 `Screen` 加变体、
