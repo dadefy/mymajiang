@@ -245,7 +245,40 @@ describe("行牌与结算", () => {
     expect(reasons.has("wall-exhausted")).toBe(true);
     expect(eventTypes.has("win")).toBe(true);
     expect(eventTypes.has("kong")).toBe(true);
-    expect(eventTypes.has("flower_pig")).toBe(true);
+    // 这里原本断言的是 `flower_pig` —— 而那个断言**只有在回合轮转坏掉时才成立**：
+    // 轮转一坏，有人整局拿不到出牌机会，手里的缺门牌永远打不出去，流局时就成了花猪。
+    //
+    // 轮转修好之后，每个玩家每次出牌都被强制先打缺门；而流局的触发点是
+    // 「某人出完牌 → 下一家该摸牌时发现牌墙已空」，也就是那一刻**所有人都刚出过牌**，
+    // 因此结构上不可能有人还捏着缺门牌 —— 实测 200 局里花猪事件为 0。
+    // （真要对花猪做覆盖，得专门构造「刚摸到缺门牌牌墙就空」的状态，
+    //   靠随机对局是构造不出来的。）
+    //
+    // 改成断言查大叫事件，这也正是本用例名字里说的「流局产生查叫事件」。
+    expect(eventTypes.has("da_jiao")).toBe(true);
+  });
+
+  it("回合按座位顺序轮转：没有人被跳过，也没有人被卡住", () => {
+    // 回归测试。`advanceTurn` 曾经用 `handSize % 3 === 2`（14/11/8 张，正要出牌）
+    // 去**猜**刚行动的人，猜不到就兜底到庄家 —— 但它在出牌之后、下一家摸牌之前运行，
+    // 那时所有人都已出完牌、手上都是 13 张，没人满足条件，于是每轮都从庄家下家重来。
+    //
+    // 症状：整局只有一个人能出牌（实测 p0 出 55 次、另两家各 0 次），牌墙被一个人抽干，
+    // 300 局里 298 局以流局收场，听牌率仅 11.8%，自摸与点炮之比高达 764:6。
+    //
+    // 出牌次数不必严格相等 —— 碰/杠会让某家少摸几次牌，属正常再分配。
+    // 但「有人一次都没出过」和「一家独占大半出牌」都是轮转坏掉的铁证。
+    for (let seed = 1; seed <= 30; seed += 1) {
+      const game = playFullGame(seed);
+      const counts = game.players.map((player) => player.discards.length);
+      const total = counts.reduce((sum, count) => sum + count, 0);
+      expect(total, `seed=${seed} 一局总得有人出牌`).toBeGreaterThan(0);
+      expect(Math.min(...counts), `seed=${seed} 出牌次数 ${counts.join("/")}`).toBeGreaterThan(0);
+      expect(
+        Math.max(...counts),
+        `seed=${seed} 出牌次数 ${counts.join("/")}，某一家占了大半`,
+      ).toBeLessThanOrEqual(Math.ceil(total / 2));
+    }
   });
 
   it("种子相同牌局可完整复现（回放一致性）", () => {

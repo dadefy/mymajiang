@@ -638,8 +638,10 @@ export class MahjongGame {
     }
 
     // 全部过牌：轮到下一位未胡玩家摸牌。
+    // 出手人就是刚打牌的那位 —— 必须在 pendingDiscard 置空**之前**取出来。
+    const lastActorSeat = discard.fromSeat;
     this.pendingDiscard = null;
-    this.advanceTurn();
+    this.advanceTurn(lastActorSeat);
   }
 
   private nextSeat(from: number): number {
@@ -650,7 +652,22 @@ export class MahjongGame {
     throw new Error("No player left to act");
   }
 
-  private advanceTurn(): void {
+  /**
+   * 把回合交给 `fromSeat` 的下一顺位并让他摸牌。
+   *
+   * `fromSeat` 必须是**刚刚出牌的那一位**，由调用方直接给出。
+   * 这里曾经想自己「猜」：用一个 `handSize % 3 === 2`（即 14/11/8 张，正要出牌）
+   * 的谓词去找刚行动的人，猜不到就兜底到庄家。但本方法是在**出牌之后、
+   * 下一家摸牌之前**运行的 —— 那一刻所有人都已经出完牌、手上都是 13 张（13 % 3 === 1），
+   * 没有人满足条件，于是**每一轮都兜底回庄家**。
+   *
+   * 后果不是「轮转变慢」而是「轮转基本不转」：实测 300 局里有整局只有一个人出过牌
+   * （如 p0 出 55 次、另外两家 0 次），牌墙被一个人抽干，因此 99% 的局都以流局收场，
+   * 听牌率只有 11.8%，自摸与点炮之比高达 764:6。
+   *
+   * 猜不出来是因为**信息本来就有**，不该丢。见 `resolveClaims` 的调用处。
+   */
+  private advanceTurn(fromSeat: number): void {
     if (this.aliveWinners() >= 3) {
       this.finish("three-winners");
       return;
@@ -659,15 +676,11 @@ export class MahjongGame {
       this.settleDraw();
       return;
     }
-    const seat = this.nextSeat(this.lastActorSeat());
+    const seat = this.nextSeat(fromSeat);
     this.players[seat]!.hand.push(this.wall.shift()!);
     this.players[seat]!.declinedFan = null;
     this.currentPlayerSeat = seat;
     this.phase = "playing";
-  }
-
-  private lastActorSeat(): number {
-    return this.players.find((player) => player.handSize % 3 === 2 && !player.won)?.seat ?? this.dealerSeat;
   }
 
   // ---------- 当前玩家在自己回合的操作 ----------
