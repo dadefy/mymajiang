@@ -1,6 +1,8 @@
 import type { HttpTransport, HttpRequest } from "./transport.js";
 import type {
   FriendRequestView,
+  GroupDetail,
+  GroupMessagePage,
   GroupMessageView,
   GroupSummary,
   MatchRoundView,
@@ -213,8 +215,19 @@ export class ApiClient {
     return this.call({ method: "GET", path: "/v1/groups" });
   }
 
-  groupMessages(groupId: string, limit = 50): Promise<ApiResult<{ messages: GroupMessageView[] }>> {
-    return this.call({ method: "GET", path: `/v1/groups/${encodeURIComponent(groupId)}/messages?limit=${limit}` });
+  /** 群详情：群名、公告、人数与「我」的角色。 */
+  group(groupId: string): Promise<ApiResult<GroupDetail>> {
+    return this.call({ method: "GET", path: `/v1/groups/${encodeURIComponent(groupId)}` });
+  }
+
+  /**
+   * 群消息历史。不传 `before` 时取最新一页；用上一页返回的 `nextCursor` 继续往前翻。
+   * 返回的 `messages` 按时间升序（旧 → 新），可以直接从上往下渲染。
+   */
+  groupMessages(groupId: string, limit = 50, before?: string): Promise<ApiResult<GroupMessagePage>> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (before) query.set("before", before);
+    return this.call({ method: "GET", path: `/v1/groups/${encodeURIComponent(groupId)}/messages?${query.toString()}` });
   }
 
   sendGroupText(groupId: string, content: string): Promise<ApiResult<GroupMessageView>> {

@@ -41,6 +41,39 @@ function stubRoom(transport: FakeHttpTransport, roomId: string): void {
   transport.onJson("POST", `/v1/rooms/${roomId}/leave`, 204);
 }
 
+function groupMessage(messageId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    messageId,
+    senderId: SESSION.userId,
+    senderNickname: "张三",
+    sentAt: "2026-09-16T04:00:00.000Z",
+    type: "text",
+    content: `内容 ${messageId}`,
+    recalledAt: null,
+    ...overrides,
+  };
+}
+
+/** 群详情与一页消息；`nextCursor` 决定还有没有更早的可以翻。 */
+function stubChat(transport: FakeHttpTransport, groupId: string, messages: unknown[] = [], nextCursor?: string): void {
+  transport.onJson("GET", `/v1/groups/${groupId}`, 200, {
+    groupId,
+    groupNo: "12345678",
+    name: "牌友群",
+    ownerId: SESSION.userId,
+    notice: "",
+    allMuted: false,
+    memberCount: 2,
+    role: "owner",
+    members: [],
+  });
+  transport.onJson("GET", `/v1/groups/${groupId}/messages`, 200, {
+    groupId,
+    messages,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  });
+}
+
 describe("ClientFlow", () => {
   it("已激活的密钥直接进主页；没激活的进资料页", async () => {
     const first = flowWith();
@@ -185,5 +218,143 @@ describe("ClientFlow", () => {
 
     expect(flow.current).toEqual({ name: "key-entry", busy: false });
     expect(sockets.created.every((socket) => socket.closed)).toBe(true);
+  });
+
+  it("进群聊会拉群详情与消息，并订阅这个群（连接不绑房间）", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1")]);
+
+    await flow.openChat("g1");
+
+    expect(flow.current).toMatchObject({ name: "chat", groupId: "g1", meId: SESSION.userId, hasEarlier: false });
+    // 群聊连接不带 roomId：auth 之后紧跟一条订阅帧。
+    expect(sockets.last().sent[0]).toEqual({ type: "auth", token: SESSION.token });
+    expect(sockets.last().sent[1]).toEqual({ type: "group-subscribe", groupId: "g1" });
+    expect(flow.current).toMatchObject({ messages: [{ messageId: "m1" }] });
+  });
+
+  it("群聊页面的实时推送会追加消息，别的群的消息不会打扰这一页", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1")]);
+    await flow.openChat("g1");
+
+    const socket = sockets.last();
+    socket.serverSends({ type: "group-message", groupId: "g2", message: groupMessage("x9") });
+    socket.serverSends({ type: "group-message", groupId: "g1", message: groupMessage("m2") });
+
+    const screen = flow.current;
+    expect(screen.name).toBe("chat");
+    expect(screen.name === "chat" ? screen.messages.map((message) => message.messageId) : []).toEqual(["m1", "m2"]);
+  });
+
+  it("自己发的消息不会因为「接口返回值 + 实时推送」显示两次", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1")]);
+    await flow.openChat("g1");
+    http.onJson("POST", "/v1/groups/g1/messages", 201, groupMessage("m2"));
+
+    await flow.sendText("  大家好  ");
+    // 服务端随后把同一条推回来。
+    sockets.last().serverSends({ type: "group-message", groupId: "g1", message: groupMessage("m2") });
+
+    const screen = flow.current;
+    const ids = screen.name === "chat" ? screen.messages.map((message) => message.messageId) : [];
+    expect(ids).toEqual(["m1", "m2"]);
+    // 发出去的是去掉首尾空白的文本。
+    expect(http.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/v1/groups/g1/messages",
+      body: { type: "text", content: "大家好" },
+    });
+  });
+
+  it("撤回后那条消息就地变成已撤回", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1"), groupMessage("m2")]);
+    await flow.openChat("g1");
+    http.onJson("POST", "/v1/groups/g1/messages/m1/recall", 200, groupMessage("m1", {
+      content: "[消息已撤回]",
+      recalledAt: "2026-09-16T04:05:00.000Z",
+    }));
+
+    await flow.recallMessage("m1");
+
+    const screen = flow.current;
+    expect(screen.name).toBe("chat");
+    if (screen.name !== "chat") return;
+    expect(screen.messages[0]).toMatchObject({ messageId: "m1", content: "[消息已撤回]" });
+    expect(screen.messages[1]).toMatchObject({ messageId: "m2", recalledAt: null });
+  });
+
+  it("加载更早的一页会接在列表前面，翻完就没有了", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    // 先注册带游标的响应：假传输是「先注册的先匹配」。
+    http.on(
+      (request) => request.path.startsWith("/v1/groups/g1/messages?") && request.path.includes("before=cursor-1"),
+      () => ({ status: 200, body: { groupId: "g1", messages: [groupMessage("m1")] } }),
+    );
+    stubChat(http, "g1", [groupMessage("m2")], "cursor-1");
+    await flow.openChat("g1");
+
+    expect(flow.current).toMatchObject({ hasEarlier: true });
+    await flow.loadEarlier();
+
+    const screen = flow.current;
+    expect(screen.name).toBe("chat");
+    if (screen.name !== "chat") return;
+    expect(screen.messages.map((message) => message.messageId)).toEqual(["m1", "m2"]);
+    // 服务端这一页没有给出游标，说明已经到头。
+    expect(screen.hasEarlier).toBe(false);
+  });
+
+  it("回主页会退订并断开群聊通道，然后重拉主页列表", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1")]);
+    await flow.openChat("g1");
+    const socket = sockets.last();
+
+    await flow.backHome();
+
+    expect(flow.current.name).toBe("home");
+    expect(socket.sent).toContainEqual({ type: "group-unsubscribe", groupId: "g1" });
+    expect(socket.closed).toBe(true);
+  });
+
+  it("群聊页面的断线提示与恢复", async () => {
+    vi.useFakeTimers();
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1")]);
+    await flow.openChat("g1");
+
+    sockets.last().serverCloses();
+    expect(flow.current).toMatchObject({ name: "chat", notice: "连接已断开，正在重连…" });
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sockets.created).toHaveLength(2);
+    // 重连要重放订阅，否则恢复连接后收不到群消息。
+    expect(sockets.last().sent).toContainEqual({ type: "group-subscribe", groupId: "g1" });
+    expect(flow.current).toMatchObject({ name: "chat", notice: undefined });
+    vi.useRealTimers();
   });
 });

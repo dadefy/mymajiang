@@ -1274,6 +1274,105 @@ describe("server API", () => {
     expect(forbidden.statusCode).toBe(409);
   });
 
+  it("群消息按游标往前翻页不重不漏，并带上发送者昵称", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "群主丙");
+    const member = await createBetaUser(app, dependencies, "群员丁");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "分页群" },
+    });
+    const group = created.json();
+    await app.inject({
+      method: "POST",
+      url: "/v1/groups/join",
+      headers: { authorization: `Bearer ${member.token}` },
+      payload: { groupNo: group.groupNo },
+    });
+
+    // 交替发送，每条之间留一点间隔：同一毫秒的消息在「新 → 旧」排序里分不出先后，
+    // 那样分页断言会随着实现细节摇摆。
+    for (let index = 1; index <= 5; index += 1) {
+      const sender = index % 2 === 0 ? member : owner;
+      await app.inject({
+        method: "POST",
+        url: `/v1/groups/${group.groupId}/messages`,
+        headers: { authorization: `Bearer ${sender.token}` },
+        payload: { type: "text", content: `第 ${index} 条` },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+
+    const page = async (query: string) => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/v1/groups/${group.groupId}/messages?${query}`,
+        headers: { authorization: `Bearer ${owner.token}` },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json() as {
+        messages: Array<{ content: string; senderNickname?: string }>;
+        nextCursor?: string;
+      };
+    };
+
+    const newest = await page("limit=2");
+    // 对外一直是「旧 → 新」：最新一页的最后一条就是刚发的那条。
+    expect(newest.messages.map((message) => message.content)).toEqual(["第 4 条", "第 5 条"]);
+    expect(newest.nextCursor).toBeTypeOf("string");
+    // 昵称由 API 层补齐 —— 消息本身只带 senderId。
+    expect(newest.messages[0]!.senderNickname).toBe("群员丁");
+    expect(newest.messages[1]!.senderNickname).toBe("群主丙");
+
+    const middle = await page(`limit=2&before=${encodeURIComponent(newest.nextCursor!)}`);
+    expect(middle.messages.map((message) => message.content)).toEqual(["第 2 条", "第 3 条"]);
+
+    const oldest = await page(`limit=2&before=${encodeURIComponent(middle.nextCursor!)}`);
+    expect(oldest.messages.map((message) => message.content)).toEqual(["第 1 条"]);
+    // 已经翻到头，不再给游标。
+    expect(oldest.nextCursor).toBeUndefined();
+
+    const all = [...newest.messages, ...middle.messages, ...oldest.messages].map((message) => message.content);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("群详情带上调用者自己的角色", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "群主戊");
+    const member = await createBetaUser(app, dependencies, "群员己");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "角色群" },
+    });
+    const group = created.json();
+    await app.inject({
+      method: "POST",
+      url: "/v1/groups/join",
+      headers: { authorization: `Bearer ${member.token}` },
+      payload: { groupNo: group.groupNo },
+    });
+
+    const asOwner = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}`,
+      headers: { authorization: `Bearer ${owner.token}` },
+    });
+    expect(asOwner.statusCode).toBe(200);
+    expect(asOwner.json()).toMatchObject({ role: "owner", memberCount: 2 });
+
+    const asMember = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}`,
+      headers: { authorization: `Bearer ${member.token}` },
+    });
+    expect(asMember.json()).toMatchObject({ role: "member" });
+  });
+
   it("supports group listing, inviting friends, leaving and dissolving", async () => {
     const { app, dependencies, tokens } = fixture();
     const owner = await createBetaUser(app, dependencies, "群主甲");

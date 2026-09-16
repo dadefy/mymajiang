@@ -4,6 +4,13 @@ import type { GroupMessageType } from "@mianyang-mahjong/domain";
 export interface GroupMessageView {
   messageId: string;
   senderId: string;
+  /**
+   * 发送者昵称，由 API 层用账号仓库补齐。
+   *
+   * 消息本身只带 `senderId`（10 位数字），群聊页面要显示「谁在说话」就得有昵称。
+   * 与战绩接口补玩家昵称是同一套做法（见 PROJECT_STATUS 4.11）。
+   */
+  senderNickname?: string;
   sentAt: Date;
   type: GroupMessageType;
   content: string;

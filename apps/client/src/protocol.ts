@@ -115,11 +115,39 @@ export interface GroupSummary {
 export interface GroupMessageView {
   messageId: string;
   senderId: string;
+  /** 发送者昵称，服务端用账号仓库补齐；账号查不到时缺省。 */
+  senderNickname?: string;
   sentAt: string;
-  type: "text" | "image" | "voice" | "sticker" | "room-invite";
+  /**
+   * 消息类型。取值与 `packages/domain` 的 `GroupMessageType` 一一对应 ——
+   * 这里曾经写成 `sticker` / `room-invite`，与服务端的 `emoji` / `room_invite` 不一致，
+   * 属于协议漂移：类型对不上时，渲染层的分支会静默漏掉那两类消息。
+   */
+  type: "text" | "image" | "voice" | "emoji" | "room_invite" | "system";
   content: string;
   voiceSeconds?: number;
   recalledAt: string | null;
+}
+
+/** `GET /v1/groups/:groupId`：群详情。`role` 是调用者自己在这个群里的角色。 */
+export interface GroupDetail {
+  groupId: string;
+  groupNo: string;
+  name: string;
+  ownerId: string;
+  notice: string;
+  allMuted: boolean;
+  memberCount: number;
+  role: "owner" | "admin" | "member";
+  members: Array<{ userId: string; role: "owner" | "admin" | "member" }>;
+}
+
+/** `GET /v1/groups/:groupId/messages`：一页消息，`messages` 按时间升序（旧 → 新）。 */
+export interface GroupMessagePage {
+  groupId: string;
+  messages: GroupMessageView[];
+  /** 取更早一页要带上的游标；已经是第一页时为 undefined。 */
+  nextCursor?: string;
 }
 
 /** 一局进行中，服务端只发给本人的脱敏快照（见 ws-server.ts 的 playerSnapshot）。 */

@@ -656,6 +656,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       notice: group.notice,
       allMuted: group.allMuted,
       memberCount: group.members.size,
+      // 调用者在这个群里的角色：群聊页面据此决定要不要显示管理入口。
+      role: group.members.get(user.userId)?.role ?? "member",
       members: [...group.members.values()]
         .sort((left, right) => left.joinedAt.getTime() - right.joinedAt.getTime())
         .map((member) => ({ userId: member.userId, role: member.role })),
@@ -690,13 +692,23 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/groups/:groupId/messages", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }).parse(request.query);
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      before: z.string().min(1).optional(),
+    }).parse(request.query);
     const user = await requireUser(request.headers, dependencies);
     const group = requireGroupMember(dependencies.groupService, params.groupId, user.userId);
-    const messages = group.messages.slice(-(query.limit ?? 100));
+    // 游标分页由领域层统一实现（内存版与 PostgreSQL 版语义一致），路由只做转发。
+    // 领域层按「新 → 旧」翻页，而对外一直保持「旧 → 新」—— 群聊页面直接从上往下渲染，
+    // 加载更早的一页也只是前插，不必在渲染层再翻一次。
+    const page = await dependencies.groupService.getMessages(group.groupId, {
+      ...(query.limit === undefined ? {} : { limit: query.limit }),
+      ...(query.before === undefined ? {} : { before: query.before }),
+    });
     return {
       groupId: group.groupId,
-      messages: await Promise.all(messages.map((message) => groupMessageView(message, dependencies))),
+      messages: await Promise.all([...page.messages].reverse().map((message) => groupMessageView(message, dependencies))),
+      ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
     };
   });
 
@@ -971,9 +983,11 @@ async function groupMessageView(message: StoredGroupMessage, dependencies: AppDe
     : needsSignedUrl
       ? await dependencies.blobStorage!.presignDownload(message.content)
       : message.content;
+  const sender = dependencies.accountStore.findAccountById(message.senderId);
   return {
     messageId: message.messageId,
     senderId: message.senderId,
+    ...(sender ? { senderNickname: sender.nickname } : {}),
     sentAt: message.sentAt,
     type: message.type,
     content,

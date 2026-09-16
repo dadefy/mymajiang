@@ -1,4 +1,5 @@
 import type { ApiClient, ClientFlow, Screen } from "@mianyang-mahjong/client";
+import { ChatPage } from "./ChatPage.js";
 import { HomePage } from "./HomePage.js";
 import { KeyEntryPage } from "./KeyEntryPage.js";
 import { ProfilePage } from "./ProfilePage.js";
@@ -12,7 +13,7 @@ interface PageView {
 }
 
 /**
- * 把页面流产出的 `Screen` 绑到四个页面视图上。
+ * 把页面流产出的 `Screen` 绑到各个页面视图上。
  *
  * 渲染层不持有任何业务状态：每一帧都来自 `flow.onChange` 的 Screen 快照，
  * 页面自己只保留纯展示性的本地状态（例如结算浮层是否已被关掉）。
@@ -22,6 +23,7 @@ export class ScreenHost {
   private readonly profile: ProfilePage;
   private readonly home: HomePage;
   private readonly room: RoomPage;
+  private readonly chat: ChatPage;
   /** 最近一次主页上的「我」；房间页高亮自己要用。 */
   private me: { userId: string; nickname: string; points: number } | undefined;
   private currentName: Screen["name"] | null = null;
@@ -35,9 +37,11 @@ export class ScreenHost {
     this.profile = new ProfilePage(flow, stage);
     this.home = new HomePage(flow, stage);
     this.room = new RoomPage(flow, api, stage, () => this.me);
+    this.chat = new ChatPage(flow, stage);
     this.profile.view.visible = false;
     this.home.view.visible = false;
     this.room.view.visible = false;
+    this.chat.view.visible = false;
   }
 
   render(screen: Screen): void {
@@ -65,6 +69,7 @@ export class ScreenHost {
       case "profile": return this.profile;
       case "home": return this.home;
       case "room": return this.room;
+      case "chat": return this.chat;
     }
   }
 }

@@ -83,15 +83,23 @@ export class HomePage {
     refill(this.groupList, groups.length, (index, row) => {
       const group = groups[index]!;
       const role = ROLE_NAMES[group.role];
-      const title = label(row, `${group.name}（${group.groupNo}）${role ? " · " + role : ""}`, 26, { width: 600, bold: group.role === "owner" });
+      const title = label(row, `${group.name}（${group.groupNo}）${role ? " · " + role : ""}`, 26, { width: 440, bold: group.role === "owner" });
       title.pos(20, 10);
       const second = group.notice.length > 0
         ? `公告：${group.notice}`
         : `${group.memberCount} 人${group.lastMessageAt ? " · 最近消息 " + shortDate(group.lastMessageAt) : ""}`;
-      const detail = label(row, second, 22, { width: 600, color: THEME.textDim });
+      const detail = label(row, second, 22, { width: 440, color: THEME.textDim });
       detail.pos(20, 48);
+      const enter = label(row, "进入 >", 22, { width: 110, align: "right", color: THEME.accent });
+      enter.pos(470, 32);
       row.size(600, 88);
       row.bgColor = THEME.panelBg;
+      // 点一行就进群聊：消息列表与实时推送都在群聊页里。
+      // 写成块语句而不是 `() => void ...`：`EventDispatcher.on` 的 listener 参数类型是 `Function`，
+      // 表达式体推不出返回类型，`noImplicitAny` 下会报 TS7011。
+      row.on(Laya.Event.CLICK, null, () => {
+        void this.flow.openChat(group.groupId);
+      });
     });
   }
 
