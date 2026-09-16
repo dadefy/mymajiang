@@ -76,9 +76,20 @@ async function serveGameAsset(path: string, reply: FastifyReply, options: GameCl
 }
 
 export function registerGameClient(app: FastifyInstance, options: GameClientOptions): void {
+  /**
+   * `/app` 必须跳到 `/app/`。
+   *
+   * LayaAir 生成的 `index.html` 用的是**相对路径**（`libs/laya.core.js`、`js/index.js` 这种，
+   * 不是 `/app/libs/...`）。访问 `/app` 少了结尾斜杠时，浏览器会把 `app` 当成**文件**，
+   * 相对路径于是按站根解析 —— 请求打到 `/libs/laya.core.js`，整页资源全 404，
+   * 表现就是一片白（或一直卡在 splash）。带上斜杠后浏览器才知道 `app` 是目录，
+   * 相对路径才落在 `/app/` 下面。
+   */
+  app.get("/app", async (_request: FastifyRequest, reply: FastifyReply) => reply.redirect("/app/", 302));
+
   // 页面缓存要关掉：内测期间重新构建之后，手机上刷新就该看到新的，
   // 否则会出现「代码改了但手机还是旧页面」这种很难查的现象。
-  app.get("/app", async (_request: FastifyRequest, reply: FastifyReply) =>
+  app.get("/app/", async (_request: FastifyRequest, reply: FastifyReply) =>
     serveGameAsset("", reply.header("Cache-Control", "no-store"), options));
 
   app.get("/app/*", async (request: FastifyRequest, reply: FastifyReply) => {

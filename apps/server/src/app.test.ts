@@ -663,15 +663,21 @@ describe("server API", () => {
       expect((await app.inject({ method: "GET", url: attack })).statusCode).toBe(404);
     }
 
-    // 构建过就给页面，没构建过就给一条能照着做的提示 —— 两种都不是错，但不该是 500。
+    // 入口必须跳到带斜杠的地址：LayaAir 的 index.html 用相对路径（`libs/laya.core.js` 这种），
+    // 少了斜杠浏览器会把 `app` 当文件，相对路径就解析到站根，整页资源全 404。
     const entry = await app.inject({ method: "GET", url: "/app" });
-    expect([200, 404]).toContain(entry.statusCode);
-    if (entry.statusCode === 200) {
-      expect(entry.headers["content-type"]).toContain("text/html");
-      expect(entry.headers["cache-control"]).toBe("no-store");
+    expect(entry.statusCode).toBe(302);
+    expect(entry.headers.location).toBe("/app/");
+
+    // 带斜杠的才是真正的页面：构建过给页面，没构建过给一条能照着做的提示 —— 都不该是 500。
+    const page = await app.inject({ method: "GET", url: "/app/" });
+    expect([200, 404]).toContain(page.statusCode);
+    if (page.statusCode === 200) {
+      expect(page.headers["content-type"]).toContain("text/html");
+      expect(page.headers["cache-control"]).toBe("no-store");
     } else {
       // 提示里要有构建命令，否则别人看到 404 不知道下一步做什么。
-      expect(entry.json().message).toContain("laya:build:web");
+      expect(page.json().message).toContain("laya:build:web");
     }
 
     // 与 /debug 共用一个开关：没开内测入口时也不注册。
