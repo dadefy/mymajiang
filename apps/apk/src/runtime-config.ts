@@ -13,8 +13,12 @@ function withoutTrailingSlash(value: string): string {
 
 export function runtimeConfig(): RuntimeConfig {
   const configured = globalThis.__MYMJ_CONFIG__;
+  // 本地开发（IDE 预览 / 调试页）的页面端口不是服务端端口，一律指向本机服务端；
+  // 线上构建跑在 https 源下，location.origin 就是正确的 API 入口。
+  const isLocalhost = typeof location !== "undefined"
+    && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
   const browserOrigin = typeof location !== "undefined" && /^https?:$/.test(location.protocol)
-    ? location.origin
+    ? (isLocalhost ? "http://127.0.0.1:3000" : location.origin)
     : "http://127.0.0.1:3000";
   const apiBaseUrl = withoutTrailingSlash(configured?.apiBaseUrl ?? browserOrigin);
   /**

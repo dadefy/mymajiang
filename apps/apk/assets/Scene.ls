@@ -10,7 +10,7 @@
   "_$comp": [
     {
       "_$id": "main_boot",
-      "_$type": "Main"
+      "_$type": "7bad1742-6eed-4d8d-81c0-501dc5bf03d6"
     }
   ]
 }
