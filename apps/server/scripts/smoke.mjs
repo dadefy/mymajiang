@@ -27,8 +27,17 @@ async function json(path, init) {
 const page = await fetch(`${BASE}/debug`);
 const pageText = await page.text();
 check("GET /debug 能打开", page.status === 200 && pageText.includes("内测调试客户端"), `HTTP ${page.status}`);
-check("/debug 注入了实时通道地址", /"socketUrl":"ws:\/\/[^"]+"/.test(pageText),
-  (/"socketUrl":"[^"]+"/.exec(pageText) ?? ["(缺失)"])[0]);
+// 单端口部署时 socketUrl **故意留空**：前端按 `location.origin` 推导 ws/wss，
+// 这样隧道、反向代理、HTTPS 全都自动正确。所以这里接受「留空」，
+// 只有注入了别的、又不是 ws:// 地址才算错。
+const socketUrl = /"socketUrl":"([^"]*)"/.exec(pageText)?.[1];
+check(
+  "/debug 注入了实时通道配置",
+  socketUrl !== undefined && (socketUrl === "" || socketUrl.startsWith("ws://") || socketUrl.startsWith("wss://")),
+  socketUrl === undefined ? "(缺失)"
+    : socketUrl === "" ? "留空，由前端按 location.origin 推导（单端口部署）"
+      : socketUrl,
+);
 
 const entryUrl = `${BASE}/debug/browser/debug-client.js`;
 const entry = await fetch(entryUrl);
@@ -113,6 +122,47 @@ if (!adminId || !adminPassword) {
       }
 
       check("拉群列表", (await json("/v1/groups", { headers: authorization })).status === 200);
+
+      // 群聊：建群 → 发消息 → 读回来。D2 的群聊页面就是靠这几个接口，
+      // 顺手也验了消息带不带发送者昵称（没有昵称页面就显示不出「谁在说话」）。
+      const group = await json("/v1/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authorization },
+        body: JSON.stringify({ name: "冒烟群" }),
+      });
+      check("建群", group.status === 201, `HTTP ${group.status}`);
+      if (group.body?.groupId) {
+        const sent = await json(`/v1/groups/${group.body.groupId}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authorization },
+          body: JSON.stringify({ type: "text", content: "冒烟消息" }),
+        });
+        check("发群消息（看发送者昵称有没有补上）",
+          sent.status === 201 && Boolean(sent.body?.senderNickname),
+          `HTTP ${sent.status} 昵称 ${sent.body?.senderNickname ?? "(缺失)"}`);
+
+        const listed = await json(`/v1/groups/${group.body.groupId}/messages`, { headers: authorization });
+        check("读群消息历史", listed.status === 200 && Array.isArray(listed.body?.messages),
+          `HTTP ${listed.status} 条数 ${listed.body?.messages?.length ?? "?"}`);
+      }
+
+      // 图片与语音都靠这一个接口：服务端只签发直传地址，真实字节由客户端直接打给存储。
+      // 没配存储时返回 501 —— 那意味着内测期间「发不了图、发不了语音」。
+      const uploadCases = [
+        ["image", "image/png", 2048, "图片"],
+        ["voice", "audio/webm", 4096, "语音"],
+      ];
+      for (const [kind, contentType, byteSize, label] of uploadCases) {
+        const ticket = await json("/v1/uploads", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authorization },
+          body: JSON.stringify({ kind, contentType, byteSize }),
+        });
+        check(`签发${label}直传地址（没配存储会是 501）`,
+          ticket.status === 201 && Boolean(ticket.body?.objectKey),
+          `HTTP ${ticket.status}`);
+      }
+
       // 战绩是纯读取的持久化能力：内存模式下返回 501 是设计如此。
       const matches = await json("/v1/matches", { headers: authorization });
       check("拉战绩（200 或内存模式下的 501）", matches.status === 200 || matches.status === 501,
