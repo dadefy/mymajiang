@@ -230,7 +230,38 @@ SERVER_BASE_URL=https://牌桌.example.com node --env-file=.env scripts/acceptan
 
 ---
 
-## 五、备份与运维
+## 五、托管平台（PaaS / 一键发布）的额外注意
+
+不用自己买机器、把服务端跑到托管平台（如本项目的 beta 环境
+`https://mianyang-mahjong-beta.app.workbuddy.host/`）时，有四件事和自建服务器不同 ——
+**每一条都实测踩过**：
+
+1. **平台反代会占用 `Authorization` 头。** 现象是「管理员登录成功拿到令牌，
+   但用这个令牌访问任何受保护接口都 401」。实测服务端收到的是**平台自己的令牌**，不是我们的。
+   所以应用令牌一律走自定义头 **`X-Auth-Token`**（服务端 `authToken()` 首选它，回退
+   `Authorization`），两个客户端的传输层与**三个脚本**都照此发送。
+   自建 Nginx 不会有这个问题，但用自定义头是通吃的做法。
+2. **`.env` 会被一起上传**，所以 `loadEnvFile` 能读到（`JWT_SECRET` / COS 密钥 / 管理员密码都在）。
+   好处是免配置，代价是**平台侧能看到这些明文** —— 正式环境建议改用平台的环境变量注入。
+3. **安装要加 `--ignore-scripts`**：沙箱里跑包的安装脚本会卡住或失败；
+   运行时依赖都是纯 JS，不依赖构建脚本。
+4. **启动命令不能内联环境变量**（`JWT_SECRET=x node ...` 不生效），
+   而且要先按顺序把各 workspace 包 build 出来再起服务：
+   `pnpm --filter @mianyang-mahjong/rules build && … && node apps/server/dist/main.js`。
+
+另外：这类沙箱**没有数据库**，所以只能跑内存模式（重启清空）。
+把账号建回来不用登进沙箱 —— 在本地对着公网地址跑一次就够：
+
+```bash
+cd apps/server
+SERVER_BASE_URL=https://<你的公网地址> KEYS_LEDGER=./.keys-ledger.public.txt \
+  node --env-file=.env scripts/seed-testers.mjs 张三 李四 王五 赵六
+```
+
+> 公网环境的账号密钥建议单独存一份台账（`KEYS_LEDGER` 指向另一个文件），
+> 别和本地开发环境的密钥混在一份文件里 —— 两套环境的账号互相无效，混在一起很容易发错。
+
+## 六、备份与运维
 
 要备份的三样东西（都不进仓库）：
 
@@ -246,7 +277,7 @@ SERVER_BASE_URL=https://牌桌.example.com node --env-file=.env scripts/acceptan
 
 ---
 
-## 六、上线前还欠的（别拿内测档直接对外）
+## 七、上线前还欠的（别拿内测档直接对外）
 
 - **合规**：ICP 备案、APP 备案、隐私政策与用户协议文本、Android 签名
 - **结构化日志与监控**：现在没有请求日志 / 错误聚合 / 健康告警（`/health` 已就绪，可接探针）

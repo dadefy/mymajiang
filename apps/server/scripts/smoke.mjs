@@ -15,6 +15,15 @@
  */
 const BASE = process.env.SERVER_BASE_URL ?? "http://127.0.0.1:3000";
 
+/**
+ * 认证头必须用**自定义头** `X-Auth-Token`，不能用 `Authorization: Bearer`。
+ *
+ * 托管平台的反向代理会占用 `Authorization` —— 实测服务端收到的是平台自己的令牌（不是我们的），
+ * 于是「登录成功、后续全部 401」。服务端 `authToken()` 首选 `X-Auth-Token`，
+ * 所以脚本照着发就行（本地直连时也一样工作）。
+ */
+const authHeaders = (token) => ({ "X-Auth-Token": token });
+
 let failures = 0;
 function check(label, ok, extra = "") {
   console.log(`${ok ? "通过" : "失败"}  ${label}${extra ? "  —— " + extra : ""}`);
@@ -80,7 +89,7 @@ if (!adminId || !adminPassword) {
   } else {
     const issued = await json("/v1/admin/invitation-keys", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      headers: { "Content-Type": "application/json", ...authHeaders(adminToken) },
       body: JSON.stringify({ count: 1, note: "冒烟验证" }),
     });
     const key = issued.body?.keys?.[0]?.key;
@@ -95,7 +104,7 @@ if (!adminId || !adminPassword) {
       check("用密钥激活建号", activated.status === 201, `HTTP ${activated.status}`);
       const token = activated.body?.token;
       const userId = activated.body?.userId;
-      const authorization = { Authorization: `Bearer ${token}` };
+      const authorization = authHeaders(token);
 
       const login = await json("/v1/auth/login", {
         method: "POST",
@@ -107,7 +116,7 @@ if (!adminId || !adminPassword) {
       // 规则要求至少 500 积分才能进房，新账号是 0 分。这一步是内测前的必要操作。
       const granted = await json(`/v1/admin/users/${userId}/points`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+        headers: { "Content-Type": "application/json", ...authHeaders(adminToken) },
         body: JSON.stringify({ delta: 2000, reason: "内测发放" }),
       });
       check("管理员发放积分（进房门槛 500）", granted.status === 201,
