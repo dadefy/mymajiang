@@ -4,6 +4,7 @@
   "packageManager": "pnpm@11.19.0",
   "scripts": {
     "build": "pnpm -r --if-present build",
+    "start": "pnpm build && node apps/server/dist/main.js",
     "test": "vitest run",
     "typecheck": "pnpm -r --if-present typecheck"
   },
