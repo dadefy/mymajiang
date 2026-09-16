@@ -1,10 +1,11 @@
+import { roundResultPanel } from "./round-result.js";
 import { ApiClient } from "../api-client.js";
 import { ClientFlow, type Screen } from "../flow.js";
 import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
 import { button, element } from "./dom.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { matchResultText, roundResultText } from "./result-text.js";
+import { matchResultText } from "./result-text.js";
 import { nicknameOf, resolveSeat, sortedHand } from "./table-order.js";
 import { discardGroups, freshDiscardSeat } from "./tile-view.js";
 import { meldBox, tileChip } from "./tile-chips.js";
@@ -383,6 +384,14 @@ function renderCenter(): void {
   centerHost.replaceChildren();
   const match = anyMatch();
   const snapshot = anySnapshot();
+  const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each);
+  if (result) centerHost.append(roundResultPanel(result, snapshot));
+
+  // 整场结算要与单局的分开渲染 —— 两者字段不同（见 result-text.ts）。
+  const matchResult = seats.map((seat) => roomOf(seat)?.lastMatchResult).find((each) => each);
+  if (matchResult) {
+    centerHost.append(element("p", { className: "banner", text: matchResultText(matchResult, snapshot) }));
+  }
 
   if (!match) {
     centerHost.append(
@@ -411,14 +420,6 @@ function renderCenter(): void {
     centerHost.append(discardGrid(match, snapshot));
   }
 
-  const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each);
-  if (result) centerHost.append(element("p", { className: "hint", text: roundResultText(result, snapshot) }));
-
-  // 整场结算要与单局的分开渲染 —— 两者字段不同（见 result-text.ts）。
-  const matchResult = seats.map((seat) => roomOf(seat)?.lastMatchResult).find((each) => each);
-  if (matchResult) {
-    centerHost.append(element("p", { className: "banner", text: matchResultText(matchResult, snapshot) }));
-  }
 }
 
 /**

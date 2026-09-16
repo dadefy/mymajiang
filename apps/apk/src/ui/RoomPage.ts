@@ -1,4 +1,4 @@
-import type { ApiClient, ClientFlow, MatchState, RoomResult, RoomSnapshot, Screen, Suit, Tile } from "@mianyang-mahjong/client";
+import type { ApiClient, ClientFlow, MatchState, MatchResult, RoomResult, RoomSnapshot, Screen, Suit, Tile } from "@mianyang-mahjong/client";
 import {
   actionAvailable,
   discardableIndexes,
@@ -53,6 +53,7 @@ export class RoomPage {
   private match: MatchState | null = null;
   private actions: string[] = [];
   private lastResult: RoomResult | null = null;
+  private lastMatchResult: MatchResult | null = null;
   private resultDismissed = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private selectedIndexes = new Set<number>();
@@ -88,11 +89,11 @@ export class RoomPage {
 
     this.matchArea = box(this.view, 0, 150, 750, 1184);
 
-    this.resultOverlay = box(this.view, 75, 380, 600, 560, THEME.panelBg2);
-    this.resultTitle = label(this.resultOverlay, "", 34, { width: 600, align: "center", bold: true, color: THEME.accent });
+    this.resultOverlay = box(this.view, 25, 130, 700, 1080, THEME.panelBg2);
+    this.resultTitle = label(this.resultOverlay, "", 34, { width: 700, align: "center", bold: true, color: THEME.accent });
     this.resultTitle.pos(0, 30);
-    this.resultBody = box(this.resultOverlay, 40, 110, 520, 330);
-    textButton(this.resultOverlay, "继续", 175, 470, 250, 70, THEME.accentDark, () => {
+    this.resultBody = box(this.resultOverlay, 25, 100, 650, 840);
+    textButton(this.resultOverlay, "继续", 225, 980, 250, 70, THEME.accentDark, () => {
       this.resultDismissed = true;
       this.resultOverlay.visible = false;
     });
@@ -119,6 +120,7 @@ export class RoomPage {
     this.syncSelection(screen.match);
     if (screen.lastResult && screen.lastResult !== this.lastResult) this.resultDismissed = false;
     this.lastResult = screen.lastResult;
+    this.lastMatchResult = screen.lastMatchResult;
     this.renderAll(screen.notice);
     this.schedulePolling();
   }
@@ -305,12 +307,33 @@ export class RoomPage {
       this.resultOverlay.visible = false;
       return;
     }
-    this.resultTitle.text = this.match ? "本局结算" : "整场结算";
+    this.resultTitle.text = this.lastMatchResult ? "整场结束 · 本局结算" : "本局结算";
     this.resultBody.removeChildren();
     label(this.resultBody, this.lastResult.winnerSeats.length > 0 ? `胡牌：${this.lastResult.winnerSeats.map((seat) => `座位${seat}`).join("、")}` : "流局", 26).pos(0, 0);
     const nickOf = (userId: string): string => this.snapshot?.players.find((player) => player.userId === userId)?.nickname ?? userId;
-    this.lastResult.deltas.forEach((entry, index) => {
-      label(this.resultBody, `${nickOf(entry.playerId)}  ${fmtDelta(entry.delta)}`, 28, { color: entry.delta >= 0 ? THEME.good : THEME.bad }).pos(0, 50 + index * 55);
+    const result = this.lastResult;
+    const players: NonNullable<RoomResult["players"]> = result.players ?? result.deltas.map<NonNullable<RoomResult["players"]>[number]>((entry, seat) => ({ playerId: entry.playerId, seat, won: false, hand: [], melds: [] }));
+    players.forEach((player, index) => {
+      const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
+      const y = 45 + index * 190;
+      label(this.resultBody, `${nickOf(player.playerId)}${player.won ? " · 已胡" : ""}  ${delta > 0 ? "赢 " : delta < 0 ? "输 " : ""}${fmtDelta(delta)} 分`, 26, { color: delta >= 0 ? THEME.good : THEME.bad }).pos(0, y);
+      const tiles = sortedHand(player.hand);
+      tiles.forEach((tile, i) => {
+        const image = new Laya.Image();
+        image.skin = tileAsset(tile); image.pos(i * 44, y + 40); image.size(40, 60);
+        this.resultBody.addChild(image);
+      });
+      const total = this.lastMatchResult?.accountDeltas.find((entry) => entry.playerId === player.playerId);
+      if (total) label(this.resultBody, `整场实际上分：${fmtDelta(total.delta)}`, 20).pos(0, y + 160);
+      let x = 0;
+      player.melds.forEach((meld) => {
+        for (let i = 0; i < (meld.kind === "kong" ? 4 : 3); i++) {
+          const image = new Laya.Image();
+          image.skin = tileAsset(meld.tile); image.pos(x, y + 108); image.size(30, 45);
+          this.resultBody.addChild(image); x += 32;
+        }
+        x += 10;
+      });
     });
     this.resultOverlay.visible = true;
   }

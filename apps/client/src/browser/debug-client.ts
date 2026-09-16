@@ -1,3 +1,4 @@
+import { roundResultPanel } from "./round-result.js";
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
 import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
@@ -437,7 +438,7 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   );
 
   if (screen.match) app.append(renderTable(screen.match, screen.actions, screen.snapshot));
-  if (screen.lastResult) app.append(renderResult(screen.lastResult));
+  if (screen.lastResult) app.append(roundResultPanel(screen.lastResult, screen.snapshot));
   // 整场结算与单局结算是两个形状，分开渲染（见 result-text.ts）。
   if (screen.lastMatchResult) {
     app.append(panel("整场结束", element("p", { className: "turn other", text:
@@ -573,14 +574,6 @@ function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapsho
   box.append(hand, row, element("p", { className: "hint", text: `我的副露：${match.melds.map((meld) => `${meld.kind}${tileLabel(meld.tile)}`).join(" ") || "无"}` }),
     element("p", { className: "hint", text: `我已出：${match.discards.map(tileLabel).join(" ") || "无"}` }));
   return box;
-}
-
-function renderResult(result: RoomResult): HTMLElement {
-  const lines = result.deltas.map((delta) => `${delta.playerId} ${delta.delta >= 0 ? "+" : ""}${delta.delta}`);
-  return panel(`上一局结算（${result.reason}）`,
-    element("p", { text: `赢家座位：${result.winnerSeats.join("、") || "无"}` }),
-    element("p", { text: lines.join("　") }),
-  );
 }
 
 function phaseLabel(phase: MatchState["phase"]): string {

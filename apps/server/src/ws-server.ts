@@ -50,7 +50,7 @@ function sendError(connection: WebSocketConnection, message: string): void {
 }
 
 /** 单个玩家的脱敏视图（含自己的手牌，不含他人手牌）。 */
-function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number): object {
+export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number): object {
   const player = game.players[seat]!;
   return {
     roomId: room.roomId,
@@ -59,14 +59,14 @@ function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundN
     phase: game.phase,
     currentPlayerSeat: game.currentPlayerSeat,
     tilesLeft: game.tilesLeft,
-    hand: [...player.hand],
+    hand: [...(player.won ? player.winningHand : player.hand)],
     melds: [...player.melds],
     missingSuit: player.missingSuit,
     discards: [...player.discards],
     won: player.won,
     players: game.players.map((other) => ({
       seat: other.seat,
-      handSize: other.handSize,
+      handSize: other.won ? other.winningHand.length : other.handSize,
       // 别人的暗杠是扣着的，牌值不下发（见 meld-visibility.ts）——
       // 否则任何打开开发者工具的人都能读出对手暗杠的是哪张牌。
       melds: maskMelds(other.melds, other.seat === seat),
@@ -75,6 +75,26 @@ function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundN
       missingSuit: other.missingSuit,
     })),
     ...(game.result ? { result: game.result } : {}),
+  };
+}
+
+/** 只允许已结束的本局公开四家牌面。 */
+export function roundSettlement(game: MahjongGame) {
+  if (game.phase !== "finished" || !game.result) throw new Error("Round has not finished");
+  const result = game.result;
+  return {
+    ...result,
+    deltas: game.players.map((player) => ({
+      playerId: player.id,
+      delta: result.deltas.find((entry) => entry.playerId === player.id)?.delta ?? 0,
+    })),
+    players: game.players.map((player) => ({
+      playerId: player.id,
+      seat: player.seat,
+      won: player.won,
+      hand: [...(player.won ? player.winningHand : player.hand)],
+      melds: player.melds.map((meld) => ({ ...meld })),
+    })),
   };
 }
 
@@ -290,7 +310,7 @@ function buildRealtimeServer(
     const seatMap = seatConnections.get(active);
     const game = active.game;
     if (game.phase === "finished" && game.result) {
-      const roundResult = game.result;
+      const roundResult = roundSettlement(game);
       for (const connection of seatMap?.values() ?? []) {
         connection.send({
           type: "round-finished",

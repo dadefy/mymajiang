@@ -65,6 +65,7 @@ export interface GamePlayerState {
   id: string;
   seat: number;
   hand: Tile[];
+  winningHand?: Tile[];
   melds: DeclaredMeld[];
   discards: Tile[];
   kongIncome: KongIncomeEntry[];
@@ -192,6 +193,8 @@ function removeTiles(hand: Tile[], tiles: readonly Tile[]): void {
 
 export class PlayerState {
   readonly hand: Tile[] = [];
+  /** 胡牌时保留展示用牌面，不参与后续行牌和实体牌计数。 */
+  winningHand: Tile[] = [];
   readonly melds: DeclaredMeld[] = [];
   readonly discards: Tile[] = [];
   readonly kongIncome: KongIncomeEntry[] = [];
@@ -249,6 +252,7 @@ export class PlayerState {
       id: this.id,
       seat: this.seat,
       hand: [...this.hand],
+      winningHand: [...this.winningHand],
       melds: this.melds.map((meld) => ({ ...meld })),
       discards: [...this.discards],
       kongIncome: this.kongIncome.map((entry) => ({ ...entry })),
@@ -268,6 +272,7 @@ export class PlayerState {
     }
     this.hand.length = 0;
     this.hand.push(...state.hand);
+    this.winningHand = [...(state.winningHand ?? [])];
     this.melds.length = 0;
     this.melds.push(...state.melds.map((meld) => ({ ...meld })));
     this.discards.length = 0;
@@ -742,6 +747,7 @@ export class MahjongGame {
   }
 
   private finalizeWin(player: PlayerState, fan: number): void {
+    player.winningHand = [...player.hand];
     player.won = true;
     player.winFan = fan;
     this.winnerSeats.push(player.seat);
@@ -1014,6 +1020,7 @@ function assertGameState(state: GameState): void {
     ids.add(player.id);
 
     assertTileList(player.hand, `hand of seat ${player.seat}`);
+    if (player.winningHand !== undefined) assertTileList(player.winningHand, `winning hand of seat ${player.seat}`);
     assertTileList(player.discards, `discards of seat ${player.seat}`);
     if (player.swapTiles !== null) assertTileList(player.swapTiles, `swap tiles of seat ${player.seat}`);
     for (const meld of player.melds) {

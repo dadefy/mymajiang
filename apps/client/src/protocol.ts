@@ -74,6 +74,8 @@ export interface RoomSnapshot {
 
 /** **单局**结算。字段来自 `packages/rules` 的 `RoundResult`。 */
 export interface RoomResult {
+  /** 仅在本局结束后下发；旧服务端可能不提供。 */
+  players?: Array<{ playerId: string; seat: number; won: boolean; hand: Tile[]; melds: Array<{ kind: "pong" | "kong"; tile: Tile; concealed?: boolean }> }>;
   reason: "three-winners" | "wall-exhausted" | "dissolved";
   deltas: Array<{ playerId: string; delta: number }>;
   winnerSeats: number[];
