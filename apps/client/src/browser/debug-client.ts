@@ -316,10 +316,25 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
 
   const controls = element("div", { className: "row" });
   if (snapshot?.status === "waiting") {
+    // 开局的两个硬条件（四人麻将）：满 4 人、且全部准备。
+    // 不满足时**直接禁用按钮并说明原因** —— 否则点下去只会被服务端拒，
+    // 看到的是一行不显眼的小字，非常像「点了没反应」。
+    const seated = snapshot.players.length;
+    const allReady = seated === 4 && snapshot.players.every((player) => player.ready);
+    const blockedReason = seated < 4
+      ? `还差 ${4 - seated} 个人才能开局`
+      : (snapshot.players.some((player) => !player.ready) ? "还有玩家没有准备" : "");
+
+    const startButton = button("开始对局（房主）", () => void flow.startMatch(), "primary");
+    if (!allReady) {
+      startButton.disabled = true;
+      startButton.title = blockedReason;
+    }
     controls.append(
       button("我准备好了", () => void flow.setReady(true)),
       button("取消准备", () => void flow.setReady(false)),
-      button("开始对局（房主）", () => void flow.startMatch(), "primary"),
+      startButton,
+      ...(blockedReason ? [element("span", { className: "hint", text: blockedReason })] : []),
     );
   }
 

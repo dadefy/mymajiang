@@ -694,4 +694,28 @@ describe("ClientFlow", () => {
 
     expect(flow.current).toMatchObject({ name: "room", notice: "操作失败（NOT_ALL_READY）" });
   });
+
+  it("房间规则类的拒绝要翻成中文，不能把英文原文甩给用户", async () => {
+    // 域层抛的是英文句子（服务端把 message 原样透传），直接显示会让人一头雾水。
+    const cases: Array<[string, string]> = [
+      ["Four players are required", "要四个人才能开局"],
+      ["All players must be ready", "还有玩家没有准备"],
+      ["Only the room owner can start the match", "只有房主能开局"],
+      ["Room is not waiting to start", "这个房间已经开局了"],
+    ];
+
+    for (const [raw, translated] of cases) {
+      const { flow, http } = flowWith();
+      http.onJson("POST", "/v1/auth/login", 200, SESSION);
+      stubHome(http);
+      await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+      stubRoom(http, "room-1");
+      await flow.createRoom();
+      http.onJson("POST", "/v1/rooms/room-1/start", 409, { code: "DOMAIN_CONFLICT", message: raw });
+
+      await flow.startMatch();
+
+      expect(flow.current).toMatchObject({ name: "room", notice: translated });
+    }
+  });
 });

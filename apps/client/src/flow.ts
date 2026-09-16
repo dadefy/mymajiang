@@ -128,6 +128,11 @@ function describe(error: ApiError): string {
   if (error.code === "KEY_REVOKED") return "邀请密钥已被撤销";
   if (error.code === "KEY_MALFORMED") return "邀请密钥格式不对";
   if (error.code === "ACCOUNT_NOT_ACTIVE") return "账号已被停用";
+  // 房间规则类的失败：服务端给的是英文句子（域层的错误信息），翻成人话再说。
+  if (error.message === "Four players are required") return "要四个人才能开局";
+  if (error.message === "All players must be ready") return "还有玩家没有准备";
+  if (error.message === "Only the room owner can start the match") return "只有房主能开局";
+  if (error.message === "Room is not waiting to start") return "这个房间已经开局了";
   if (error.message) return error.message;
   return `操作失败（${error.code}）`;
 }
