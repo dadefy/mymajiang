@@ -26,8 +26,15 @@ const args = process.argv.slice(2);
 const quiet = args.includes("--quiet");
 const pointsIndex = args.indexOf("--points");
 const points = pointsIndex >= 0 ? Number(args[pointsIndex + 1]) : 2000;
+/**
+ * 只有真的给了 `--points` 才跳过它后面那个参数。
+ *
+ * 这里踩过一次：`indexOf` 找不到时返回 `-1`，而 `-1 + 1 === 0` —— 于是**第一个昵称被当成
+ * `--points` 的值吃掉**，`seed-testers 张三 李四 王五` 静默只建了李四和王五，
+ * 而且不报错、汇总里看着还挺正常。
+ */
 const nicknames = args.filter((arg, index) =>
-  !arg.startsWith("--") && index !== pointsIndex + 1);
+  !arg.startsWith("--") && (pointsIndex < 0 || index !== pointsIndex + 1));
 
 if (nicknames.length === 0 || !Number.isInteger(points) || points < 500) {
   console.error("用法: node --env-file=.env scripts/seed-testers.mjs <昵称...> [--points 2000] [--quiet]");
