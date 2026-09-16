@@ -2,6 +2,8 @@ packages:
   - "apps/*"
   - "packages/*"
 
+# esbuild 是 vitest 的依赖，需要允许它执行自己的安装脚本。
+# 注意别写成 pnpm 提示里的占位符文本 —— 那是个字符串，不是布尔值，pnpm 会因此报错。
 onlyBuiltDependencies:
   - esbuild
 allowBuilds:

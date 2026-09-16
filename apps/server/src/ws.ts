@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
+import type { IncomingMessage } from "node:http";
 import { EventEmitter } from "node:events";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -44,67 +45,94 @@ export interface WsServerOptions {
 
 /** 极简 WebSocket 服务端：只支持文本帧（客户端发给服务端的消息必须 UTF-8、未分片）。 */
 export class WebSocketServer extends EventEmitter {
-  private server: Server;
+  private readonly standalone: Server | null;
   private readonly connections = new Set<WebSocketConnection>();
 
-  constructor(private readonly options: WsServerOptions) {
+  constructor(private readonly options: WsServerOptions, mode: "standalone" | "attached" = "standalone") {
     super();
-    this.server = createServer((socket) => this.handleSocket(socket));
+    this.standalone = mode === "standalone" ? createServer((socket) => this.handleSocket(socket)) : null;
   }
 
+  /** 独立监听一个端口。测试与非共用端口的部署用。 */
   listen(port: number, host = "127.0.0.1"): Promise<void> {
-    return new Promise((resolve) => this.server.listen(port, host, () => resolve()));
+    if (!this.standalone) throw new Error("This WebSocket server is attached to an HTTP server");
+    return new Promise((resolve) => this.standalone!.listen(port, host, () => resolve()));
+  }
+
+  /**
+   * 接管一个来自 HTTP 服务的 `upgrade` 事件。
+   *
+   * 与独立监听的区别：握手请求已经由 HTTP 服务解析好了，这里只负责算 accept 并接管连接。
+   * 这样实时通道与 HTTP **共用同一个端口** —— 对只给一个公网入口的部署（内网穿透、
+   * 反向代理）是必需的：浏览器在 HTTPS 页面上会拦截 `ws://`，只能用 `wss://`，
+   * 而 `wss://` 需要 TLS 终止点在同一个入口上。
+   *
+   * `head` 是 HTTP 服务已经读出来、但还没交给我们的那部分字节，必须当作连接的起始数据。
+   */
+  handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+    const key = request.headers["sec-websocket-key"];
+    if (typeof key !== "string" || !key) {
+      socket.destroy();
+      return;
+    }
+    const accept = createHash("sha1").update(key + WEBSOCKET_GUID).digest("base64");
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    this.attachConnection(socket, head);
   }
 
   close(): void {
     for (const connection of this.connections) connection.close();
-    this.server.close();
+    this.standalone?.close();
   }
 
   private handleSocket(socket: Socket): void {
-    let handshakeDone = false;
-    let connection: WebSocketConnection | null = null;
     let buffer: Buffer = Buffer.alloc(0);
 
     socket.on("data", (chunk: Buffer) => {
-      if (!handshakeDone) {
-        buffer = Buffer.concat([buffer, chunk]);
-        const headerEnd = buffer.indexOf("\r\n\r\n");
-        if (headerEnd < 0) return;
-        const header = buffer.subarray(0, headerEnd).toString("utf-8");
-        const rest = buffer.subarray(headerEnd + 4);
-        buffer = Buffer.alloc(0);
-        const key = /^sec-websocket-key:\s*(.+)$/im.exec(header)?.[1]?.trim();
-        if (!key) {
-          socket.destroy();
-          return;
-        }
-        const accept = createHash("sha1").update(key + WEBSOCKET_GUID).digest("base64");
-        socket.write(
-          "HTTP/1.1 101 Switching Protocols\r\n" +
-            "Upgrade: websocket\r\n" +
-            "Connection: Upgrade\r\n" +
-            `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-        );
-        handshakeDone = true;
-        connection = new WebSocketConnection(socket);
-        this.connections.add(connection);
-        buffer = rest;
-        if (buffer.length === 0) return;
-      } else {
-        buffer = Buffer.concat([buffer, chunk]);
+      buffer = Buffer.concat([buffer, chunk]);
+      const headerEnd = buffer.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const header = buffer.subarray(0, headerEnd).toString("utf-8");
+      const rest = buffer.subarray(headerEnd + 4);
+      const key = /^sec-websocket-key:\s*(.+)$/im.exec(header)?.[1]?.trim();
+      if (!key) {
+        socket.destroy();
+        return;
       }
+      const accept = createHash("sha1").update(key + WEBSOCKET_GUID).digest("base64");
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+      socket.removeAllListeners("data");
+      this.attachConnection(socket, rest);
+    });
+  }
 
+  /** 握手之后的公共部分：接帧、分发消息、处理关闭。 */
+  private attachConnection(socket: Socket, initial: Buffer): void {
+    const connection = new WebSocketConnection(socket);
+    this.connections.add(connection);
+    let buffer = initial;
+
+    const consume = (): void => {
       let frame = decodeFrame(buffer);
       while (frame) {
         if (frame.opcode === 0x8) {
-          connection?.close();
+          connection.close();
           return;
         }
         if (frame.opcode === 0x1) {
           try {
             const message = JSON.parse(frame.payload.toString("utf-8")) as WsMessage;
-            if (connection) connection.enqueue(message, this.options.onMessage);
+            connection.enqueue(message, this.options.onMessage);
           } catch {
             // 忽略无法解析的消息。
           }
@@ -112,14 +140,19 @@ export class WebSocketServer extends EventEmitter {
         buffer = frame.rest;
         frame = decodeFrame(buffer);
       }
+    };
+
+    socket.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      consume();
     });
+    consume();
 
     socket.on("close", () => {
-      if (connection) {
-        connection.readyState = "closed";
-        this.connections.delete(connection);
-        this.options.onClose(connection);
-      }
+      if (connection.readyState === "closed" && !this.connections.has(connection)) return;
+      connection.readyState = "closed";
+      this.connections.delete(connection);
+      this.options.onClose(connection);
     });
 
     socket.on("error", () => {

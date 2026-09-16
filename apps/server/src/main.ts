@@ -2,7 +2,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import type { UserAccount } from "@mianyang-mahjong/domain";
 import { createApp, createInMemoryDependencies } from "./app.js";
 import { TokenService } from "./auth.js";
-import { createWebSocketServer } from "./ws-server.js";
+import { createAttachedWebSocketServer, createWebSocketServer } from "./ws-server.js";
 import { PostgresDatabase } from "./database.js";
 import { CryptoInvitationKeyCodec } from "./invitation-key-codec.js";
 import { CosBlobStorage } from "./cos-blob-storage.js";
@@ -73,8 +73,15 @@ const adminAccountStore = database && writeQueue
   ? await PostgresAdminAccountStore.load(database, writeQueue)
   : undefined;
 
-const host = process.env.HOST ?? "127.0.0.1";
+// 默认绑定所有网卡：这是服务端应用的正常默认值，也是容器、反向代理、内网穿透的前提
+// （只绑 127.0.0.1 的话，外面一律连不上）。只在本机自己调试时才设 HOST=127.0.0.1。
+const host = process.env.HOST ?? "0.0.0.0";
 const port = Number(process.env.PORT ?? 3000);
+
+// 调试客户端注入的实时通道地址。**留空表示与服务端同源**，前端会用 location.origin
+// 推出 ws:// 或 wss:// —— 这在隧道与反向代理下都自动正确，也是推荐配置。
+// 只有在实时通道确实位于另一个入口时才需要显式指定。
+const websocketUrl = process.env.PUBLIC_WEBSOCKET_URL;
 
 // 对象存储。两种驱动：
 //   * `local` —— 文件落磁盘，用自签名 URL 模拟云端预签名直传，不需要云账号；
@@ -126,6 +133,9 @@ const dependencies = createInMemoryDependencies({
   ...(gameStateStore ? { gameStateStore } : {}),
   ...(blobStorage ? { blobStorage } : {}),
   ...(localBlobStorage ? { localBlobStorage } : {}),
+  // 浏览器客户端是内测入口，默认挂上；要关掉可以设 DEBUG_CLIENT=false。
+  ...(process.env.DEBUG_CLIENT === "false" ? {} : { debugClient: true }),
+  ...(websocketUrl ? { websocketUrl } : {}),
 });
 
 // 第一个管理员由环境变量引导。只在账号不存在时创建，所以重复启动不会把改过的密码覆盖回去。
@@ -153,8 +163,18 @@ if (process.env.NODE_ENV !== "production") {
   const adminHost = host === "0.0.0.0" ? "127.0.0.1" : host;
   process.stdout.write(`[admin] http://${adminHost}:${port}/admin\n`);
 }
-const wss = await createWebSocketServer(dependencies, Number(process.env.WS_PORT ?? 3001));
-process.stdout.write(`[websocket] listening on ${process.env.WS_PORT ?? 3001}\n`);
+// 实时通道**与 HTTP 共用同一个端口**：公网部署通常只有一个入口（隧道、反向代理），
+// 而且页面一旦是 HTTPS，浏览器就会拦截 ws://，只能用 wss:// —— 共用端口后这件事自动成立。
+// 需要单独端口的部署可以设 WS_PORT。
+const wss = process.env.WS_PORT
+  ? await createWebSocketServer(dependencies, Number(process.env.WS_PORT), {}, process.env.WS_HOST ?? host)
+  : createAttachedWebSocketServer(app.server, dependencies);
+process.stdout.write(process.env.WS_PORT
+  ? `[websocket] listening on ${process.env.WS_HOST ?? host}:${process.env.WS_PORT}\n`
+  : `[websocket] 与 HTTP 共用端口 ${port}\n`);
+// 把可分享的地址打出来，省得每次翻配置。
+const shownHost = process.env.PUBLIC_HOST ?? (host === "0.0.0.0" ? "127.0.0.1" : host);
+process.stdout.write(`[debug client] http://${shownHost}:${port}/debug\n`);
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {

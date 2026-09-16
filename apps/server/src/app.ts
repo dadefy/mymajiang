@@ -23,7 +23,7 @@ import {
   type StoredGroupMessage,
   type UserAccount,
 } from "@mianyang-mahjong/domain";
-import { TokenService, bearerToken } from "./auth.js";
+import { TokenService, authToken } from "./auth.js";
 import { adminConsoleHtml } from "./admin-console.js";
 import type { AdminStore } from "./admin-store.js";
 import type { GameStateStore } from "./game-state-store.js";
@@ -41,6 +41,7 @@ import {
 } from "./blob-storage.js";
 import { LocalDiskBlobStorage } from "./local-blob-storage.js";
 import { RATE_LIMITS, RateLimiter, type RateLimitRule, type RateLimitRules } from "./rate-limit.js";
+import { registerDebugClient } from "./debug-client.js";
 
 export interface AppDependencies {
   accountStore: AccountStore;
@@ -83,6 +84,15 @@ export interface AppDependencies {
   rateLimiter: RateLimiter;
   /** 各处额度。做成依赖而不是直接引用常量，测试才能用很小的额度验证接线。 */
   rateLimitRules: RateLimitRules;
+  /**
+   * 是否挂载浏览器调试客户端。
+   *
+   * 单端口部署下页面与接口同源，`socketUrl` 留空即可 —— 前端会用
+   * `location.origin` 推出 `ws://` 或 `wss://`，隧道与反向代理下都自动正确。
+   * 只有在实时通道确实在另一个入口时才需要显式给地址。
+   */
+  debugClient?: boolean;
+  websocketUrl?: string;
 }
 
 /** 一次激活成功的返回：与登录同一份会话信息，客户端两条路径可以共用解析逻辑。 */
@@ -181,6 +191,14 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     }
   });
 
+  // 内部测试用的浏览器客户端。没开就不挂（测试里默认不挂）。
+  if (dependencies.debugClient) {
+    registerDebugClient(app, { socketUrl: dependencies.websocketUrl ?? "" });
+    // 内测要分享的是一个网址，让根路径直接把人送到客户端 —— 否则拿到链接的人
+    // 只会看到一个 404，还得再问一次「要加什么后缀」。
+    app.get("/", async (_request, reply) => reply.redirect("/debug", 302));
+  }
+
   app.get("/admin", async (_request, reply) => reply
     .header("Cache-Control", "no-store")
     .header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
@@ -223,7 +241,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
    * 注销之后同一个令牌立刻失效（`requireUser` 会拒绝非 active 状态），邀请密钥也一并作废。
    */
   app.post("/v1/account/delete", async (request, reply) => {
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     dependencies.accountService.deleteAccount(user);
     await dependencies.accountStore.flush?.();
     return reply.status(204).send();
@@ -250,7 +268,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   /** 改自己的密码。必须提供当前密码，并且同样受失败锁定约束。 */
   app.post("/v1/admin/password", async (request, reply) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     const body = z.object({
       currentPassword: z.string().min(1).max(200),
       newPassword: z.string().min(1).max(200),
@@ -267,7 +285,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
    * 换类型上传会被存储端拒绝，所以不必指望客户端自觉。
    */
   app.post("/v1/uploads", async (request, reply) => {
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     // 这是真正的成本风险：单张图最高 5MB，不限流可以把存储账单刷爆。分钟与小时两道都要。
     enforceRateLimit(dependencies.rateLimiter, `upload:${user.userId}`, dependencies.rateLimitRules.uploadByUser);
     enforceRateLimit(dependencies.rateLimiter, `upload-hourly:${user.userId}`, dependencies.rateLimitRules.uploadByUserHourly);
@@ -339,7 +357,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   }
 
   app.get("/v1/admin/invitation-keys", async (request) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     requireSuperAdmin(admin);
     const keys = dependencies.invitationKeys.list().map((key) =>
       invitationKeyView(key, Boolean(dependencies.accountStore.findAccountByInvitationKeyHash(key.keyHash))),
@@ -348,7 +366,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.post("/v1/admin/invitation-keys", async (request, reply) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     requireSuperAdmin(admin);
     const body = z.object({
       count: z.number().int().min(1).max(100).default(1),
@@ -360,7 +378,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.post("/v1/admin/invitation-keys/:keyId/revoke", async (request, reply) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     requireSuperAdmin(admin);
     const params = z.object({ keyId: z.string().min(1) }).parse(request.params);
     const key = dependencies.invitationKeys.list().find((candidate) => candidate.keyId === params.keyId);
@@ -371,7 +389,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.get("/v1/admin/users", async (request) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     requireSuperAdmin(admin);
     const query = z.object({
       status: z.enum(["active", "temporarily_banned", "permanently_banned"]).optional(),
@@ -389,7 +407,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.patch("/v1/admin/users/:userId/status", async (request) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     const params = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.params);
     const body = z.object({
       status: z.enum(["active", "temporarily_banned", "permanently_banned"]),
@@ -403,14 +421,14 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.get("/v1/admin/audit-log", async (request) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     requireSuperAdmin(admin);
     const query = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
     return { entries: dependencies.accountAdministration.auditLog.slice(-query.limit).reverse() };
   });
 
   app.post("/v1/admin/users/:userId/points", async (request, reply) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     const params = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.params);
     const body = z.object({ delta: z.number().int().safe().refine((value) => value !== 0), reason: z.string().trim().min(1).max(200) })
       .parse(request.body);
@@ -422,7 +440,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.get("/v1/admin/users/:userId/points", async (request) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     requireSuperAdmin(admin);
     const params = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.params);
     const account = dependencies.accountStore.findAccountById(params.userId);
@@ -431,7 +449,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.post("/v1/admin/users/:userId/points/:ledgerId/reverse", async (request, reply) => {
-    const admin = await requireAdmin(request.headers.authorization, dependencies.tokens);
+    const admin = await requireAdmin(request.headers, dependencies.tokens);
     const params = z.object({ userId: z.string().regex(/^\d{10}$/), ledgerId: z.string().min(1) }).parse(request.params);
     const body = z.object({ reason: z.string().trim().min(1).max(200) }).parse(request.body);
     const account = dependencies.accountStore.findAccountById(params.userId);
@@ -443,7 +461,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/users/:userId", async (request) => {
     const params = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.params);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     const account = dependencies.accountStore.findAccountById(params.userId);
     if (!account || account.status !== "active") throw new Error("USER_NOT_FOUND");
     return {
@@ -456,7 +474,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/friends/requests", async (request, reply) => {
     const body = z.object({ targetUserId: z.string().regex(/^\d{10}$/) }).parse(request.body);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     const target = dependencies.accountStore.findAccountById(body.targetUserId);
     if (!target || target.status !== "active") throw new Error("USER_NOT_FOUND");
     const friendRequest = dependencies.friendService.sendRequest(actor, target);
@@ -464,7 +482,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.get("/v1/friends/requests", async (request) => {
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     return {
       requests: dependencies.friendService.pendingFor(actor.userId)
         .map((friendRequest) => friendRequestView(friendRequest, dependencies)),
@@ -474,13 +492,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/friends/requests/:requestId/respond", async (request) => {
     const params = z.object({ requestId: z.string().min(1) }).parse(request.params);
     const body = z.object({ accept: z.boolean() }).parse(request.body);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     const friendRequest = dependencies.friendService.respond(params.requestId, actor.userId, body.accept);
     return friendRequestView(friendRequest, dependencies);
   });
 
   app.get("/v1/friends", async (request) => {
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     const friends = dependencies.friendService.friendIds(actor.userId)
       .map((userId) => dependencies.accountStore.findAccountById(userId))
       .filter((account): account is UserAccount => account?.status === "active")
@@ -490,13 +508,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.delete("/v1/friends/:friendId", async (request, reply) => {
     const params = z.object({ friendId: z.string().regex(/^\d{10}$/) }).parse(request.params);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     dependencies.friendService.removeFriend(actor.userId, params.friendId);
     return reply.status(204).send();
   });
 
   app.post("/v1/rooms", async (request, reply) => {
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const roomId = dependencies.createRoomId();
     const room = dependencies.createRoom ? dependencies.createRoom(roomId, user) : new MatchRoom(roomId, user);
     dependencies.roomStore.set(roomId, room);
@@ -505,7 +523,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/rooms/:roomId", async (request) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     requireRoomPlayer(room, user.userId);
     return roomSnapshot(room);
@@ -513,7 +531,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/rooms/:roomId/join", async (request, reply) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     room.join(user);
     return reply.status(201).send({ roomId: room.roomId, status: room.status, playerCount: room.players.size });
@@ -521,7 +539,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/rooms/:roomId/leave", async (request, reply) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     room.leave(user.userId);
     return reply.status(204).send();
@@ -530,7 +548,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/rooms/:roomId/ready", async (request) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
     const body = z.object({ ready: z.boolean() }).parse(request.body ?? {});
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     room.setReady(user.userId, body.ready);
     return { userId: user.userId, ready: body.ready };
@@ -538,7 +556,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/rooms/:roomId/start", async (request) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     room.start(user.userId);
     for (const player of room.players.values()) dependencies.accountStore.saveAccount(player.account);
@@ -547,7 +565,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/rooms/:roomId/dissolve", async (request) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     const finished = room.requestDissolve(user.userId);
     return finished
@@ -558,7 +576,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/rooms/:roomId/dissolve/vote", async (request) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
     const body = z.object({ agree: z.boolean() }).parse(request.body ?? {});
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     const result = room.voteDissolve(user.userId, body.agree);
     if (result) {
@@ -569,7 +587,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   app.get("/v1/matches", async (request) => {
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const history = requireMatchHistory(dependencies);
     const query = z.object({
       limit: z.coerce.number().int().min(1).max(50).default(20),
@@ -584,7 +602,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/rooms/:roomId/history", async (request) => {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const history = requireMatchHistory(dependencies);
     const match = await history.findMatch(params.roomId);
     if (!match) throw new Error("MATCH_NOT_FOUND");
@@ -600,7 +618,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/groups", async (request, reply) => {
     const body = z.object({ name: z.string().trim().max(30) }).parse(request.body ?? {});
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const group = dependencies.groupService.createGroup(user, body.name);
     return reply.status(201).send({
       groupId: group.groupId,
@@ -613,13 +631,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/groups/join", async (request) => {
     const body = z.object({ groupNo: z.string().regex(/^\d{8}$/) }).parse(request.body);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const group = dependencies.groupService.joinByGroupNo(user, body.groupNo);
     return { groupId: group.groupId, groupNo: group.groupNo, name: group.name, memberCount: group.members.size };
   });
 
   app.get("/v1/groups", async (request) => {
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const query = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(request.query);
     const groups = dependencies.groupService.listFor(user.userId).slice(0, query.limit)
       .map((group) => groupSummaryView(group, user.userId));
@@ -628,7 +646,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/groups/:groupId", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const group = requireGroupMember(dependencies.groupService, params.groupId, user.userId);
     return {
       groupId: group.groupId,
@@ -651,7 +669,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       content: z.string().max(2000),
       voiceSeconds: z.number().int().min(1).max(60).optional(),
     }).parse(request.body);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     enforceRateLimit(dependencies.rateLimiter, `group-message:${user.userId}`, dependencies.rateLimitRules.groupMessageByUser);
     // 图片与语音的 content 是对象键。归属与类型都写在键前缀里，所以一次前缀校验就够了 ——
     // 既不必为上传单独建表，也挡住了「引用别人的文件」。
@@ -672,26 +690,19 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/groups/:groupId/messages", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
-    const query = z.object({
-      limit: z.coerce.number().int().min(1).max(200).optional(),
-      before: z.string().optional(),
-    }).parse(request.query);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }).parse(request.query);
+    const user = await requireUser(request.headers, dependencies);
     const group = requireGroupMember(dependencies.groupService, params.groupId, user.userId);
-    const page = await dependencies.groupService.getMessages(params.groupId, {
-      ...(query.limit === undefined ? {} : { limit: query.limit }),
-      ...(query.before === undefined ? {} : { before: query.before }),
-    });
+    const messages = group.messages.slice(-(query.limit ?? 100));
     return {
       groupId: group.groupId,
-      messages: await Promise.all(page.messages.map((message) => groupMessageView(message, dependencies))),
-      nextCursor: page.nextCursor ?? null,
+      messages: await Promise.all(messages.map((message) => groupMessageView(message, dependencies))),
     };
   });
 
   app.post("/v1/groups/:groupId/messages/:messageId/recall", async (request) => {
     const params = z.object({ groupId: z.string().min(1), messageId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const message = await dependencies.groupService.recall(params.groupId, user.userId, params.messageId);
     const view = await groupMessageView(message, dependencies);
     dependencies.groupEvents.publish({ type: "recalled", groupId: params.groupId, message: view });
@@ -701,7 +712,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/groups/:groupId/notice", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
     const body = z.object({ notice: z.string().max(500) }).parse(request.body ?? {});
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     dependencies.groupService.updateNotice(params.groupId, user.userId, body.notice);
     const notice = body.notice.trim();
     dependencies.groupEvents.publish({ type: "updated", groupId: params.groupId, notice });
@@ -711,7 +722,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/groups/:groupId/all-mute", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
     const body = z.object({ enabled: z.boolean() }).parse(request.body ?? {});
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     dependencies.groupService.setAllMuted(params.groupId, user.userId, body.enabled);
     dependencies.groupEvents.publish({ type: "updated", groupId: params.groupId, allMuted: body.enabled });
     return { allMuted: body.enabled };
@@ -723,7 +734,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       userId: z.string().regex(/^\d{10}$/),
       minutes: z.number().int().min(1).max(60 * 24 * 30),
     }).parse(request.body);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     const until = new Date(Date.now() + body.minutes * 60_000);
     dependencies.groupService.muteMember(params.groupId, actor.userId, body.userId, until);
     return { userId: body.userId, mutedUntil: until };
@@ -731,7 +742,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/groups/:groupId/members/:memberId/remove", async (request, reply) => {
     const params = z.object({ groupId: z.string().min(1), memberId: z.string().regex(/^\d{10}$/) }).parse(request.params);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     dependencies.groupService.removeMember(params.groupId, actor.userId, params.memberId);
     // 被移出的成员必须立刻停止收消息，所以这里也要广播。
     dependencies.groupEvents.publish({ type: "member-removed", groupId: params.groupId, userId: params.memberId });
@@ -741,7 +752,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/groups/:groupId/members/:memberId/admin", async (request) => {
     const params = z.object({ groupId: z.string().min(1), memberId: z.string().regex(/^\d{10}$/) }).parse(request.params);
     const body = z.object({ enabled: z.boolean() }).parse(request.body ?? {});
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     dependencies.groupService.setAdministrator(params.groupId, actor.userId, params.memberId, body.enabled);
     return { userId: params.memberId, role: body.enabled ? "admin" : "member" };
   });
@@ -749,7 +760,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/groups/:groupId/transfer", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
     const body = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.body);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     dependencies.groupService.transferOwnership(params.groupId, actor.userId, body.userId);
     return { ownerId: body.userId };
   });
@@ -757,7 +768,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   app.post("/v1/groups/:groupId/invite", async (request, reply) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
     const body = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.body);
-    const actor = await requireUser(request.headers.authorization, dependencies);
+    const actor = await requireUser(request.headers, dependencies);
     const invitee = dependencies.accountStore.findAccountById(body.userId);
     if (!invitee || invitee.status !== "active") throw new Error("USER_NOT_FOUND");
     dependencies.groupService.inviteMember({
@@ -778,7 +789,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/groups/:groupId/leave", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     const group = dependencies.groupService.leaveGroup(params.groupId, user.userId);
     if (!group) {
       // 最后一个人退出，群就不存在了。
@@ -790,7 +801,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.post("/v1/groups/:groupId/dissolve", async (request, reply) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
-    const user = await requireUser(request.headers.authorization, dependencies);
+    const user = await requireUser(request.headers, dependencies);
     dependencies.groupService.dissolveGroup(params.groupId, user.userId);
     dependencies.groupEvents.publish({ type: "dissolved", groupId: params.groupId });
     return reply.status(204).send();
@@ -799,8 +810,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   return app;
 }
 
-async function requireAdmin(authorization: string | undefined, tokens: TokenService) {
-  return tokens.verifyAdminToken(bearerToken(authorization));
+async function requireAdmin(headers: { "x-auth-token"?: string | undefined; authorization?: string | undefined } | undefined, tokens: TokenService) {
+  return tokens.verifyAdminToken(authToken(headers));
 }
 
 function requireSuperAdmin(admin: { role: "super_admin" | "review_admin" }): void {
@@ -824,8 +835,8 @@ function commitAdminMutation(
   else dependencies.accountStore.saveAccount(account);
 }
 
-async function requireUser(authorization: string | undefined, dependencies: AppDependencies): Promise<UserAccount> {
-  const userId = await dependencies.tokens.verifyUserToken(bearerToken(authorization));
+async function requireUser(headers: { "x-auth-token"?: string | undefined; authorization?: string | undefined } | undefined, dependencies: AppDependencies): Promise<UserAccount> {
+  const userId = await dependencies.tokens.verifyUserToken(authToken(headers));
   const account = dependencies.accountStore.findAccountById(userId);
   if (!account) throw new Error("ACCOUNT_NOT_FOUND");
   if (account.status !== "active") throw new Error("ACCOUNT_NOT_ACTIVE");
@@ -941,7 +952,7 @@ function groupSummaryView(group: ChatGroup, viewerId: string) {
     role: group.members.get(viewerId)?.role ?? "member",
     createdAt: group.createdAt,
     // 群列表按「最近有消息」排序，客户端也据此显示最后活跃时间。
-    lastMessageAt: group.lastMessageAt ?? group.messages.at(-1)?.sentAt ?? null,
+    lastMessageAt: group.messages.at(-1)?.sentAt ?? null,
   };
 }
 
@@ -1038,6 +1049,8 @@ export function createInMemoryDependencies(input: {
   createBlobId?: () => string;
   rateLimiter?: RateLimiter;
   rateLimitRules?: RateLimitRules;
+  debugClient?: boolean;
+  websocketUrl?: string;
 }): AppDependencies & { accountStore: AccountStore } {
   const accountStore = input.accountStore ?? new InMemoryAccountStore();
   const accountAdministration = new AccountAdministrationService(input.createAdminAuditId);
@@ -1079,5 +1092,7 @@ export function createInMemoryDependencies(input: {
     // 每个 app 自建一个限流器，测试之间因此互不干扰。
     rateLimiter: input.rateLimiter ?? new RateLimiter(),
     rateLimitRules: input.rateLimitRules ?? RATE_LIMITS,
+    ...(input.debugClient ? { debugClient: true } : {}),
+    ...(input.websocketUrl ? { websocketUrl: input.websocketUrl } : {}),
   };
 }

@@ -1,4 +1,6 @@
 import { randomInt } from "node:crypto";
+import type { Server as HttpServer } from "node:http";
+import type { Socket } from "node:net";
 import {
   MahjongGame,
   type ClaimAction,
@@ -73,11 +75,43 @@ function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundN
   };
 }
 
+/** 独立监听一个端口。测试与非共用端口的部署用；生产推荐共用端口（见 createAttachedWebSocketServer）。 */
 export function createWebSocketServer(
   dependencies: AppDependencies,
   port: number,
   options: RealtimeOptions = {},
+  /** 绑定地址。要让局域网/公网连上必须传 0.0.0.0。 */
+  bindHost = "127.0.0.1",
 ): Promise<WebSocketServer> {
+  const wss = buildRealtimeServer(dependencies, options, "standalone");
+  return wss.listen(port, bindHost).then(() => wss);
+}
+
+/**
+ * 让实时通道与 HTTP **共用同一个端口**：挂在同一个 HTTP 服务的 `upgrade` 事件上。
+ *
+ * 这是公网部署的默认方式，因为：
+ *   * 内网穿透与反向代理通常只给一个入口，两个端口就意味着两个公网地址；
+ *   * 页面一旦走 HTTPS，浏览器会拦截 `ws://`，只能用 `wss://` —— 而 `wss://`
+ *     要求 TLS 终止点与页面同一个入口。共用一个端口后这件事自动成立。
+ */
+export function createAttachedWebSocketServer(
+  httpServer: HttpServer,
+  dependencies: AppDependencies,
+  options: RealtimeOptions = {},
+): WebSocketServer {
+  const wss = buildRealtimeServer(dependencies, options, "attached");
+  // `upgrade` 事件把 socket 声明成 Duplex，运行时给的其实就是 net.Socket
+  // （HTTP 升级发生在 TCP 连接上），所以这里收窄一次是安全的。
+  httpServer.on("upgrade", (request, socket, head) => wss.handleUpgrade(request, socket as Socket, head));
+  return wss;
+}
+
+function buildRealtimeServer(
+  dependencies: AppDependencies,
+  options: RealtimeOptions = {},
+  mode: "standalone" | "attached",
+): WebSocketServer {
   const activeMatches = new Map<string, ActiveMatch>();
   const actionTimers = new Map<ActiveMatch, Map<number, ReturnType<typeof setTimeout>>>();
   /** 快照节流：每个进行中对局的"延迟落盘"定时器，到点把最新状态写一次。 */
@@ -527,7 +561,7 @@ export function createWebSocketServer(
     await broadcastState(active);
   }
 
-  const wss = new WebSocketServer({
+  return new WebSocketServer({
     onMessage: handleMessage,
     onClose(connection) {
       unsubscribeAllGroups(connection);
@@ -542,7 +576,5 @@ export function createWebSocketServer(
         if (seat !== undefined) seatConnections.get(active)?.delete(seat);
       }
     },
-  });
-
-  return wss.listen(port).then(() => wss);
+  }, mode);
 }

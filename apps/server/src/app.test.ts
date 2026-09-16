@@ -31,6 +31,8 @@ function fixture(overrides: {
   matchHistory?: MatchHistoryReader;
   localBlobStorage?: LocalDiskBlobStorage;
   rateLimitRules?: RateLimitRules;
+  debugClient?: boolean;
+  websocketUrl?: string;
 } = {}) {
   idCounter = 1234567890;
   const tokens = new TokenService("test-jwt-secret-that-is-longer-than-32-characters");
@@ -56,6 +58,8 @@ function fixture(overrides: {
       ? { blobStorage: overrides.localBlobStorage, localBlobStorage: overrides.localBlobStorage }
       : {}),
     ...(overrides.rateLimitRules ? { rateLimitRules: overrides.rateLimitRules } : {}),
+    ...(overrides.debugClient ? { debugClient: true } : {}),
+    ...(overrides.websocketUrl ? { websocketUrl: overrides.websocketUrl } : {}),
   });
   return { app: createApp(dependencies), dependencies, tokens };
 }
@@ -114,6 +118,44 @@ describe("server API", () => {
     const unavailable = await unhealthy.app.inject({ method: "GET", url: "/health" });
     expect(unavailable.statusCode).toBe(503);
     expect(unavailable.json()).toEqual({ status: "degraded", database: "unavailable" });
+  });
+
+  it("令牌走自定义头 X-Auth-Token 也能认证（绕过被网关污染的 Authorization 头）", async () => {
+    const { app, tokens } = fixture();
+    const adminToken = await tokens.issueAdminToken("developer", "super_admin");
+
+    // 关键场景：部署网关给 Authorization 头塞了它自己的令牌，覆盖了我们的。
+    // 我们的令牌走 X-Auth-Token，服务端应该优先认它。
+    const polluted = await app.inject({
+      method: "GET",
+      url: "/v1/admin/invitation-keys",
+      headers: {
+        authorization: "Bearer <网关自己的令牌>",
+        "x-auth-token": adminToken,
+      },
+    });
+    expect(polluted.statusCode).toBe(200);
+
+    // 只有自定义头、没有 Authorization 头，也一样能认证。
+    const onlyCustom = await app.inject({
+      method: "GET",
+      url: "/v1/admin/invitation-keys",
+      headers: { "x-auth-token": adminToken },
+    });
+    expect(onlyCustom.statusCode).toBe(200);
+
+    // 自定义头也可以带 Bearer 前缀。
+    const withBearer = await app.inject({
+      method: "GET",
+      url: "/v1/admin/invitation-keys",
+      headers: { "x-auth-token": `Bearer ${adminToken}` },
+    });
+    expect(withBearer.statusCode).toBe(200);
+
+    // 两个头都没有 → 仍是 AUTH_REQUIRED。
+    const nothing = await app.inject({ method: "GET", url: "/v1/admin/invitation-keys" });
+    expect(nothing.statusCode).toBe(401);
+    expect(nothing.json().code).toBe("AUTH_REQUIRED");
   });
 
   it("签发密钥 → 首次激活建号 → 之后凭同一把密钥登录", async () => {
@@ -208,6 +250,35 @@ describe("server API", () => {
     });
     expect(locked.statusCode).toBe(409);
     expect(locked.json().message).toBe("KEY_ALREADY_ACTIVATED");
+  });
+
+  it("损坏或伪造的令牌是认证失败（401），不是业务冲突（409）", async () => {
+    const { app } = fixture();
+
+    // `jose` 的原始错误信息（如 signature verification failed）如果不归一，
+    // 会冒到错误处理器被当成业务冲突返回 409，顺带把内部细节泄露出去。
+    for (const token of ["garbage", "a.b.c"]) {
+      const user = await app.inject({
+        method: "GET",
+        url: "/v1/groups",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect([401]).toContain(user.statusCode);
+      expect(user.json().code).toBe("INVALID_USER_TOKEN");
+
+      const admin = await app.inject({
+        method: "GET",
+        url: "/v1/admin/invitation-keys",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(admin.statusCode).toBe(401);
+      expect(admin.json().code).toBe("INVALID_ADMIN_TOKEN");
+    }
+
+    // 缺少 Authorization 头同理。
+    const missing = await app.inject({ method: "GET", url: "/v1/groups" });
+    expect(missing.statusCode).toBe(401);
+    expect(missing.json().code).toBe("AUTH_REQUIRED");
   });
 
   it("管理员用账号密码换令牌；密码错与账号不存在返回同一条错误", async () => {
@@ -555,6 +626,32 @@ describe("server API", () => {
       headers: authorization,
     });
     expect(listed.statusCode).toBe(200);
+  });
+
+  it("调试客户端：/debug 与静态资源可用，路径不许越出客户端目录", async () => {
+    const { app } = fixture({ debugClient: true });
+
+    const page = await app.inject({ method: "GET", url: "/debug" });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers["content-type"]).toContain("text/html");
+    expect(page.body).toContain("/debug/browser/debug-client.js");
+    expect(page.headers["cache-control"]).toBe("no-store");
+    // 单端口部署下页面与接口同源，实时通道地址由前端按 location.origin 推导，
+    // 所以这里注入的是空串 —— 隧道与反向代理下都自动正确。
+    expect(page.body).toContain('"socketUrl":""');
+
+    // 根路径把人送到内测客户端：分享出去的网址不该是个 404。
+    const root = await app.inject({ method: "GET", url: "/" });
+    expect(root.statusCode).toBe(302);
+    expect(root.headers.location).toBe("/debug");
+
+    // 路径穿越被挡：`apps/client/package.json` 是真实存在的文件，
+    // 如果校验失效就会 200 —— 所以这个断言不依赖客户端是否已构建。
+    const traversal = await app.inject({ method: "GET", url: "/debug/%2e%2e%2fpackage.json" });
+    expect(traversal.statusCode).toBe(404);
+
+    // 没开调试客户端时完全不注册。
+    expect((await fixture().app.inject({ method: "GET", url: "/debug" })).statusCode).toBe(404);
   });
 
   it("注销账号后：令牌立刻失效、密钥既登不进也建不了新号、管理员也复活不了", async () => {

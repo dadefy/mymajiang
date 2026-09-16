@@ -14,7 +14,7 @@ export class LayaHttpTransport implements HttpTransport {
       const request = new Laya.HttpRequest();
       const headers = ["Accept", "application/json"];
       if (input.body !== undefined) headers.push("Content-Type", "application/json");
-      if (input.token) headers.push("Authorization", `Bearer ${input.token}`);
+      if (input.token) headers.push("X-Auth-Token", input.token);
       const finish = () => {
         const status = Number(request.http?.status ?? 0);
         if (status === 0) {
