@@ -200,9 +200,13 @@ describe("WebSocket 对局", () => {
       expect((message as { type: string }).type).toBe("game");
       const snap = (message as { state: any }).state;
       expect(snap.phase).toBe("swapping");
+      expect(snap.actionDeadlineAt).toBeGreaterThan(Date.now());
+      expect(snap.actionDeadlineAt).toBeLessThanOrEqual(Date.now() + 15_000);
       // 脱敏：他人快照不含手牌
       expect(snap.players.every((p: { hand?: unknown }) => p.hand === undefined)).toBe(true);
     }
+
+    expect(new Set(initial.map((message) => (message as { state: { actionDeadlineAt: number } }).state.actionDeadlineAt)).size).toBe(1);
 
     // 四人自动换三张 → 进入定缺
     for (const client of clients) client.send({ type: "auto-swap" });

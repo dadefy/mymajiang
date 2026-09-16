@@ -249,6 +249,8 @@ export interface VisibleMeld {
 
 /** 一局进行中，服务端只发给本人的脱敏快照（见 ws-server.ts 的 playerSnapshot）。 */
 export interface MatchState {
+  /** 服务端当前操作的超时截止时间（Unix 毫秒）。 */
+  actionDeadlineAt?: number;
   roomId: string;
   roundNumber: number;
   seat: number;

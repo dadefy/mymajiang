@@ -19,6 +19,7 @@ interface ActiveMatch {
   game: MahjongGame;
   seatsByUser: Map<string, number>;
   roundNumber: number;
+  actionDeadlineAt?: number;
   /** 快照节流：上次真正落盘的时间；undefined 表示还没写过。 */
   lastSavedAt?: number;
   /** 快照节流：距上次落盘之后状态又变过，尚未写盘。 */
@@ -58,11 +59,12 @@ function sendError(connection: WebSocketConnection, message: string): void {
 }
 
 /** 单个玩家的脱敏视图（含自己的手牌，不含他人手牌）。 */
-export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number): object {
+export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number, actionDeadlineAt?: number): object {
   const player = game.players[seat]!;
   return {
     roomId: room.roomId,
     roundNumber,
+    actionDeadlineAt,
     seat,
     phase: game.phase,
     currentPlayerSeat: game.currentPlayerSeat,
@@ -253,6 +255,7 @@ function buildRealtimeServer(
   function scheduleAutoActions(active: ActiveMatch): void {
     const timers = new Map<number, ReturnType<typeof setTimeout>>();
     const game = active.game;
+    active.actionDeadlineAt = Date.now() + (game.phase === "claiming" ? claimTimeoutMs : playTimeoutMs);
     for (const player of game.players) {
       const actions = game.allowedActions(player.id);
       if (actions.length === 0) continue;
@@ -393,12 +396,12 @@ function buildRealtimeServer(
       interRoundTimers.set(active, timer);
       return;
     }
+    scheduleAutoActions(active);
     for (const [seat, connection] of seatMap ?? []) {
       const player = game.players[seat]!;
-      connection.send({ type: "game", state: playerSnapshot(game, seat, active.room, active.roundNumber) });
+      connection.send({ type: "game", state: playerSnapshot(game, seat, active.room, active.roundNumber, active.actionDeadlineAt) });
       connection.send({ type: "actions", actions: game.allowedActions(player.id) });
     }
-    scheduleAutoActions(active);
     saveRoundState(active);
   }
 
@@ -528,7 +531,7 @@ function buildRealtimeServer(
         const seatMap = seatConnections.get(active) ?? new Map();
         seatMap.set(seat, connection);
         seatConnections.set(active, seatMap);
-        connection.send({ type: "game", state: playerSnapshot(active.game, seat, room, active.roundNumber) });
+        connection.send({ type: "game", state: playerSnapshot(active.game, seat, room, active.roundNumber, active.actionDeadlineAt) });
         connection.send({ type: "actions", actions: active.game.allowedActions(active.game.players[seat]!.id) });
       } else {
         connection.send({ type: "room", status: room.status, playerCount: room.players.size });

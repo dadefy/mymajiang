@@ -1,3 +1,4 @@
+import { installTableLayout } from "./table-layout.js";
 import { SwapSelection } from "./swap-selection.js";
 import { roundResultPanel } from "./round-result.js";
 import { ApiClient } from "../api-client.js";
@@ -116,6 +117,8 @@ function makeSeat(slot: number): SeatState {
 }
 
 /** 四条独立连接。模块加载时就建好，但只有点「自动开局」之后才会真的连上服务端。 */
+installTableLayout();
+
 const seats: SeatState[] = Array.from({ length: SEAT_COUNT }, (_, slot) => makeSeat(slot));
 
 // ---------- DOM ----------
@@ -282,7 +285,8 @@ function tilesArea(seat: SeatState, match: MatchState): HTMLElement {
   area.append(handBox(seat, match));
   // 副露的渲染在 tile-chips.ts，与单人版 `/debug` 共用一份（张数写错肉眼看不出来）。
   const melds = meldBox(match.melds);
-  if (melds.childElementCount > 0) area.append(melds);
+  melds.setAttribute("aria-label", "碰杠区");
+  area.append(melds);
   return area;
 }
 
@@ -433,9 +437,8 @@ function renderCenter(): void {
 
   // 打出去的牌集中在中央 —— 以前它们只是每家卡片里的一串文字，
   // 想看一眼「7万 打过了没有」得在四行文字里找。
-  if (match.phase === "playing" || match.phase === "claiming" || match.phase === "finished") {
-    centerHost.append(discardGrid(match, snapshot));
-  }
+  centerHost.append(discardGrid(match, snapshot));
+  centerHost.append(tableHub(match, roundOver));
 
   // 浮层退场（新一局已经开始）之后留一行摘要：番型与「谁给的牌」不该因为下一局开始
   // 就凭空消失。局间走的是上面的浮层分支，所以这里只在**局中**显示。
@@ -446,6 +449,36 @@ function renderCenter(): void {
     }
   }
 }
+
+function tableHub(match: MatchState, roundOver: boolean): HTMLElement {
+  const container = element("div");
+  const hub = element("div", { className: "table-hub" });
+  const winds = ["东", "南", "西", "北"];
+  winds.forEach((wind, seat) => {
+    const connection = seats.find((entry) => seatNumberOf(entry) === seat);
+    const canAct = connection ? (roomOf(connection)?.actions.length ?? 0) > 0 : false;
+    const acting = !roundOver && (match.phase === "playing" ? match.currentPlayerSeat === seat : canAct);
+    hub.append(element("span", { className: `wind ${SEAT_POSITIONS[seat]}${acting ? " active" : ""}`, text: wind }));
+  });
+  const clock = element("span", { className: "turn-clock", text: "—" });
+  if (!roundOver && match.actionDeadlineAt) {
+    clock.dataset.deadline = String(match.actionDeadlineAt);
+    clock.textContent = String(Math.max(0, Math.ceil((match.actionDeadlineAt - Date.now()) / 1000)));
+  }
+  clock.setAttribute("aria-label", "当前操作剩余秒数");
+  hub.append(clock);
+  container.append(hub, element("div", { className: "wall-counter" }, element("span", {text:"余牌"}), element("strong", {text:String(match.tilesLeft)})), element("div", {className:"center-status", text:roundOver ? "本局结束" : `第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)}`}));
+  return container;
+}
+
+function updateTurnClock(): void {
+  for (const clock of Array.from(document.querySelectorAll<HTMLElement>(".turn-clock[data-deadline]"))) {
+    const seconds = Math.max(0, Math.ceil((Number(clock.dataset.deadline) - Date.now()) / 1000));
+    clock.textContent = String(seconds);
+    clock.classList.toggle("urgent", seconds <= 3);
+  }
+}
+setInterval(updateTurnClock, 200);
 
 /**
  * 中央弃牌区：四家各一格，按座位号排。
@@ -458,7 +491,7 @@ function discardGrid(match: MatchState, snapshot: RoomSnapshot | null): HTMLElem
   const freshSeat = freshDiscardSeat(match);
 
   for (const group of discardGroups(match)) {
-    const cell = element("div", { className: "discard-cell" });
+    const cell = element("div", { className: `discard-cell ${SEAT_POSITIONS[group.seat]}` });
     const position = SEAT_POSITIONS[group.seat];
     // 手牌张数与弃牌张数一起给：牌桌上判断「他听没听、还剩几张」全靠这两个数。
     const handSize = match.players.find((each) => each.seat === group.seat)?.handSize;
