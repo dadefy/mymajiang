@@ -71,8 +71,11 @@ export function installTableLayout(): void {
     #board .seat.bottom .player-profile{left:4%;top:65%}
     .player-avatar{position:relative;aspect-ratio:1;background:linear-gradient(145deg,#b5b8b5,#787f7b);border:2px solid #e2e4d6;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:30px;color:#fff;overflow:hidden;box-shadow:0 3px 8px #0004}
     .player-avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-    .round-score{margin-top:4px;padding:3px 0;border-radius:4px;background:#0a271e;font-size:clamp(11px,1.2vw,17px);font-weight:bold;font-variant-numeric:tabular-nums;white-space:nowrap}
-    .round-score.win{color:#ffdc7f}.round-score.loss{color:#ff9b96}.round-score.even{color:#c5d7cd}
+    /* 头像下面那个数是**整局累计**（8 小场连续累加），所以类名是 match-score 而不是
+       早先的 round-score —— 旧名字正是「换一小场就归零」那套的遗留，留着会让人再改错。
+       赢红输绿按国内习惯（涨红跌绿那一套）。 */
+    .match-score{margin-top:4px;padding:3px 0;border-radius:4px;background:#0a271e;font-size:clamp(12px,1.3vw,19px);font-weight:bold;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .match-score.win{color:#ff6f61}.match-score.loss{color:#6fe0a8}.match-score.even{color:#c5d7cd}
     .profile-name{font-size:11px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#d8e3d9}
     .profile-badges{position:absolute;left:calc(100% + 4px);top:0;display:flex;flex-direction:column;gap:5px}
     #board .seat.right .profile-badges{left:auto;right:calc(100% + 4px)}

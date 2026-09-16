@@ -22,20 +22,38 @@ function who(snapshot: RoomSnapshot | null, playerId: string): string {
 function signed(value: number): string {
   return `${value >= 0 ? "+" : ""}${value}`;
 }
+export { signed };
 
-/** 单局结束的原因，翻成中文。服务端给的是枚举。 */
+/**
+ * 一小场结束的原因，翻成中文。服务端给的是枚举。
+ *
+ * 术语按玩法统一：**小场**是打一局牌（血战到底打到底），**一整局**由 8 小场组成，
+ * 账号积分只在整局结算时改。所以这里写「三家胡」而不是「三家胡牌」，
+ * 也刻意不出现「局」字 —— 那个字归整局用（见 `matchResultText`）。
+ */
 const ROUND_REASON: Record<RoomResult["reason"], string> = {
   "three-winners": "三家胡",
   "wall-exhausted": "流局",
   dissolved: "中途解散",
 };
 
-const MATCH_REASON: Record<MatchResult["reason"], string> = {
-  completed: "打满 8 局",
-  dissolved: "中途解散",
-};
+/** 一小场结束的原因文案；认不出的取值原样返回，不返回 undefined。 */
+export function roundReasonText(reason: RoomResult["reason"]): string {
+  return ROUND_REASON[reason] ?? reason;
+}
 
-/** 单局结算的一行摘要（含每家这一局的得失分）。 */
+/**
+ * 「第 3/8 小场」。**只有这一处拼这个串** —— 术语要统一，散着写必然出现
+ * 「第 3 局」「第 3 小场」混用，玩家看到的就不知道是同一件事。
+ *
+ * `totalRounds` 缺省时按 8 兜底：那是 `MIANYANG_XZ_1_0.rounds`，规则写死的；
+ * 服务端会下发这个数（`MatchState.totalRounds`），这里只是对着不下发它的旧服务端兜底。
+ */
+export function roundLabel(roundNumber: number, totalRounds?: number): string {
+  return `第 ${roundNumber}/${totalRounds ?? 8} 小场`;
+}
+
+/** 一小场结算的一行摘要（含每家这一小场的得失分）。 */
 export function roundResultText(result: RoomResult, snapshot: RoomSnapshot | null): string {
   const deltas = (result.deltas ?? [])
     .map((entry) => `${who(snapshot, entry.playerId)} ${signed(entry.delta)}`)
@@ -43,11 +61,11 @@ export function roundResultText(result: RoomResult, snapshot: RoomSnapshot | nul
   const winners = result.winnerSeats.length > 0
     ? `赢家座位 ${result.winnerSeats.join("、")}`
     : "无人胡牌";
-  return `上一局（${ROUND_REASON[result.reason] ?? result.reason}）${winners}　${deltas}`;
+  return `上一小场（${roundReasonText(result.reason)}）${winners}　${deltas}`;
 }
 
 /**
- * 结算界面上的倒计时文案：`5 秒后开始下一局`。
+ * 结算界面上的倒计时文案：`5 秒后开始下一小场`。
  *
  * 入参是**时刻**而不是剩余秒数 —— 渲染层隔一会儿拿当前时间调一次，文案才会自己往前走。
  * `nextRoundAt` 为 null 表示不停留（或对着的是不下发该字段的旧服务端），
@@ -57,8 +75,8 @@ export function countdownText(nextRoundAt: number | null, now: number): string |
   if (nextRoundAt === null) return null;
   const remaining = nextRoundAt - now;
   // 到点后可能还要等一小会儿才收到新局帧（网络那一跳），别说「0 秒」让人干等。
-  if (remaining <= 0) return "正在开始下一局…";
-  return `${Math.ceil(remaining / 1000)} 秒后开始下一局`;
+  if (remaining <= 0) return "正在开始下一小场…";
+  return `${Math.ceil(remaining / 1000)} 秒后开始下一小场`;
 }
 
 /** 座位号换昵称；对不上时退化成「X 号位」，绝不返回 undefined。 */
@@ -116,11 +134,14 @@ export function winLines(result: RoomResult, snapshot: RoomSnapshot | null): str
 }
 
 /**
- * 整场结算的一行摘要。
+ * 整局结算的一行摘要。
  *
- * 用 `rawDeltas`（这一场的净胜负，未按封顶/负分包处理）—— 那是玩家最关心的数。
+ * 用 `rawDeltas`（这一整局的净胜负，未按封顶/负分包处理）—— 那是玩家最关心的数。
  * `accountDeltas` 才是实际写入账号的分值，两者不同时说明触发了封顶或禁止负分，
  * 所以这里只在**两者不一致**时把账号分补在后面。
+ *
+ * 「打满 8 小场」这个数不写死 8，直接报服务端给的 `completedRounds` ——
+ * 中途解散时它是「已打了几个小场」，同样要说得出来。
  */
 export function matchResultText(result: MatchResult, snapshot: RoomSnapshot | null): string {
   const raw = result.rawDeltas ?? [];
@@ -131,5 +152,8 @@ export function matchResultText(result: MatchResult, snapshot: RoomSnapshot | nu
     const suffix = settled !== undefined && settled !== entry.delta ? `（结算 ${signed(settled)}）` : "";
     return `${who(snapshot, entry.playerId)} ${signed(entry.delta)}${suffix}`;
   });
-  return `整场结束（${MATCH_REASON[result.reason] ?? result.reason}，共 ${result.completedRounds} 局）　${parts.join("　")}`;
+  const reason = result.reason === "dissolved"
+    ? `中途解散，已打 ${result.completedRounds} 小场`
+    : `打满 ${result.completedRounds} 小场`;
+  return `本局结束（${reason}）　${parts.join("　")}`;
 }

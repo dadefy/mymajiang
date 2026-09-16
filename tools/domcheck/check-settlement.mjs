@@ -56,6 +56,10 @@ const clickAll = (labels) => {
 const winSummaries = () => [...document.querySelectorAll(".win-summary")].map((node) => node.textContent ?? "");
 /** 结算面板里每位玩家的行（含自家「怎么胡的」）。 */
 const playerRows = () => [...document.querySelectorAll(".result-player p")].map((node) => node.textContent ?? "");
+/** 弹窗顶上那一排四家分数：本小场的变化，按座位排。 */
+const scoreValues = () => [...document.querySelectorAll("#center .score-value")].map((node) => node.textContent.trim());
+/** 弹窗标题：「第 N/8 小场结束 · 三家胡」。 */
+const panelTitle = () => document.querySelector("#center h2")?.textContent?.trim() ?? "";
 
 let captured = null;
 const until = Date.now() + SECONDS * 1000;
@@ -64,7 +68,7 @@ while (Date.now() < until) {
   // 本局一结束就抓一次（面板只在结算那一刻存在）。
   const summaries = winSummaries();
   if (summaries.length > 0 || meta.includes("本局结束")) {
-    captured = { summaries, rows: playerRows(), meta };
+    captured = { summaries, rows: playerRows(), meta, scores: scoreValues(), title: panelTitle() };
     if (summaries.length > 0) break;
   }
 
@@ -91,6 +95,9 @@ if (!captured) {
   if (captured.summaries.length === 0) console.log(`  （没有 .win-summary 行；阶段文本：${captured.meta}）`);
   console.log("\n=== 结算面板里每位玩家那一行 ===");
   for (const line of captured.rows) console.log(`  ${line}`);
+  console.log("\n=== 顶上那排四家分数（本小场）===");
+  console.log(`  标题：${captured.title || "（没有 h2）"}`);
+  console.log(`  四个数字：${captured.scores.join("　") || "（一个都没有）"}`);
 }
 
 const failures = [];
@@ -102,6 +109,16 @@ else {
     if (!/番/.test(line)) failures.push(`缺番型：${line}`);
     if (!/(自摸|打出的|抢杠)/.test(line)) failures.push(`没写清怎么胡的、谁给的牌：${line}`);
   }
+  // 顶上那排分数：真实对局里也要画出来，而且是**零和**的四个数。
+  // 单测与离线探针都覆盖不到这里 —— 它们用的是构造出来的帧，这条走的是真结算。
+  if (captured.scores.length !== 4) {
+    failures.push(`结算弹窗里应有四家分数，实际 ${captured.scores.length} 个`);
+  } else {
+    const total = captured.scores.reduce((sum, text) => sum + Number(text), 0);
+    if (!Number.isFinite(total)) failures.push(`分数不是数字：${captured.scores.join("　")}`);
+    else if (total !== 0) failures.push(`四家分数不是零和：${captured.scores.join("　")}（合计 ${total}）`);
+  }
+  if (!/^第 \d+\/8 小场结束/.test(captured.title)) failures.push(`弹窗标题没写清是第几小场：${captured.title}`);
 }
 
 console.log("");

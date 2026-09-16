@@ -1,13 +1,14 @@
 import { DiscardSelection } from "./discard-selection.js";
 import { SwapSelection } from "./swap-selection.js";
-import { roundResultPanel } from "./round-result.js";
+import { roundResultPanel, isRoundResultDismissed } from "./round-result.js";
+import { matchResultPanel } from "./match-result.js";
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
 import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { matchResultText, roundResultText, winLines } from "./result-text.js";
+import { roundLabel, roundResultText, winLines } from "./result-text.js";
 import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
 import { meldBox } from "./tile-chips.js";
 import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
@@ -448,20 +449,30 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   // **不是** `match.phase === "finished"` —— 服务端一局结束时只发结算帧、不发 game 帧，
   // 客户端的 match 永远停在结束之前的状态，那个判据一次都不会成立。
   const roundOver = screen.match === null || screen.roundFinished;
+  // 按掉弹窗之后要**重画一次**：打满 8 小场时接着要显示整局结算记录，
+  // 而那一刻服务端已经不再发帧，没人重画的话结算记录永远不出现。
+  const repaint = (): void => {
+    const current = flow.current;
+    if (current.name === "room") renderRoom(current);
+  };
   if (screen.lastResult && roundOver) {
-    app.append(roundResultPanel(screen.lastResult, screen.snapshot, screen.nextRoundAt));
+    // 一小场结束弹的是那一小场的分数；打满 8 小场、按掉它之后才出整局结算记录
+    // （账号积分正是在后者那一刻改的，两件事不能同时压在屏幕上）。
+    app.append(screen.lastMatchResult && isRoundResultDismissed(screen.lastResult)
+      ? matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint)
+      : roundResultPanel(screen.lastResult, screen.snapshot, screen.nextRoundAt, repaint));
   } else if (screen.lastResult) {
-    const summary = panel("上一局");
+    const summary = panel("上一小场");
     summary.append(element("p", { className: "hint", text: roundResultText(screen.lastResult, screen.snapshot) }));
     for (const line of winLines(screen.lastResult, screen.snapshot)) {
       summary.append(element("p", { className: "hint", text: line }));
     }
     app.append(summary);
   }
-  // 整场结算与单局结算是两个形状，分开渲染（见 result-text.ts）。
-  if (screen.lastMatchResult) {
-    app.append(panel("整场结束", element("p", { className: "turn other", text:
-      matchResultText(screen.lastMatchResult, screen.snapshot) })));
+  // 结算记录与上面那两块分开：它的形状来自域包（`rawDeltas` + `accountDeltas`），
+  // 与单局的 `deltas` 完全不同（见 result-text.ts）。
+  if (screen.lastMatchResult && !(screen.lastResult && roundOver)) {
+    app.append(matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint));
   }
 }
 
@@ -506,7 +517,7 @@ function orderLine(match: MatchState, snapshot: RoomSnapshot | null): HTMLElemen
 }
 
 function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapshot | null): HTMLElement {
-  const box = panel(`第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)} · 我坐 ${match.seat} 号位 · 牌墙剩 ${match.tilesLeft}`);
+  const box = panel(`${roundLabel(match.roundNumber, match.totalRounds)} · ${phaseLabel(match.phase)} · 我坐 ${match.seat} 号位 · 牌墙剩 ${match.tilesLeft}`);
 
   // 谁该出牌必须一眼看到，所以先给顶部大字，再给一整圈顺序。
   box.append(turnBanner(match, snapshot), orderLine(match, snapshot));

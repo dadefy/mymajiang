@@ -143,7 +143,7 @@ git pull --rebase            # 开始干活前先同步
 
 ```powershell
 pnpm build       # 生产构建 + 各共享包构建（必须在 test 之前，见下面的坑）
-pnpm test        # 全部测试（当前 45 个文件 / 434 项）
+pnpm test        # 全部测试（当前 45 个文件 / 437 项）
 pnpm typecheck   # 各包类型检查
 ```
 

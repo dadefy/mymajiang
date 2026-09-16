@@ -560,6 +560,18 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     return reply.status(201).send(reversal);
   });
 
+  /**
+   * 当前账号的最新状态。与登录返回的会话同形，只是不带令牌。
+   *
+   * 存在的理由是**积分**：一整局打满 8 小场才入账（见 ws-server 的 `finalize`），
+   * 而客户端手里的会话是开局前登录那一刻的快照 —— 打完一整局回首页必须重新拉一次，
+   * 否则看到的还是开局前的余额，像分没进账。
+   */
+  app.get("/v1/me", async (request) => {
+    const account = await requireUser(request.headers, dependencies);
+    return sessionView(account, dependencies);
+  });
+
   app.get("/v1/users/:userId", async (request) => {
     const params = z.object({ userId: z.string().regex(/^\d{10}$/) }).parse(request.params);
     const actor = await requireUser(request.headers, dependencies);

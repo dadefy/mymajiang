@@ -85,8 +85,7 @@ describe("单局结算摘要", () => {
 describe("整场结算摘要", () => {
   it("用 rawDeltas 列出四家的净胜负", () => {
     const text = matchResultText(match, room);
-    expect(text).toContain("打满 8 局");
-    expect(text).toContain("共 8 局");
+    expect(text).toContain("打满 8 小场");
     expect(text).toContain("0 号位 +48");
     expect(text).toContain("3 号位 -96");
   });
@@ -95,7 +94,7 @@ describe("整场结算摘要", () => {
     // 回归保护：如果把单局的形状喂进来，这里既不该崩、也不该假装有数据。
     const wrongShape = { roomId: "r", completedRounds: 8, reason: "completed" } as MatchResult;
     expect(() => matchResultText(wrongShape, room)).not.toThrow();
-    expect(matchResultText(wrongShape, room)).toContain("共 8 局");
+    expect(matchResultText(wrongShape, room)).toContain("打满 8 小场");
   });
 
   it("触发封顶或禁止负分时，额外标出实际结算分", () => {
@@ -239,9 +238,9 @@ describe("局间倒计时", () => {
   const now = 1_000_000;
 
   it("按剩余时间向上取整 —— 还剩 1ms 也说「1 秒」而不是「0 秒」", () => {
-    expect(countdownText(now + 5_000, now)).toBe("5 秒后开始下一局");
-    expect(countdownText(now + 4_001, now)).toBe("5 秒后开始下一局");
-    expect(countdownText(now + 1, now)).toBe("1 秒后开始下一局");
+    expect(countdownText(now + 5_000, now)).toBe("5 秒后开始下一小场");
+    expect(countdownText(now + 4_001, now)).toBe("5 秒后开始下一小场");
+    expect(countdownText(now + 1, now)).toBe("1 秒后开始下一小场");
   });
 
   it("同一秒内多次调用文案不变（渲染层 250ms 刷一次，不该跳数字）", () => {
@@ -250,8 +249,8 @@ describe("局间倒计时", () => {
   });
 
   it("到点后改成「正在开始下一局…」—— 新局帧还在路上，别说「0 秒」让人干等", () => {
-    expect(countdownText(now, now)).toBe("正在开始下一局…");
-    expect(countdownText(now - 500, now)).toBe("正在开始下一局…");
+    expect(countdownText(now, now)).toBe("正在开始下一小场…");
+    expect(countdownText(now - 500, now)).toBe("正在开始下一小场…");
   });
 
   it("不停留（或老服务端不下发）时返回 null，调用方整块不显示", () => {

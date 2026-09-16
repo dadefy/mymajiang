@@ -24,6 +24,14 @@ export interface SessionView {
   token: string;
 }
 
+/**
+ * `GET /v1/me`：当前账号的最新状态。与登录返回的 `SessionView` 同形，只是不带令牌。
+ *
+ * 存在的理由是**积分**：账号积分只在整局结算那一刻改，而客户端手里的 session 是开局前
+ * 登录那一刻的快照 —— 打完一整局回首页，不重新拉一次就还是旧余额，看着像「分没进账」。
+ */
+export type MeView = Omit<SessionView, "token">;
+
 /** 账号上挂着的、还能回去的那一局。 */
 export interface ActiveRoomView {
   roomId: string;
@@ -69,7 +77,13 @@ export interface RoomSnapshot {
   ownerId: string;
   completedRounds: number;
   players: RoomPlayerView[];
-  result: RoomResult | null;
+  /**
+   * 整场结果。**不是单局的那个 `RoomResult`** —— 服务端 `roomSnapshot()` 送的是
+   * `room.result`，也就是域层的整场结果（`rawDeltas` + `accountDeltas`）。
+   * 这里原先写成单局形状，属于协议漂移（同样是两个包各自命名 `RoomResult` 造成的）；
+   * 目前没有调用方读它，所以改对不会牵动任何界面。
+   */
+  result: MatchResult | null;
 }
 
 /**
@@ -98,10 +112,29 @@ export interface WinDetail {
   points: number;
 }
 
-/** **单局**结算。字段来自 `packages/rules` 的 `RoundResult`。 */
+/** **单局**（一小场）结算。字段来自 `packages/rules` 的 `RoundResult`。 */
 export interface RoomResult {
+  /**
+   * 这是第几小场（从 1 起）、一整局共几小场。
+   * 一小场结束的弹窗要显示「第 3/8 小场」，所以得有这两个数。
+   */
+  roundNumber?: number;
+  totalRounds?: number;
   /** 仅在本局结束后下发；旧服务端可能不提供。 */
-  players?: Array<{ playerId: string; seat: number; won: boolean; hand: Tile[]; melds: Array<{ kind: "pong" | "kong"; tile: Tile; concealed?: boolean }> }>;
+  players?: Array<{
+    playerId: string;
+    seat: number;
+    won: boolean;
+    hand: Tile[];
+    melds: Array<{ kind: "pong" | "kong"; tile: Tile; concealed?: boolean }>;
+    /**
+     * **含本小场在内**的整局累计净输赢。
+     *
+     * 局间停留时服务端不再发对局帧，客户端手上那帧的 `matchDelta` 差着本小场的最后一个
+     * 事件（例如最后那家胡牌的收分），所以局间的头像要用这里的值。
+     */
+    matchDelta?: number;
+  }>;
   /** 每位赢家胡了什么、谁给的牌；旧服务端可能不提供。 */
   wins?: WinDetail[];
   reason: "three-winners" | "wall-exhausted" | "dissolved";
@@ -125,6 +158,14 @@ export interface MatchResult {
   reason: "completed" | "dissolved";
   rawDeltas: Array<{ playerId: string; delta: number }>;
   accountDeltas: Array<{ playerId: string; delta: number }>;
+  /**
+   * 每位玩家**入账之后**的账号余额，随 `match-finished` 帧下发。
+   *
+   * 只有在结算真的改过账号分之后才有意义 —— 客户端手里的 session 是开局前登录时的快照，
+   * 看不到这个新值，而结算记录要写「积分已入账 → 新余额 N」。
+   * 从 REST 的房间快照拿不到（房间已结束），所以必须跟着帧走。
+   */
+  balances?: Array<{ playerId: string; balance: number }>;
 }
 
 export interface MatchPlayerView {
@@ -253,7 +294,10 @@ export interface MatchState {
   /** 服务端当前操作的超时截止时间（Unix 毫秒）。 */
   actionDeadlineAt?: number;
   roomId: string;
+  /** 正在打第几小场（从 1 起）。 */
   roundNumber: number;
+  /** 一整局共几小场（8）。服务端下发，省得两端各硬编码一个 8。 */
+  totalRounds?: number;
   seat: number;
   phase: "swapping" | "missing" | "playing" | "claiming" | "finished";
   currentPlayerSeat: number | null;
@@ -267,8 +311,13 @@ export interface MatchState {
   players: Array<{
     seat: number;
     handSize: number;
-    /** 本局事件账本累计净输赢，不是账户余额。 */
+    /** 本小场事件账本累计净输赢，换一小场归零。不是账户余额。 */
     roundDelta?: number;
+    /**
+     * **整局累计**净输赢（跨 8 小场连续累加，换一小场不清零）。
+     * 头像下面显示的就是它；也不是账户余额 —— 账号积分要到整局结算才动。
+     */
+    matchDelta?: number;
     avatarUrl?: string;
     melds: VisibleMeld[];
     discards: Tile[];

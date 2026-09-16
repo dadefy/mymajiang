@@ -278,16 +278,16 @@ while (Date.now() < until) {
       modalLeakSamples.push(`${line} → 仍有 ${document.querySelectorAll(".result-player").length} 个 result-player`);
     }
   }
-  // 浮层退场后应留下「上一局…」摘要，否则番型与放炮者就白显示了。
+  // 浮层退场后应留下「上一小场…」摘要，否则番型与放炮者就白显示了。
   if (inRound && [...document.querySelectorAll("#center .hint")]
-    .some((node) => (node.textContent ?? "").startsWith("上一局"))) {
+    .some((node) => (node.textContent ?? "").startsWith("上一小场"))) {
     if (Date.now() - lastSummaryAt > 2000) summarySeen += 1;
     lastSummaryAt = Date.now();
   }
   // 局间（meta 为空）应看到倒计时，且文案里的秒数要往下走 —— 静态文案看不出「在倒计时」。
   if (!inRound) {
     const text = document.querySelector("#center .countdown")?.textContent ?? "";
-    if (/^\d+ 秒后开始下一局$/.test(text)) {
+    if (/^\d+ 秒后开始下一小场$/.test(text)) {
       countdownTexts.add(text);
       const seconds = Number(text.slice(0, text.indexOf(" ")));
       if (countdownMinSeconds === null || seconds < countdownMinSeconds) countdownMinSeconds = seconds;
@@ -404,7 +404,7 @@ if (countdownTexts.size < 2) {
 }
 if (modalLeaks > 0) failures.push(`新局进行中还挂着结算浮层（${modalLeaks} 个采样帧）`);
 else if (panelSamples.length > 0 && summarySeen === 0) {
-  failures.push("有局结束过，但新局里没出现「上一局…」摘要（结算信息丢了）");
+  failures.push("有局结束过，但新局里没出现「上一小场…」摘要（结算信息丢了）");
 }
 if (roundFrames.length === 0) failures.push("服务端没有下发结算帧");
 else if (!roundFrames.every((frame) => frame.keys.includes("wins"))) failures.push("结算帧里没有 wins 字段");

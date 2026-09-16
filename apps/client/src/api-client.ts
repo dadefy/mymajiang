@@ -7,6 +7,7 @@ import type {
   GroupSummary,
   MatchRoundView,
   MatchSummary,
+  MeView,
   PublicUser,
   RoomResult,
   RoomSnapshot,
@@ -135,6 +136,15 @@ export class ApiClient {
     const result = await this.call<null>({ method: "POST", path: "/v1/account/delete" });
     if (result.ok) this.bearer = undefined;
     return result;
+  }
+
+  /**
+   * 当前账号的最新状态。
+   *
+   * 回首页时拉一次：**账号积分只在整局结算那一刻改**，不重新拉就永远显示开局前那个余额。
+   */
+  me(): Promise<ApiResult<MeView>> {
+    return this.call({ method: "GET", path: "/v1/me" });
   }
 
   /** 精确搜索：返回用户资料与两人的关系状态。 */

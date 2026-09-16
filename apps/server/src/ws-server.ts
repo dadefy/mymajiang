@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import type { Server as HttpServer } from "node:http";
 import type { Socket } from "node:net";
 import {
+  MIANYANG_XZ_1_0,
   MahjongGame,
   type ClaimAction,
   type Suit,
@@ -58,12 +59,42 @@ function sendError(connection: WebSocketConnection, message: string): void {
   connection.send({ type: "error", message });
 }
 
+/**
+ * 一位玩家在**本小场**（这一局）事件账本上的净输赢。换一小场就归零。
+ *
+ * 事件账本是「这一局里谁付给谁多少」的流水，所以只有本小场的信息 ——
+ * 头像上要显示的是**整局**累计，那是 `matchTotal`。
+ */
+function roundNet(game: MahjongGame, playerId: string): number {
+  return game.events.reduce(
+    (total, event) => total + (event.payee === playerId ? event.points : 0) - (event.payer === playerId ? event.points : 0),
+    0,
+  );
+}
+
+/**
+ * 一位玩家**整局**（打满 8 小场）的净输赢累计。
+ *
+ * 两截相加是必须的，缺一段就会错：
+ *   * `room.rawDeltas` 由 `recordCompletedRound` 在**小场结算时**才累加 ——
+ *     只看它，正打着的这一小场不进去，头像上的数字要等下一小场开始才动；
+ *   * 只看事件账本（`roundNet`），换一小场就归零 ——
+ *     那正是「头像下面记的是本小场、不是一整局」这个缺陷本身。
+ *
+ * 换局后新引擎的 `events` 是空的，`rawDeltas` 正好接上前几小场，两段不会重复计。
+ */
+function matchTotal(room: MatchRoom, game: MahjongGame, playerId: string): number {
+  return (room.rawDeltas?.get(playerId) ?? 0) + roundNet(game, playerId);
+}
+
 /** 单个玩家的脱敏视图（含自己的手牌，不含他人手牌）。 */
 export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number, actionDeadlineAt?: number): object {
   const player = game.players[seat]!;
   return {
     roomId: room.roomId,
     roundNumber,
+    /** 一整局共几小场（8）。客户端显示「第 N/8 小场」用，省得两边各写一个 8。 */
+    totalRounds: MIANYANG_XZ_1_0.rounds,
     actionDeadlineAt,
     seat,
     phase: game.phase,
@@ -78,7 +109,10 @@ export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom,
     players: game.players.map((other) => ({
       seat: other.seat,
       avatarUrl: room.players?.get(other.id)?.account.avatarUrl,
-      roundDelta: game.events.reduce((total, event) => total + (event.payee === other.id ? event.points : 0) - (event.payer === other.id ? event.points : 0), 0),
+      /** 本小场（这一局）的净输赢；换一小场归零，只给结算界面用。 */
+      roundDelta: roundNet(game, other.id),
+      /** 整局累计净输赢 —— 头像下面显示的就是它，跨 8 小场连续累加。 */
+      matchDelta: matchTotal(room, game, other.id),
       handSize: other.won ? other.winningHand.length : other.handSize,
       // 别人的暗杠是扣着的，牌值不下发（见 meld-visibility.ts）——
       // 否则任何打开开发者工具的人都能读出对手暗杠的是哪张牌。
@@ -91,12 +125,26 @@ export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom,
   };
 }
 
-/** 只允许已结束的本局公开四家牌面。 */
-export function roundSettlement(game: MahjongGame) {
+/**
+ * 只允许已结束的本局公开四家牌面。
+ *
+ * 同时把**整局累计**一并带上（`players[].matchDelta`）：局间停留期间服务端不再发对局帧，
+ * 客户端手里那帧是这一小场最后一次动作**之前**的，累计分差着最后一个事件
+ * （真发生过：结算一看，头像上的数字与结算面板对不上）。这里给一份权威值。
+ */
+export function roundSettlement(
+  game: MahjongGame,
+  context: { room?: MatchRoom; roundNumber?: number } = {},
+) {
   if (game.phase !== "finished" || !game.result) throw new Error("Round has not finished");
   const result = game.result;
+  const room = context.room;
   return {
     ...result,
+    /** 这是第几小场（从 1 起）；调用方没给时不带这个字段。 */
+    roundNumber: context.roundNumber,
+    /** 一整局共几小场（8）。 */
+    totalRounds: MIANYANG_XZ_1_0.rounds,
     deltas: game.players.map((player) => ({
       playerId: player.id,
       delta: result.deltas.find((entry) => entry.playerId === player.id)?.delta ?? 0,
@@ -107,6 +155,8 @@ export function roundSettlement(game: MahjongGame) {
       won: player.won,
       hand: [...(player.won ? player.winningHand : player.hand)],
       melds: player.melds.map((meld) => ({ ...meld })),
+      /** 含本小场在内的整局累计净输赢。没有房间上下文时不给（见 `matchTotal`）。 */
+      matchDelta: room ? matchTotal(room, game, player.id) : undefined,
     })),
   };
 }
@@ -341,7 +391,7 @@ function buildRealtimeServer(
       // 而「剩余动作 / 托管定时器 / 重连」都还会再走到这里 —— 没有这道闸就会重复发
       // round-finished、重复 +1 completedRounds、并开出好几局新牌。
       if (interRoundTimers.has(active)) return;
-      const roundResult = roundSettlement(game);
+      const roundResult = roundSettlement(game, { room: active.room, roundNumber: active.roundNumber });
       for (const connection of seatMap?.values() ?? []) {
         connection.send({
           type: "round-finished",
@@ -356,8 +406,14 @@ function buildRealtimeServer(
       if (matchResult) {
         for (const player of active.room.players.values()) dependencies.accountStore.saveAccount(player.account);
         await dependencies.accountStore.flush?.();
+        // 入账之后的账号余额。结算界面要显示「积分已入账 → 新余额」，
+        // 而客户端手里的 session 还是开局前那次登录的快照，只有服务端知道新值。
+        const balances = [...active.room.players.values()].map((player) => ({
+          playerId: player.account.userId,
+          balance: player.account.points,
+        }));
         for (const connection of seatMap?.values() ?? []) {
-          connection.send({ type: "match-finished", result: matchResult });
+          connection.send({ type: "match-finished", result: { ...matchResult, balances } });
         }
         dependencies.gameStateStore?.clear(active.room.roomId);
         clearInterRoundTimer(active);

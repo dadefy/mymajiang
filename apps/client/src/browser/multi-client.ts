@@ -2,14 +2,15 @@ import { DiscardSelection } from "./discard-selection.js";
 import { playerProfile } from "./player-profile.js";
 import { installTableLayout } from "./table-layout.js";
 import { SwapSelection } from "./swap-selection.js";
-import { roundResultPanel } from "./round-result.js";
+import { roundResultPanel, isRoundResultDismissed } from "./round-result.js";
+import { matchResultPanel } from "./match-result.js";
 import { ApiClient } from "../api-client.js";
 import { ClientFlow, type Screen } from "../flow.js";
 import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
 import { button, element } from "./dom.js";
 import { actionButtons, runAction } from "./action-buttons.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { matchResultText, roundResultText, winLines } from "./result-text.js";
+import { roundLabel, roundResultText, winLines } from "./result-text.js";
 import { nicknameOf, resolveSeat, sortedHand } from "./table-order.js";
 import { discardGroups, freshDiscardSeat } from "./tile-view.js";
 import { meldBox, tileChip } from "./tile-chips.js";
@@ -237,7 +238,7 @@ function renderBar(): void {
   barHost.replaceChildren(
     element("span", { text: "四家同屏 · 一台设备控制四个玩家" }),
     ...(snapshot ? [element("span", { className: "hint", text: `房间号 ${snapshot.roomNo}` })] : []),
-    ...(match ? [element("span", { className: "hint", text: `第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)} · 牌墙剩 ${match.tilesLeft}` })] : []),
+    ...(match ? [element("span", { className: "hint", text: `${roundLabel(match.roundNumber, match.totalRounds)} · ${phaseLabel(match.phase)} · 牌墙剩 ${match.tilesLeft}` })] : []),
     element("span", { className: "spacer" }),
     button("重来", resetAll),
   );
@@ -264,10 +265,17 @@ function seatCard(seat: SeatState, seatNo: number): HTMLElement {
     if (match.missingSuit) head.append(element("span", { className: "tag", text: `缺${SUIT_LABEL[match.missingSuit]}` }));
   }
   card.append(head);
-  const currentDelta = match?.players.find((player) => player.seat === seatNo)?.roundDelta;
-  const settledDelta = room?.roundFinished ? room.lastResult?.deltas.find((entry) => entry.playerId === seat.userId)?.delta : undefined;
+  // 头像下面显示**整局累计**净输赢（跨 8 小场累加），不是本小场。
+  //
+  // 局间要换用结算帧里那份：服务端在一小场结束时只发结算帧、不再发对局帧，
+  // 于是客户端手上那帧是这一小场最后一次动作**之前**的 —— 它的 matchDelta 差着最后一个
+  // 事件（最后一家胡牌的收分）。结算帧里带的是服务端当场算的权威值。
+  const liveTotal = match?.players.find((player) => player.seat === seatNo)?.matchDelta;
+  const settledTotal = room?.roundFinished
+    ? room.lastResult?.players?.find((entry) => entry.playerId === seat.userId)?.matchDelta
+    : undefined;
   card.append(playerProfile({ nickname: seat.nickname, avatarUrl: match?.players.find((player) => player.seat === seatNo)?.avatarUrl ?? "",
-    delta: settledDelta ?? currentDelta, dealer: match?.dealerSeat === seatNo, missingSuit: match?.missingSuit ?? null }));
+    matchDelta: settledTotal ?? liveTotal, dealer: match?.dealerSeat === seatNo, missingSuit: match?.missingSuit ?? null }));
 
   if (!match) {
     card.append(element("p", { className: "hint", text: room?.snapshot?.status === "waiting" ? "等待开局" : "连接中…" }));
@@ -413,23 +421,26 @@ function renderCenter(): void {
   centerHost.replaceChildren();
   const match = anyMatch();
   const snapshot = anySnapshot();
-  const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each);
-  // 局间的可靠信号：**收到了结算帧、还没等到下一局的第一帧**。
+  const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each) ?? null;
+  const matchResult = seats.map((seat) => roomOf(seat)?.lastMatchResult).find((each) => each) ?? null;
+  // 局间的可靠信号：**收到了结算帧、还没等到下一小场的第一帧**。
   //
-  // 不能用 `match.phase === "finished"`：服务端一局结束时只发结算帧、不发 `game` 帧，
+  // 不能用 `match.phase === "finished"`：服务端一小场结束时只发结算帧、不发 `game` 帧，
   // 所以客户端的 `match` 永远停在结束**之前**的状态，那个判据一次都不会成立
   // （表现就是结算浮层压根不渲染，像「结算功能消失了」）。
   const roundOver = match === null || seats.some((seat) => roomOf(seat)?.roundFinished === true);
   if (result && roundOver) {
     // 倒计时的目标时刻取自任一连接（四条连接收的是同一份结算）。
     const nextRoundAt = seats.map((seat) => roomOf(seat)?.nextRoundAt ?? null).find((each) => each !== null) ?? null;
-    centerHost.append(roundResultPanel(result, snapshot, nextRoundAt));
-  }
-
-  // 整场结算要与单局的分开渲染 —— 两者字段不同（见 result-text.ts）。
-  const matchResult = seats.map((seat) => roomOf(seat)?.lastMatchResult).find((each) => each);
-  if (matchResult) {
-    centerHost.append(element("p", { className: "banner", text: matchResultText(matchResult, snapshot) }));
+    // 两件事按顺序发生，不能同时压上来：一小场结束弹的是**那一小场**的分数，
+    // 打满 8 小场之后才出整局结算记录（账号积分正是在后者的那一刻改的）。
+    // 所以最后一小场的弹窗按掉之后，这一块换成结算记录。
+    centerHost.append(matchResult && isRoundResultDismissed(result)
+      ? matchResultPanel(matchResult, snapshot, result, scheduleRender)
+      : roundResultPanel(result, snapshot, nextRoundAt, scheduleRender));
+  } else if (matchResult) {
+    // 万一没收到最后一小场的结算帧（例如中途解散），结算记录也要单独出得来。
+    centerHost.append(matchResultPanel(matchResult, snapshot, result, scheduleRender));
   }
 
   if (!match) {
@@ -444,7 +455,7 @@ function renderCenter(): void {
   centerHost.append(
     element("div", { className: "banner", text: bannerText(match, snapshot, drawnTile) }),
     element("p", { className: "meta", text:
-      `第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)} · 牌墙剩 ${match.tilesLeft} 张` }),
+      `${roundLabel(match.roundNumber, match.totalRounds)} · ${phaseLabel(match.phase)} · 牌墙剩 ${match.tilesLeft} 张` }),
   );
 
   // 打出去的牌集中在中央 —— 以前它们只是每家卡片里的一串文字，
@@ -455,7 +466,7 @@ function renderCenter(): void {
   // 浮层退场（新一局已经开始）之后留一行摘要：番型与「谁给的牌」不该因为下一局开始
   // 就凭空消失。局间走的是上面的浮层分支，所以这里只在**局中**显示。
   if (result && !roundOver) {
-    centerHost.append(element("p", { className: "hint", text: `上一局　${roundResultText(result, snapshot)}` }));
+    centerHost.append(element("p", { className: "hint", text: roundResultText(result, snapshot) }));
     for (const line of winLines(result, snapshot)) {
       centerHost.append(element("p", { className: "hint", text: line }));
     }
@@ -479,7 +490,7 @@ function tableHub(match: MatchState, roundOver: boolean): HTMLElement {
   }
   clock.setAttribute("aria-label", "当前操作剩余秒数");
   hub.append(clock);
-  container.append(hub, element("div", { className: "wall-counter" }, element("span", {text:"余牌"}), element("strong", {text:String(match.tilesLeft)})), element("div", {className:"center-status", text:roundOver ? "本局结束" : `第 ${match.roundNumber} 局 · ${phaseLabel(match.phase)}`}));
+  container.append(hub, element("div", { className: "wall-counter" }, element("span", {text:"余牌"}), element("strong", {text:String(match.tilesLeft)})), element("div", {className:"center-status", text:roundOver ? "本小场结束" : `${roundLabel(match.roundNumber, match.totalRounds)} · ${phaseLabel(match.phase)}`}));
   return container;
 }
 

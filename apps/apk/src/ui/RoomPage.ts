@@ -1,5 +1,5 @@
 import type { ApiClient, ClientFlow, MatchState, MatchResult, RoomResult, RoomSnapshot, Screen, Suit, Tile } from "@mianyang-mahjong/client";
-import { winSummaryText } from "@mianyang-mahjong/client";
+import { roundLabel, winSummaryText } from "@mianyang-mahjong/client";
 import {
   actionAvailable,
   discardableIndexes,
@@ -311,7 +311,11 @@ export class RoomPage {
       this.resultOverlay.visible = false;
       return;
     }
-    this.resultTitle.text = this.lastMatchResult ? "整场结束 · 本局结算" : "本局结算";
+    // 标题分两种：还在一整局里时这是**一小场**的分数（账号积分不动）；
+    // 打满 8 小场之后同一个浮层变成整局结算记录（账号积分正是在那一刻入账的）。
+    this.resultTitle.text = this.lastMatchResult
+      ? `本局结算记录 · 打满 ${this.lastMatchResult.completedRounds} 小场`
+      : `${roundLabel(this.lastResult.roundNumber ?? 1, this.lastResult.totalRounds)}结束`;
     this.resultBody.removeChildren();
     label(this.resultBody, this.lastResult.winnerSeats.length > 0 ? `胡牌：${this.lastResult.winnerSeats.map((seat) => `座位${seat}`).join("、")}` : "流局", 26).pos(0, 0);
     // 每家胡了什么牌型、谁给的牌 —— 结算界面的第一信息，放在牌面之前。
@@ -329,15 +333,21 @@ export class RoomPage {
     players.forEach((player, index) => {
       const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
       const y = rowsTop + index * 190;
-      label(this.resultBody, `${nickOf(player.playerId)}${player.won ? " · 已胡" : ""}  ${delta > 0 ? "赢 " : delta < 0 ? "输 " : ""}${fmtDelta(delta)} 分`, 26, { color: delta >= 0 ? THEME.good : THEME.bad }).pos(0, y);
+      // 这一行有两个数，别混：`delta` 是本小场，`cumulative` 是整局累计（头像下显示的那个）。
+      const cumulative = player.matchDelta;
+      const total = cumulative === undefined ? "" : ` · 本场累计 ${fmtDelta(cumulative)}`;
+      label(this.resultBody, `${nickOf(player.playerId)}${player.won ? " · 已胡" : ""}  ${delta > 0 ? "赢 " : delta < 0 ? "输 " : ""}${fmtDelta(delta)} 分${total}`, 26, { color: delta >= 0 ? THEME.good : THEME.bad }).pos(0, y);
       const tiles = sortedHand(player.hand);
       tiles.forEach((tile, i) => {
         const image = new Laya.Image();
         image.skin = tileAsset(tile); image.pos(i * 44, y + 40); image.size(40, 60);
         this.resultBody.addChild(image);
       });
-      const total = this.lastMatchResult?.accountDeltas.find((entry) => entry.playerId === player.playerId);
-      if (total) label(this.resultBody, `整场实际上分：${fmtDelta(total.delta)}`, 20).pos(0, y + 160);
+      const settled = this.lastMatchResult?.accountDeltas.find((entry) => entry.playerId === player.playerId);
+      const balance = this.lastMatchResult?.balances?.find((entry) => entry.playerId === player.playerId)?.balance;
+      if (settled) {
+        label(this.resultBody, `账号入账：${fmtDelta(settled.delta)}${balance === undefined ? "" : ` · 余额 ${balance}`}`, 20).pos(0, y + 160);
+      }
       let x = 0;
       player.melds.forEach((meld) => {
         for (let i = 0; i < (meld.kind === "kong" ? 4 : 3); i++) {

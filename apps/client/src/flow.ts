@@ -313,13 +313,20 @@ export class ClientFlow {
    */
   async refreshHome(): Promise<void> {
     if (this.screen.name !== "home") return;
-    this.set({ ...this.screen, busy: true });
-    const [groups, matches] = await Promise.all([this.api.groups(), this.api.matches()]);
+    // 已经在加载中就不再推一帧「加载中」：`enterHome` 刚设过一次，
+    // 无条件再设会让「回首页」多闪一次（onChange 是按对象引用比的，值一样也算一次变化）。
+    if (!this.screen.busy) this.set({ ...this.screen, busy: true });
+    const [groups, matches, me] = await Promise.all([this.api.groups(), this.api.matches(), this.api.me()]);
     const matchesUnavailable = !matches.ok && matches.error.kind === "unavailable";
     const failure = groups.ok ? (matches.ok || matchesUnavailable ? null : matches.error) : groups.error;
     this.set({
       name: "home",
-      me: this.screen.me,
+      // 用刚拉回来的账号状态覆盖登录时那份快照：**积分只在整局结算时改**，
+      // 打完一整局回到首页，不覆盖就还是开局前的余额（看着像「分没进账」）。
+      // `me` 拉失败时保留原值 —— 它只影响积分显示，不该把整页判成失败。
+      me: me.ok
+        ? { userId: me.value.userId, nickname: me.value.nickname, points: me.value.points }
+        : this.screen.me,
       groups: groups.ok ? groups.value.groups : [],
       matches: matches.ok ? matches.value.matches : [],
       matchesUnavailable,
@@ -704,20 +711,10 @@ export class ClientFlow {
       activeRoom: this.activeRoom,
       busy: true,
     });
-    const [groups, matches] = await Promise.all([this.api.groups(), this.api.matches()]);
-    // 同 refreshHome：战绩不可用（没配数据库）是预期状态，不算失败。
-    const matchesUnavailable = !matches.ok && matches.error.kind === "unavailable";
-    const failure = groups.ok ? (matches.ok || matchesUnavailable ? null : matches.error) : groups.error;
-    this.set({
-      name: "home",
-      me: this.me,
-      groups: groups.ok ? groups.value.groups : [],
-      matches: matches.ok ? matches.value.matches : [],
-      matchesUnavailable,
-      activeRoom: this.activeRoom,
-      busy: false,
-      ...(failure ? { error: describe(failure) } : {}),
-    });
+    // 群列表、战绩与**最新积分**统一交给 refreshHome：原先这里是同一段拉取的副本，
+    // 两处各维护一份必然漂移 —— 打完一整局回首页要重新拉账号状态（积分是在结算那一刻改的），
+    // 只加在 refreshHome 里的话，走 leaveRoom 这条路仍会显示开局前的旧余额。
+    await this.refreshHome();
   }
 
   private meOrFail(): { userId: string; nickname: string; points: number } {

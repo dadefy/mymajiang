@@ -5,6 +5,28 @@ import { playerSnapshot, roundSettlement } from "./ws-server.js";
 
 const ids = ["p0", "p1", "p2", "p3"] as [string, string, string, string];
 describe("round reveal", () => {
+  it("头像用的是**整局累计**：房间已结算的小场 + 本小场的事件账本", () => {
+    // 两个数都要下发，缺一个界面就会错：
+    //   * 只看房间的 `rawDeltas`（一小场结算时才累加）—— 正打着的这一小场不进去，
+    //     头像上的数字要等下一小场开始才动；
+    //   * 只看本小场的账本 —— 换一小场就归零，那正是「头像记的是本小场不是一整局」这个缺陷。
+    const game = new MahjongGame(1, ids, 1);
+    game.events.push({ eventId: "a", type: "win", payer: "p1", payee: "p0", points: 4, note: "这一小场" });
+    const room = {
+      roomId: "r",
+      // 前几小场已经结算、并进房间的累计。
+      rawDeltas: new Map([["p0", 20], ["p1", -20]]),
+      players: new Map(),
+    } as unknown as MatchRoom;
+    const view = playerSnapshot(game, 0, room, 4) as {
+      totalRounds: number;
+      players: Array<{ roundDelta: number; matchDelta: number }>;
+    };
+    expect(view.totalRounds).toBe(8);
+    expect(view.players.map((player) => player.roundDelta)).toEqual([4, -4, 0, 0]);
+    expect(view.players.map((player) => player.matchDelta)).toEqual([24, -24, 0, 0]);
+  });
+
   it("publishes dealer, public avatars and current round net scores from the event ledger", () => {
     const game = new MahjongGame(1, ids, 2);
     game.events.push(
@@ -91,8 +113,14 @@ describe("round reveal", () => {
         game.autoAct(actor!);
       }
 
-      const settlement = roundSettlement(game);
+      const settlement = roundSettlement(game, { room: { roomId: "r", rawDeltas: new Map(), players: new Map() } as unknown as MatchRoom, roundNumber: 3 });
+      expect(settlement.roundNumber).toBe(3);
+      expect(settlement.totalRounds).toBe(8);
       expect(settlement.wins).toHaveLength(game.result!.winnerSeats.length);
+      // 房间那一截是空的（没有已结算的小场），所以整局累计应当就等于本小场。
+      for (const player of settlement.players) {
+        expect(player.matchDelta).toBe(settlement.deltas.find((entry) => entry.playerId === player.playerId)?.delta);
+      }
       settlement.wins.forEach((win, index) => {
         // 与 winnerSeats 同序，客户端才能把「总览」与「明细」对上号。
         expect(win.seat).toBe(game.result!.winnerSeats[index]);

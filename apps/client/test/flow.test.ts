@@ -30,10 +30,29 @@ function flowWith() {
   return { transport, sockets, uploads, flow, screens, http: transport };
 }
 
-/** 主页要的两个列表；不注册的话 refreshHome 会把错误带进页面。 */
-function stubHome(transport: FakeHttpTransport, groups: unknown[] = [], matches: unknown[] = []): void {
+/**
+ * 主页要的三样：群列表、战绩、账号状态。不注册的话 refreshHome 会把错误带进页面。
+ *
+ * `me` 单独给参数是因为它就是**账号积分**：积分只在整局结算那一刻改，
+ * 所以回首页必须重新拉一次才知道新余额（用例见「打完一整局回首页」那一组）。
+ */
+function stubHome(
+  transport: FakeHttpTransport,
+  groups: unknown[] = [],
+  matches: unknown[] = [],
+  /**
+   * 账号状态。给**函数**而不是对象：积分会变 —— 打满一整局之后要能返回新的余额，
+   * 而假传输是「先注册的先匹配」，二次注册同一个路径永远不会生效。
+   */
+  me: () => Record<string, unknown> = () => ({}),
+): void {
   transport.onJson("GET", "/v1/groups", 200, { groups });
   transport.onJson("GET", "/v1/matches", 200, { matches });
+  const { token: _token, ...session } = SESSION;
+  transport.on(
+    (request) => request.method === "GET" && request.path === "/v1/me",
+    () => ({ status: 200, body: { ...session, ...me() } }),
+  );
 }
 
 function stubRoom(transport: FakeHttpTransport, roomId: string, roomNo = "123456"): void {
@@ -854,5 +873,106 @@ describe("ClientFlow", () => {
     await flow.leaveRoom();
 
     expect(flow.current).toMatchObject({ name: "home", activeRoom: null });
+  });
+
+  /**
+   * 「一局共 8 小场，头像记一整局，打满 8 小场才出结算记录，出了结算记录才改账号积分」
+   * ——这条规则的客户端两半都在这里：
+   *   ① 打的过程中只有本小场与整局累计两个数，账号积分一动不动；
+   *   ② 结算帧带的是**入账之后**的余额，而且回首页要重新拉一次账号状态才看得到。
+   */
+  it("打满 8 小场：过程中不动账号，出结算记录时给入账后的余额", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    // 服务端那边的账号余额：打的过程中一直是 0，整局结算那一刻才变成 2040。
+    let points = 0;
+    stubHome(http, [], [], () => ({ points }));
+    stubRoom(http, "room-1");
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    await flow.createRoom();
+    const socket = sockets.last();
+
+    // 第 3 小场结束：本小场 +12、整局累计 +12。这时**还没有**整局结算。
+    socket.serverSends({
+      type: "round-finished",
+      roundNumber: 3,
+      result: {
+        roundNumber: 3,
+        totalRounds: 8,
+        reason: "three-winners",
+        winnerSeats: [0],
+        nextDealerSeat: 1,
+        deltas: [{ playerId: SESSION.userId, delta: 12 }],
+        players: [{ playerId: SESSION.userId, seat: 0, won: true, hand: [], melds: [], matchDelta: 12 }],
+      },
+      nextRoundInMs: 0,
+    });
+
+    const mid = flow.current;
+    expect(mid.name).toBe("room");
+    if (mid.name !== "room") return;
+    expect(mid.lastResult?.roundNumber).toBe(3);
+    expect(mid.lastResult?.players?.[0]?.matchDelta).toBe(12);
+    // 一小场结束**不出**结算记录：那要等一整局打满。
+    expect(mid.lastMatchResult).toBeNull();
+    // 结算帧里没有账号余额 —— 打的过程中账号积分根本不该动。
+    expect(mid.lastResult).not.toHaveProperty("balances");
+
+    // 第 8 小场结束 + 整局结算，两个帧连续到。
+    socket.serverSends({
+      type: "round-finished",
+      roundNumber: 8,
+      result: {
+        roundNumber: 8,
+        totalRounds: 8,
+        reason: "wall-exhausted",
+        winnerSeats: [],
+        nextDealerSeat: 2,
+        deltas: [{ playerId: SESSION.userId, delta: -4 }],
+        players: [{ playerId: SESSION.userId, seat: 0, won: false, hand: [], melds: [], matchDelta: 40 }],
+      },
+      nextRoundInMs: 0,
+    });
+    socket.serverSends({
+      type: "match-finished",
+      result: {
+        roomId: "room-1",
+        completedRounds: 8,
+        reason: "completed",
+        rawDeltas: [{ playerId: SESSION.userId, delta: 40 }],
+        accountDeltas: [{ playerId: SESSION.userId, delta: 40 }],
+        balances: [{ playerId: SESSION.userId, balance: 2040 }],
+      },
+    });
+
+    const done = flow.current;
+    expect(done.name).toBe("room");
+    if (done.name !== "room") return;
+    expect(done.lastMatchResult).toMatchObject({ completedRounds: 8, reason: "completed" });
+    // 入账之后的余额：结算记录要显示「账号 N 分」，这是唯一的来源
+    // （房间已经结束，REST 快照拿不到它）。
+    expect(done.lastMatchResult?.balances?.[0]?.balance).toBe(2040);
+
+    // 回首页：账号积分跟着结算后的余额走。
+    // 不重新拉 /v1/me 的话，剩下的就是登录那一刻的 0 分 —— 看得出「分没进账」。
+    points = 2040; // 服务端在结算那一刻入账了
+    http.onJson("POST", "/v1/rooms/room-1/leave", 204);
+    await flow.leaveRoom();
+    expect(flow.current).toMatchObject({ name: "home", me: { points: 2040 } });
+  });
+
+  it("回首页会重新拉账号状态 —— 积分是在整局结算那一刻改的", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    // 登录时是 0 分，结算后服务端那边已经是 2040。
+    let points = 0;
+    stubHome(http, [], [], () => ({ points }));
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    expect(flow.current).toMatchObject({ name: "home", me: { points: 0 } });
+
+    points = 2040;
+    await flow.refreshHome();
+
+    expect(flow.current).toMatchObject({ name: "home", me: { points: 2040 } });
   });
 });
