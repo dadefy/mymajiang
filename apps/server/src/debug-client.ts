@@ -152,10 +152,13 @@ export function multiClientHtml(options: DebugClientOptions): string {
     .tag.won { background: #4a2b2b; color: #ffc9c9; }
 
     .hand { display: flex; gap: 5px; flex-wrap: wrap; margin: 8px 0; }
-    /* 左右两家按真实牌桌的样子竖着摆，也省横向空间。 */
-    .seat.left .hand, .seat.right .hand { flex-direction: column; flex-wrap: nowrap; align-items: stretch;
-                                          max-height: 380px; overflow: auto; }
-    .seat.left button.tile, .seat.right button.tile { min-width: 0; padding: 6px 8px; }
+    /* 左右两家按真实牌桌的样子竖着摆，也省横向空间。
+       注意 align-items 不能是 stretch：竖排时 stretch 让子元素横向撑满容器，
+       而左右两列是 1fr（宽屏下能有三百多像素）—— 每张牌会被拉成一条长条。
+       改成 center 并给牌一个固定宽度，牌面宽度才和上下两家一致。 */
+    .seat.left .hand, .seat.right .hand { flex-direction: column; flex-wrap: nowrap; align-items: center;
+                                          max-height: 400px; overflow: auto; }
+    .seat.left button.tile, .seat.right button.tile { width: 46px; min-width: 46px; padding: 4px 0; font-size: 13px; }
     .ops { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
     .ops button { padding: 6px 10px; font-size: 13px; }
 
