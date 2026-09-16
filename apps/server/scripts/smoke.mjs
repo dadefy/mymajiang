@@ -52,7 +52,17 @@ check(
       : socketUrl,
 );
 
-const entryUrl = `${BASE}/debug/browser/debug-client.js`;
+// 入口取**页面里实际引用的那个** URL，而不是自己拼一个。
+// 页面用的是带版本段的路径（`/debug/<version>/browser/…`），自己拼就会绕过它 ——
+// 那条路径正是用户浏览器真正加载的，也正是会被 CDN 缓存的那条，必须一起验。
+const entryPath = /<script type="module" src="([^"]+)"/.exec(pageText)?.[1];
+if (!entryPath) {
+  check("页面里能找到入口脚本", false, "HTML 里没有 module script");
+  process.exit(1);
+}
+const entryUrl = new URL(entryPath, BASE).href;
+check("入口是带版本段的路径", /^\/debug\/[a-z0-9]+\/browser\//.test(entryPath), entryPath);
+
 const entry = await fetch(entryUrl);
 check("入口脚本可获取", entry.status === 200 && (entry.headers.get("content-type") ?? "").includes("javascript"),
   `HTTP ${entry.status}`);

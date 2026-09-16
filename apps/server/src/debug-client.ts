@@ -15,6 +15,24 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
  */
 const CLIENT_ROOT = fileURLToPath(new URL("../../client/dist/", import.meta.url));
 
+/**
+ * 静态模块的路径前缀，带一个**随进程启动变化**的版本段。
+ *
+ * 这些文件的 URL 里没有内容哈希，而 CDN 会按 URL 缓存：部署之后 URL 不变，
+ * 于是「源站已是新版、CDN 仍在返回旧副本」—— 用户刷新也看不到改动，
+ * 只能等缓存自然过期。声明 `no-store` 只对**尚未被缓存**的 URL 有效，
+ * 已经躺在 CDN 里的那份不会因此失效。
+ *
+ * 所以把版本放进**路径**而不是 query：模块之间用的是相对导入
+ * （`import "./swap-selection.js"`），相对导入会**丢掉 query 但保留路径**，
+ * 因此只有路径方案能让整棵依赖树都换到新的 URL 上。
+ *
+ * 取值是进程启动时刻 —— 部署必然会重启进程，所以每次部署都会换一批 URL，
+ * 而同一进程内保持不变（不破坏浏览器缓存同一版本内多个页面之间的复用）。
+ */
+const ASSET_VERSION = Date.now().toString(36);
+const ASSET_PREFIX = `/debug/${ASSET_VERSION}`;
+
 const CONTENT_TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -96,7 +114,7 @@ export function debugClientHtml(options: DebugClientOptions): string {
   <header id="bar"></header>
   <main id="app"></main>
   <script>globalThis.__MYMJ_CONFIG__ = ${runtimeConfig};</script>
-  <script type="module" src="/debug/browser/debug-client.js"></script>
+  <script type="module" src="${ASSET_PREFIX}/browser/debug-client.js"></script>
 </body>
 </html>`;
 }
@@ -258,7 +276,7 @@ export function multiClientHtml(options: DebugClientOptions): string {
     </section>
   </main>
   <script>globalThis.__MYMJ_CONFIG__ = ${runtimeConfig};</script>
-  <script type="module" src="/debug/browser/multi-client.js"></script>
+  <script type="module" src="${ASSET_PREFIX}/browser/multi-client.js"></script>
 </body>
 </html>`;
 }
@@ -306,8 +324,21 @@ export function registerDebugClient(app: FastifyInstance, options: DebugClientOp
     .type("text/html; charset=utf-8")
     .send(multiClientHtml(options)));
 
+  // 静态模块。页面里引用的是带版本段的路径（`/debug/<version>/browser/x.js`）；
+  // 这里同时兼容不带版本段的旧路径（`/debug/browser/x.js`，老书签与已缓存页面里的引用）：
+  // 第一段不等于当前版本号时，就把它当成目录名拼回去。
+  app.get("/debug/:version/*", async (request: FastifyRequest, reply: FastifyReply) => {
+    const params = request.params as { version?: string; "*"?: string };
+    const version = params.version ?? "";
+    const rest = params["*"] ?? "";
+    return serveDebugAsset(version === ASSET_VERSION ? rest : `${version}/${rest}`, reply);
+  });
+
   app.get("/debug/*", async (request: FastifyRequest, reply: FastifyReply) => {
     const params = request.params as { "*"?: string };
     return serveDebugAsset(params["*"] ?? "", reply);
   });
 }
+
+/** 当前进程的静态模块路径前缀。测试与自检脚本要用它拼真实的模块地址。 */
+export const debugAssetPrefix = ASSET_PREFIX;

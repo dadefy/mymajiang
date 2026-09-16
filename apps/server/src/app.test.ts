@@ -693,7 +693,10 @@ describe("server API", () => {
     const page = await app.inject({ method: "GET", url: "/debug" });
     expect(page.statusCode).toBe(200);
     expect(page.headers["content-type"]).toContain("text/html");
-    expect(page.body).toContain("/debug/browser/debug-client.js");
+    // 引用的是**带版本段**的路径（`/debug/<version>/browser/...`）：URL 每次部署都变，
+    // CDN 才不会把旧副本继续发给用户。no-store 只对没被缓存过的 URL 有效，
+    // 而已经躺在 CDN 里的那份不会因为源站改了响应头就失效。
+    expect(page.body).toMatch(/\/debug\/[a-z0-9]+\/browser\/debug-client\.js/);
     expect(page.headers["cache-control"]).toBe("no-store");
     // 单端口部署下页面与接口同源，实时通道地址由前端按 location.origin 推导，
     // 所以这里注入的是空串 —— 隧道与反向代理下都自动正确。
@@ -705,7 +708,7 @@ describe("server API", () => {
     expect(multi.statusCode).toBe(200);
     expect(multi.headers["content-type"]).toContain("text/html");
     expect(multi.headers["cache-control"]).toBe("no-store");
-    expect(multi.body).toContain("/debug/browser/multi-client.js");
+    expect(multi.body).toMatch(/\/debug\/[a-z0-9]+\/browser\/multi-client\.js/);
     expect(multi.body).toContain('"socketUrl":""');
 
     // 静态模块也必须 no-store。文件名里没有内容哈希、URL 每次部署都不变，
