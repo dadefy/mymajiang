@@ -111,6 +111,21 @@ export type Screen =
        * 之前合用一个字段，`match-finished` 一来，渲染层按单局去读就抛异常。
        */
       lastMatchResult: MatchResult | null;
+      /**
+       * 本地时刻：下一局预计什么时候开始（服务端下发了停留时长时才有值）。
+       *
+       * 存**时刻**而不是「还剩几秒」：倒计时要在渲染层随本地时钟推进，
+       * 存一个固定的秒数没法动。为 null 表示不停留（或老服务端不下发）。
+       */
+      nextRoundAt: number | null;
+      /**
+       * 这一局已经结算、但下一局还没开始（收到 `round-finished` 到收到新局的 `game` 帧之间）。
+       *
+       * **不能用 `match.phase === "finished"` 代替**：服务端在一局结束时只发结算帧、
+       * 不发 `game` 帧（见 ws-server 的 broadcastState），所以客户端的 `match` 永远停在
+       * 结束**之前**的那个状态（playing / claiming），那个判据一次都不会成立。
+       */
+      roundFinished: boolean;
       busy: boolean;
       notice?: string | undefined;
     }
@@ -719,7 +734,7 @@ export class ClientFlow {
     this.closeSocket();
     this.earlierCursor = undefined;
     this.roomId = roomId;
-    this.set({ name: "room", roomId, roomNo, snapshot: null, match: null, actions: [], lastResult: null, lastMatchResult: null, busy: true });
+    this.set({ name: "room", roomId, roomNo, snapshot: null, match: null, actions: [], lastResult: null, lastMatchResult: null, nextRoundAt: null, roundFinished: false, busy: true });
     const socket = new MatchSocket({ url: this.socketUrl, token, factory: this.sockets });
     socket.on((event) => this.dispatchSocketEvent(event));
     this.socket = socket;
@@ -735,6 +750,8 @@ export class ClientFlow {
       actions: [],
       lastResult: null,
       lastMatchResult: null,
+      nextRoundAt: null,
+      roundFinished: false,
       busy: false,
       ...(snapshot.ok ? {} : { notice: describe(snapshot.error) }),
     });
@@ -760,19 +777,27 @@ export class ClientFlow {
     if (this.screen.name !== "room") return;
     switch (event.kind) {
       case "game":
-        this.set({ ...this.screen, match: event.state, busy: false });
+        // 新一局的第一帧会经过这里 —— 结算浮层该退场了，倒计时的目标也随之作废。
+        this.set({ ...this.screen, match: event.state, busy: false, roundFinished: false, nextRoundAt: null });
         return;
       case "actions":
         this.set({ ...this.screen, actions: event.actions });
         return;
       case "round-finished":
-        this.set({ ...this.screen, lastResult: event.result });
+        // 服务端在这之后会停一会儿（给结算留展示时间）再开下一局。
+        // 把停留时长换算成「下一局开始的本地时刻」，结算界面的倒计时据此推进。
+        this.set({
+          ...this.screen,
+          lastResult: event.result,
+          roundFinished: true,
+          nextRoundAt: event.nextRoundInMs > 0 ? Date.now() + event.nextRoundInMs : null,
+        });
         return;
       case "match-finished":
         // 打完了就没有「回到这一局」可言了，入口同快照一起失效。
         // 整场结算单独存 —— 它的形状和单局结算完全不同（见 `lastMatchResult`）。
         this.activeRoom = null;
-        this.set({ ...this.screen, lastMatchResult: event.result, match: null, actions: [] });
+        this.set({ ...this.screen, lastMatchResult: event.result, match: null, actions: [], nextRoundAt: null });
         return;
       case "error":
         // 实时通道的失败也要翻译：它和 REST 一样透传域层的英文原文。

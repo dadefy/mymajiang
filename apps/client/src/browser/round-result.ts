@@ -1,11 +1,21 @@
 import type { RoomResult, RoomSnapshot } from "../protocol.js";
 import { element } from "./dom.js";
 import { tileChip } from "./tile-chips.js";
-import { winSummaryText } from "./result-text.js";
+import { countdownText, winSummaryText } from "./result-text.js";
 
 const dismissed = new WeakSet<RoomResult>();
 
-export function roundResultPanel(result: RoomResult, snapshot: RoomSnapshot | null): HTMLElement {
+/**
+ * 本局结算面板。
+ *
+ * `nextRoundAt` 是**下一局开始的本地时刻**（没有停留时为 null）—— 传进来是为了显示
+ * 「N 秒后开始下一局」：局间停 5 秒，不给提示的话玩家只是看着一个不动的界面在等。
+ */
+export function roundResultPanel(
+  result: RoomResult,
+  snapshot: RoomSnapshot | null,
+  nextRoundAt: number | null = null,
+): HTMLElement {
   const panel = element("section", { className: "panel" });
   if (!dismissed.has(result)) {
     panel.setAttribute("role", "dialog");
@@ -16,6 +26,18 @@ export function roundResultPanel(result: RoomResult, snapshot: RoomSnapshot | nu
     panel.append(close);
   }
   panel.append(element("h2", { text: `本局结算 · ${result.reason === "three-winners" ? "三家胡牌" : "流局"}` }));
+
+  // 倒计时。只用一个 timer 改这一个节点的文本（不触发整页重渲染）；
+  // 渲染层会整体重建 DOM，旧节点被换掉后 `isConnected` 变 false，timer 自己停掉。
+  const initial = countdownText(nextRoundAt, Date.now());
+  if (initial !== null) {
+    const line = element("p", { className: "countdown", text: initial });
+    const timer = setInterval(() => {
+      if (!line.isConnected) { clearInterval(timer); return; }
+      line.textContent = countdownText(nextRoundAt, Date.now()) ?? "";
+    }, 250);
+    panel.append(line);
+  }
 
   // 胡了什么牌型、谁给的牌 —— 放在牌面之前：玩家第一眼要找的是这个，
   // 而四家的牌面是拿来对照的细节。流局时这一段为空，整块不显示。

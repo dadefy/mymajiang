@@ -392,13 +392,17 @@ function renderCenter(): void {
   const match = anyMatch();
   const snapshot = anySnapshot();
   const result = seats.map((seat) => roomOf(seat)?.lastResult).find((each) => each);
-  // 结算面板是**带遮罩的全屏浮层**，只有「这一局刚打完、下一局还没开」时才有资格占住中央。
+  // 局间的可靠信号：**收到了结算帧、还没等到下一局的第一帧**。
   //
-  // 判据不能只看「有没有 lastResult」：服务端一局结束后会**在同一次广播里立刻开下一局**
-  // （见 ws-server 的 broadcastState），所以 `lastResult` 在新局进行中依然有值 ——
-  // 于是第二局开局后，第一局的结算仍浮在牌桌中间（用户报的现象），而且它带遮罩，
-  // 会把牌桌信息整个盖住。
-  if (result && !match) centerHost.append(roundResultPanel(result, snapshot));
+  // 不能用 `match.phase === "finished"`：服务端一局结束时只发结算帧、不发 `game` 帧，
+  // 所以客户端的 `match` 永远停在结束**之前**的状态，那个判据一次都不会成立
+  // （表现就是结算浮层压根不渲染，像「结算功能消失了」）。
+  const roundOver = match === null || seats.some((seat) => roomOf(seat)?.roundFinished === true);
+  if (result && roundOver) {
+    // 倒计时的目标时刻取自任一连接（四条连接收的是同一份结算）。
+    const nextRoundAt = seats.map((seat) => roomOf(seat)?.nextRoundAt ?? null).find((each) => each !== null) ?? null;
+    centerHost.append(roundResultPanel(result, snapshot, nextRoundAt));
+  }
 
   // 整场结算要与单局的分开渲染 —— 两者字段不同（见 result-text.ts）。
   const matchResult = seats.map((seat) => roomOf(seat)?.lastMatchResult).find((each) => each);
@@ -433,9 +437,9 @@ function renderCenter(): void {
     centerHost.append(discardGrid(match, snapshot));
   }
 
-  // 结算浮层退场之后留一行摘要。番型与「谁给的牌」不该因为下一局开始就凭空消失 ——
-  // 那正是用户在等的信息，而局间只有几十毫秒（服务端立刻开下一局），来得及看的人几乎没有。
-  if (result) {
+  // 浮层退场（新一局已经开始）之后留一行摘要：番型与「谁给的牌」不该因为下一局开始
+  // 就凭空消失。局间走的是上面的浮层分支，所以这里只在**局中**显示。
+  if (result && !roundOver) {
     centerHost.append(element("p", { className: "hint", text: `上一局　${roundResultText(result, snapshot)}` }));
     for (const line of winLines(result, snapshot)) {
       centerHost.append(element("p", { className: "hint", text: line }));

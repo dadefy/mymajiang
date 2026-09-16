@@ -46,6 +46,21 @@ export function roundResultText(result: RoomResult, snapshot: RoomSnapshot | nul
   return `上一局（${ROUND_REASON[result.reason] ?? result.reason}）${winners}　${deltas}`;
 }
 
+/**
+ * 结算界面上的倒计时文案：`5 秒后开始下一局`。
+ *
+ * 入参是**时刻**而不是剩余秒数 —— 渲染层隔一会儿拿当前时间调一次，文案才会自己往前走。
+ * `nextRoundAt` 为 null 表示不停留（或对着的是不下发该字段的旧服务端），
+ * 返回 null 让调用方整块不显示，而不是显示一个「0 秒」。
+ */
+export function countdownText(nextRoundAt: number | null, now: number): string | null {
+  if (nextRoundAt === null) return null;
+  const remaining = nextRoundAt - now;
+  // 到点后可能还要等一小会儿才收到新局帧（网络那一跳），别说「0 秒」让人干等。
+  if (remaining <= 0) return "正在开始下一局…";
+  return `${Math.ceil(remaining / 1000)} 秒后开始下一局`;
+}
+
 /** 座位号换昵称；对不上时退化成「X 号位」，绝不返回 undefined。 */
 function seatName(snapshot: RoomSnapshot | null, seat: number): string {
   return snapshot?.players[seat]?.nickname ?? `${seat} 号位`;

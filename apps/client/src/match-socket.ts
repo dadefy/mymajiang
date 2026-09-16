@@ -11,7 +11,7 @@ export type SocketEvent =
   | { kind: "game"; state: MatchState }
   | { kind: "actions"; actions: string[] }
   | { kind: "room"; status: string; playerCount: number }
-  | { kind: "round-finished"; roundNumber: number; result: RoomResult }
+  | { kind: "round-finished"; roundNumber: number; result: RoomResult; nextRoundInMs: number }
   | { kind: "match-finished"; result: MatchResult }
   | { kind: "group-message"; groupId: string; message: GroupMessageView }
   | { kind: "group-message-recalled"; groupId: string; message: GroupMessageView }
@@ -129,7 +129,13 @@ export class MatchSocket {
         case "actions": listener({ kind: "actions", actions: frame.actions }); break;
         case "room": listener({ kind: "room", status: frame.status, playerCount: frame.playerCount }); break;
         case "round-finished":
-          listener({ kind: "round-finished", roundNumber: frame.roundNumber, result: frame.result });
+          listener({
+            kind: "round-finished",
+            roundNumber: frame.roundNumber,
+            result: frame.result,
+            // 老服务端不带这个字段 —— 缺省按「不停留」，倒计时自然不显示。
+            nextRoundInMs: frame.nextRoundInMs ?? 0,
+          });
           break;
         case "match-finished": listener({ kind: "match-finished", result: frame.result }); break;
         case "group-message": listener({ kind: "group-message", groupId: frame.groupId, message: frame.message }); break;

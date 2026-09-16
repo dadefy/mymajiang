@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MatchResult, RoomResult, RoomSnapshot, WinDetail } from "../src/protocol.js";
-import { fanListText, matchResultText, roundResultText, winLines, winSummaryText } from "../src/browser/result-text.js";
+import { countdownText, fanListText, matchResultText, roundResultText, winLines, winSummaryText } from "../src/browser/result-text.js";
 
 function snapshot(nicknames: string[]): RoomSnapshot {
   return {
@@ -232,5 +232,30 @@ describe("一局的所有赢家", () => {
     const old = { reason: "wall-exhausted", deltas: [], winnerSeats: [], nextDealerSeat: 0 } as RoomResult;
     expect(winLines(old, room)).toEqual([]);
     expect(old.wins).toBeUndefined();
+  });
+});
+
+describe("局间倒计时", () => {
+  const now = 1_000_000;
+
+  it("按剩余时间向上取整 —— 还剩 1ms 也说「1 秒」而不是「0 秒」", () => {
+    expect(countdownText(now + 5_000, now)).toBe("5 秒后开始下一局");
+    expect(countdownText(now + 4_001, now)).toBe("5 秒后开始下一局");
+    expect(countdownText(now + 1, now)).toBe("1 秒后开始下一局");
+  });
+
+  it("同一秒内多次调用文案不变（渲染层 250ms 刷一次，不该跳数字）", () => {
+    const target = now + 3_000;
+    expect(countdownText(target, now + 100)).toBe(countdownText(target, now + 900));
+  });
+
+  it("到点后改成「正在开始下一局…」—— 新局帧还在路上，别说「0 秒」让人干等", () => {
+    expect(countdownText(now, now)).toBe("正在开始下一局…");
+    expect(countdownText(now - 500, now)).toBe("正在开始下一局…");
+  });
+
+  it("不停留（或老服务端不下发）时返回 null，调用方整块不显示", () => {
+    // 返回 null 而不是「0 秒后开始下一局」—— 后者会让人以为卡住了。
+    expect(countdownText(null, now)).toBeNull();
   });
 });

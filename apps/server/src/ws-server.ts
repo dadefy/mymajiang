@@ -341,6 +341,9 @@ function buildRealtimeServer(
           type: "round-finished",
           roundNumber: active.roundNumber,
           result: roundResult,
+          // 告诉客户端还要等多久才开下一局 —— 结算界面据此显示倒计时。
+          // 不能只让客户端硬编码 5 秒：停留时长是服务端的配置（测试里是 0）。
+          nextRoundInMs: interRoundPauseMs,
         });
       }
       const matchResult = active.room.recordCompletedRound({ ...roundResult, events: [...game.events] });

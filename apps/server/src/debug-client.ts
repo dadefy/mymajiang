@@ -105,6 +105,8 @@ export function debugClientHtml(options: DebugClientOptions): string {
     .meld-group.kong { border-color: #d8a13a; }
     .meld-group .kind { font-size: 10px; color: #8fb3a5; margin: 0 2px; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
+    /* 局间倒计时：用强调色，玩家要知道还要等多久，而不是盯着不动的界面猜。 */
+    .countdown { color: #d8a13a; font-weight: bold; font-size: 15px; margin: 10px 0; }
     .error { color: #ff9b9b; margin: 8px 0; }
     a.link { color: #d8a13a; text-decoration: none; font-weight: bold; }
     code { background: #0d1613; padding: 1px 5px; border-radius: 4px; }
@@ -159,6 +161,8 @@ export function multiClientHtml(options: DebugClientOptions): string {
     button.tile.drawn { box-shadow: 0 0 0 2px #d8a13a; }
     input.text { background: #0d1613; color: inherit; border: 1px solid #2d5347; border-radius: 7px; padding: 8px 10px; font: inherit; min-width: 300px; }
     .hint { color: #8fb3a5; font-size: 13px; margin: 6px 0; }
+    /* 局间倒计时：用强调色，玩家要知道还要等多久，而不是盯着不动的界面猜。 */
+    .countdown { color: #d8a13a; font-weight: bold; font-size: 15px; margin: 10px 0; }
     .error { color: #ff9b9b; font-size: 13px; margin: 6px 0; }
 
     .keys { display: grid; gap: 8px; margin: 10px 0; }

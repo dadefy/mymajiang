@@ -277,7 +277,16 @@ export type ServerFrame =
   | { type: "room"; status: string; playerCount: number }
   | { type: "game"; state: MatchState }
   | { type: "actions"; actions: string[] }
-  | { type: "round-finished"; roundNumber: number; result: RoomResult }
+  | {
+    type: "round-finished";
+    roundNumber: number;
+    result: RoomResult;
+    /**
+     * 这一局结算后，服务端还会停多久才开下一局（毫秒）。结算界面据此显示倒计时。
+     * 0 或缺失表示不停留（立刻开下一局）。
+     */
+    nextRoundInMs?: number;
+  }
   | { type: "match-finished"; result: MatchResult }
   | { type: "group-subscribed"; groupId: string }
   | { type: "group-unsubscribed"; groupId: string }
