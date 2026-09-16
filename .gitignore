@@ -7,3 +7,7 @@ coverage/
 
 # 本地对象存储驱动落盘的文件（图片、语音）。属于运行时数据，不进版本库。
 storage/
+
+# 邀请密钥台账：里面是**明文密钥**，等同于账号凭据。绝对不要提交。
+# 由 scripts/issue-keys.mjs 生成。
+.keys-ledger.txt
