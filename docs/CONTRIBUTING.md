@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 1 | `docs/TASKS.md` | **任务分配**：你负责哪块、范围到哪个目录、验收是什么 |
 | 2 | `docs/PROJECT_STATUS.md` | 产品规则、已完成功能、接口清单、已知限制 |
-| 3 | `docs/PROJECT_STATUS.md` 第 11 节 | 「下一位开发者开始工作前」的 19 条硬规则 |
+| 3 | `docs/PROJECT_STATUS.md` 第 11 节 | 「下一位开发者开始工作前」的 26 条硬规则 |
 | 4 | `apps/client/README.md`（若动客户端） | 分层、两个传输接口、页面流 |
 
 `PROJECT_STATUS.md` 是**唯一的事实来源**。规格与代码冲突时，改代码，不要改规格——
@@ -55,19 +55,31 @@ git status                          # 再确认一次，只应有你要提交的
 仓库 `.git` 合计 2.1 MB 尚可接受；但若再引入别的引擎或 SDK 资源，先确认是不是生成物，
 能 gitignore 就别提交。
 
-两个环境上的坑：
+几个环境上的坑：
 
-- 本机 `git` 不在 PATH 里。**要用真正的 git 本体**，而不是 `cmd\git.exe` 这个 wrapper：
-  `C:\Users\Administrator\.workbuddy\binaries\PortableGit\versions\1.2.0\mingw64\bin\git.exe`
-  （wrapper 找不到 `git-remote-https`，push 会报 `remote-https is not a git command`）。
-  用本体时还要把 `GIT_EXEC_PATH` 指到同一个 `mingw64\bin` 目录。
+- **`git` 本身可用**：当前这台机器上 `git` 在 PATH 里（`C:\Program Files\Git\cmd\git.exe`，
+  v2.46.0），不需要 `GIT_EXEC_PATH` 那套技巧。
+- ⚠️ **但 coreutils 不在 PATH 里**，这是本机真正会挡路的坑：`sed` / `dirname` / `uname` /
+  `head` / `grep` / `wc` 全部 `command not found`。它会**连带把 `pnpm` 打死** ——
+  pnpm 的 shim 脚本用 `dirname` 定位自身，取不到路径后报
+  `Cannot find module 'C:\node_modules\pnpm\bin\pnpm.cjs'`（一个看起来完全无关的错）。
+  **跑任何 pnpm 命令前先补上这条**：
+
+  ```bash
+  export PATH="/c/Program Files/Git/usr/bin:$PATH"
+  ```
+
+- 如果哪天环境里只剩 PortableGit（`C:\Users\<你的用户名>\.workbuddy\binaries\PortableGit\versions\1.2.0\`），
+  要用 `mingw64\bin\git.exe` 而不是 `cmd\git.exe` 这个 wrapper，并把 `GIT_EXEC_PATH`
+  指到同一个 `mingw64\bin` 目录（wrapper 找不到 `git-remote-https`，
+  push 会报 `remote-https is not a git command`）。
 - 提交信息是 UTF-8 中文，**用 `-F 消息文件` 提交**，不要用 `-m`（PowerShell 传中文会乱码）。
   文件要用无 BOM 的 UTF-8 写。
 
 ### 提交身份（多个 AI 协作时务必区分）
 
-仓库级身份是 `Administrator <administrator@localhost>`，所有协作者共用。**提交前必须
-用环境变量覆盖成自己的身份**，否则提交历史里分不清是谁干的：
+⚠️ **本仓库当前没有配置任何提交身份**（`.git/config` 里没有 `[user]` 段，2026-09-16 实测），
+所以**提交前必须用环境变量指定成自己的身份**，否则提交历史里分不清是谁干的：
 
 | 协作者 | GIT_AUTHOR_NAME / GIT_COMMITTER_NAME | email |
 | --- | --- | --- |
@@ -88,7 +100,8 @@ $env:GIT_COMMITTER_EMAIL = "workbuddy@local"
 
 ### 远端
 
-- 远端：`origin = https://github.com/dadefy/mymajiang.git`
+- 远端：`origin = git@github.com:dadefy/mymajiang.git`（**SSH**，2026-09-16 实测；
+  此前的 HTTPS 写法已不适用）
 - 默认分支：`main`
 - **该仓库是私有的**（2026-09-15 由公开转为私有），未授权访问返回 404。
 
@@ -98,7 +111,8 @@ git push                     # 之后
 git pull --rebase            # 开始干活前先同步
 ```
 
-推送需要 Personal Access Token 当密码（GitHub 设置里生成，勾 `repo`）。
+当前 clone 走 SSH，本机已配好 key，**直接 push 即可，不需要 Personal Access Token**。
+若换回 HTTPS 远端，才需要用 PAT 当密码（GitHub 设置里生成，勾 `repo`）。
 
 > 仓库里包含两份产品文档（`绵阳血战麻将游戏规则_v1.0.docx`、
 > `四川血战麻将APK_AI开发实施书.docx`）。它们之所以安全，是因为**仓库是私有的**——
@@ -128,12 +142,16 @@ git pull --rebase            # 开始干活前先同步
 ## 4. 完成的定义：三条命令全绿
 
 ```powershell
-pnpm test        # 全部测试（当前 25 个文件 / 183 项）
+pnpm build       # 生产构建 + 各共享包构建（必须在 test 之前，见下面的坑）
+pnpm test        # 全部测试（当前 36 个文件 / 332 项）
 pnpm typecheck   # 各包类型检查
-pnpm build       # 生产构建
 ```
 
 三条都必须通过，才算完成。任何一条红了就别提交。
+
+**顺序不能反**：`pnpm test` 排在 `pnpm build` 前面，会直接得到 23 项 `this.now is not a function`
+之类的失败 —— 那不是代码坏了，是服务端测试引到了 `packages/domain/dist` 的旧产物。
+2026-09-16 实测：全新 clone 装完依赖直接 `pnpm test` → 332 项里挂 23 项；先 `pnpm build` 再跑 → 全绿。
 
 两个容易踩的坑：
 
@@ -141,12 +159,14 @@ pnpm build       # 生产构建
   查不到测试文件里的类型错误。要查就得临时加一个 `exclude: []` 的 tsconfig（用完删掉）。
 - 改了 `packages/rules` 或 `packages/domain` 的类型后，**先构建这两个包**再测服务端，
   否则服务端还在用旧的 `dist`。
+- 本机 `pnpm` 还需要先补 coreutils 到 PATH（见第 2 节），否则 pnpm 根本起不来。
 
 ## 5. 给新 AI 协作者的开场提示词（可直接粘贴）
 
 > 你在参与一个 TypeScript 单体仓库的麻将游戏项目，目录
-> `C:\Users\Administrator\Documents\Codex\2026-09-13\wo\mianyang-mahjong`。
-> 开工前先完整读完 `docs/PROJECT_STATUS.md`（尤其第 11 节的 19 条硬规则）
+> `C:\Users\24386\WorkBuddy\2026-09-15-19-47-34\mymajiang`
+> （以 `git rev-parse --show-toplevel` 为准，这个绝对路径会随环境变）。
+> 开工前先完整读完 `docs/PROJECT_STATUS.md`（尤其第 11 节的 26 条硬规则）
 > 和本文件（docs/CONTRIBUTING.md），有不清楚的地方先问，不要猜。
 >
 > 本次任务范围：**（在此写明具体的包 / 文件 / 功能，越窄越好）**。

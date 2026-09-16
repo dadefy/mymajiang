@@ -864,7 +864,7 @@ REST 的 `/start` 保留（脚本、排查用），但 `ApiClient` 上加了注�
 
 ## 7. 测试状态
 
-- 当前共有 35 个测试文件、309 项自动化测试（语音消息合并后本机全量实测；
+- 当前共有 36 个测试文件、332 项自动化测试（2026-09-16 本机全量实测，`pnpm build` 后跑；
   含浏览器传输层、D1 牌桌选择逻辑、D2 群聊展示模型与群聊页面流、A3 上传链路（图片与语音）、
   幂等键与重试、录音时长与音频类型归一化、B3 群消息分页与「按库取回撤回」用例）。
 - 已覆盖规则计算、完整对局、**对局状态快照与恢复**、**邀请密钥签发/激活/登录**、账号、积分、好友、群聊、房间、管理员审计、HTTP API、WebSocket 协议、重启续打、**群聊实时推送与群管理**，以及 PostgreSQL 账号仓库、邀请密钥账目、积分流水与审计仓库、好友仓库、群组仓库、房间与牌局记录仓库、对局快照仓库、战绩查询和迁移执行器。
@@ -923,16 +923,18 @@ REST 的 `/start` 保留（脚本、排查用），但 `ApiClient` 上加了注�
   统一大小写与空白、取不到时按 webm 兜底，以及「归一化结果一定落在服务端白名单里」。
 - `apps/client/test/flow.test.ts` 还覆盖**语音发送**：按 `voice` 签发（不是 image）→ 直传 →
   消息带上 `voiceSeconds`；以及时长非整数 / 越界与零字节在本地就被挡掉、一条消息都不发。
-- 最近一次结果：309 项全部通过（语音消息合并后本机实测）。
+- 最近一次结果：332 项全部通过 / 36 个文件（2026-09-16 本机 `pnpm build` → `pnpm test`
+  → `pnpm typecheck` 三条全绿；**直接跑 `pnpm test` 会有 23 项失败**，
+  因为服务端测试引用 `packages/domain` 的 `dist`，不先构建就会拿到旧类型 —— 见第 11 节第 3 条）。
 - TypeScript 规则包、领域包、服务端与客户端核心生产构建通过。
 
-常用命令：
+常用命令（**顺序有意义：`build` 必须在 `test` 之前**，否则服务端会引用到各包旧的 `dist`）：
 
 ```powershell
 pnpm install
+pnpm build      # 先构建 packages/rules、packages/domain 等共享包
 pnpm test
 pnpm typecheck
-pnpm build
 pnpm --filter @mianyang-mahjong/server db:migrate
 ```
 
