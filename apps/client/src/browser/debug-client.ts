@@ -1,17 +1,17 @@
-import { DiscardSelection } from "./discard-selection.js";
-import { SwapSelection } from "./swap-selection.js";
+import { SingleTable } from "./single-table.js";
+
 import { roundScorePop } from "./round-result.js";
 import { matchResultPanel } from "./match-result.js";
 import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
-import type { GroupMessageView, MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
-import { actionButtons, runAction } from "./action-buttons.js";
+import type { GroupMessageView } from "../protocol.js";
+
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
-import { roundLabel, roundResultText } from "./result-text.js";
-import { activeRing, nicknameOf, relationLabel, sortedHand, turnOrder } from "./table-order.js";
-import { meldBox } from "./tile-chips.js";
-import { SUIT_LABEL, SUITS, suitOf, tileLabel } from "./tile-label.js";
+import { roundResultText } from "./result-text.js";
+
+
+
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
 import { BrowserVoiceRecorder } from "./voice-recorder.js";
 import { MediaCache } from "./media-cache.js";
@@ -63,36 +63,8 @@ let repaintMessages: (() => void) | undefined;
 // 所以渲染层登记的是「只重画消息」这件事。
 mediaCache.onChange(() => repaintMessages?.());
 
-/** 手动换三张时已选中的牌。 */
-const selected = new SwapSelection();
-const discardSelection = new DiscardSelection();
-
-/** 上一帧的手牌张数，用来认出「这一帧刚摸了一张」。 */
-let lastHandSize: number | null = null;
-
-/**
- * 刚摸到的那张牌，**只用于显示**，不参与任何判断。
- *
- * 判断办法：这一帧的手牌比上一帧多一张。出牌会让手牌变少、碰与杠也会变少，
- * 所以「多一张」只可能是摸牌。出牌那一刻自动清空。
- * 刚进房或刚重连时是 null —— 那一帧没有「上一帧」可比，不猜。
- */
-let drawnTile: Tile | null = null;
-
-function trackDrawnTile(hand: readonly Tile[]): void {
-  if (lastHandSize !== null && hand.length === lastHandSize + 1) {
-    drawnTile = hand[hand.length - 1] ?? null;
-  } else if (hand.length !== lastHandSize) {
-    drawnTile = null;
-  }
-  lastHandSize = hand.length;
-}
-
-/** 离开行牌阶段就把「刚摸牌」清掉 —— 换三张与定缺是发牌，不是摸牌。 */
-function forgetDrawnTile(): void {
-  drawnTile = null;
-  lastHandSize = null;
-}
+const table = new SingleTable();
+document.title = "绵阳血战麻将 · 单人牌桌";
 
 // ---------- 渲染 ----------
 
@@ -112,6 +84,7 @@ function syncRoomPolling(inRoom: boolean): void {
 }
 
 function render(screen: Screen): void {
+  table.dispose();
   app.replaceChildren();
   // 每次重画都先解绑：渲染层自己再登记（否则会指向已经卸载的那份 DOM）。
   repaintMessages = undefined;
@@ -142,12 +115,9 @@ function renderBar(screen: Screen): void {
       button("离开房间", () => void flow.leaveRoom()),
     );
   } else {
-    bar.append(element("span", { text: "绵阳血战麻将 · 内测调试客户端" }));
+    bar.append(element("span", { text: "绵阳血战麻将 · 单人牌桌" }));
   }
-  // 四家同屏那个页面的入口：内测时一个人验一整局，比凑四个人快得多。
-  const multi = element("a", { className: "link", text: "四家同屏 →" });
-  multi.href = "/multi";
-  bar.append(multi);
+
 }
 
 function errorLine(message: string | undefined): HTMLElement | null {
@@ -433,7 +403,7 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
     );
   }
 
-  app.append(
+  if (!screen.match) app.append(
     panel(`房间（${snapshot?.status ?? "连接中"}）${snapshot ? ` · 已打 ${snapshot.completedRounds} 局` : ""}`,
       players,
       controls,
@@ -441,7 +411,10 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
     ),
   );
 
-  if (screen.match) app.append(renderTable(screen.match, screen.actions, screen.snapshot));
+  if (screen.match) {
+    app.append(table.render(screen, flow, () => render(flow.current)));
+    if (screen.notice) app.append(element("p", { className: "hint", text: screen.notice }));
+  }
   // 那一屏数字只在**局间**显示（服务端给的停留时长内）。新一小场已经开始时退化成摘要行：
   // 服务端一小场结束就开下一小场，`lastResult` 在新局里依然有值，只看它会让
   // 上一小场的数字一直压在新牌局上面（与 /multi 同一处坑）。
@@ -453,7 +426,7 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   // 整局结算记录，而那一刻服务端已经不再发帧，没人重画的话结算记录永远不出现。
   const repaint = (): void => {
     const current = flow.current;
-    if (current.name === "room") renderRoom(current);
+    if (current.name === "room") render(current);
   };
   // 显示到 `roundPopUntil` 为止；没有时限就一直显示到新一局的 `game` 帧把 `roundOver` 清掉。
   // ⚠️ `match-finished` 之后这个值仍然有（见 flow 里的说明）—— 最后一小场那屏靠它
@@ -462,7 +435,7 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   const popping = screen.lastResult !== null && roundOver && (popUntil === null || Date.now() < popUntil);
   if (popping && screen.lastResult) {
     // 只在牌桌上弹四个数字：不弹面板、不亮牌面、不写牌型（见 `round-result.ts`）。
-    app.append(roundScorePop(screen.lastResult, screen.snapshot, popUntil, repaint));
+    (app.querySelector("#board") ?? app).append(roundScorePop(screen.lastResult, screen.snapshot, popUntil, repaint));
   } else {
     if (screen.lastResult) {
       // 数字收掉之后留一行摘要（各家得失分与谁胡了），牌型明细不在这屏出现。
@@ -476,153 +449,6 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
       app.append(matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint));
     }
   }
-}
-
-/** 顶部那行大字：轮到谁。 */
-function turnBanner(match: MatchState, snapshot: RoomSnapshot | null): HTMLElement {
-  const seat = match.currentPlayerSeat;
-
-  if (match.phase === "finished") {
-    return element("div", { className: "turn other", text: "本局已结束" });
-  }
-  // 换三张与定缺是四个人同时做，没有「轮到谁」这回事。
-  if (match.phase === "swapping" || match.phase === "missing") {
-    return element("div", { className: "turn other", text: `${phaseLabel(match.phase)}阶段 · 四人同时进行，不分先后` });
-  }
-  if (seat === null) {
-    return element("div", { className: "turn other", text: "等待服务端推进…" });
-  }
-  if (seat === match.seat) {
-    return element("div", { className: "turn mine", text: "轮到你出牌" });
-  }
-  // claiming 阶段 currentPlayerSeat 仍然是刚出牌的那个人，但他并不在等自己 ——
-  // 这里不能说「轮到他出牌」，要说清大家到底在等什么。
-  if (match.phase === "claiming") {
-    return element("div", { className: "turn other", text:
-      `${seat} 号位（${nicknameOf(snapshot, seat)}）刚打出一张，其余人可以考虑碰 / 杠 / 胡` });
-  }
-  return element("div", { className: "turn other", text: `轮到 ${seat} 号位（${nicknameOf(snapshot, seat)}）出牌` });
-}
-
-/** 出牌顺序一行：从我开始走一圈，标出当前行动者与已胡的人。 */
-function orderLine(match: MatchState, snapshot: RoomSnapshot | null): HTMLElement {
-  const line = element("p", { className: "order" });
-  line.append(element("span", { text: "出牌顺序（座位号递增）：" }));
-  turnOrder(match).forEach((seat, index) => {
-    if (index > 0) line.append(element("span", { text: " → " }));
-    const who = seat === match.seat ? `我（${seat} 号位）` : `${nicknameOf(snapshot, seat)}（${seat} 号位）`;
-    line.append(element("b", { text: seat === match.currentPlayerSeat ? `${who} ← 当前` : who }));
-  });
-  const won = match.players.filter((player) => player.won).map((player) => `${player.seat} 号位`);
-  if (won.length > 0) line.append(element("span", { text: `　（已胡，不在轮转：${won.join("、")}）` }));
-  return line;
-}
-
-function renderTable(match: MatchState, actions: string[], snapshot: RoomSnapshot | null): HTMLElement {
-  const box = panel(`${roundLabel(match.roundNumber, match.totalRounds)} · ${phaseLabel(match.phase)} · 我坐 ${match.seat} 号位 · 牌墙剩 ${match.tilesLeft}`);
-
-  // 谁该出牌必须一眼看到，所以先给顶部大字，再给一整圈顺序。
-  box.append(turnBanner(match, snapshot), orderLine(match, snapshot));
-
-  // 四家各一行。别的三家只给张数与副露，这是服务端脱敏后能给的。
-  // 轮到谁就把那一行框出来 —— 只看顶部大字的话，还得自己把座位号换成方位。
-  const ring = activeRing(match);
-  for (const player of match.players) {
-    const isMe = player.seat === match.seat;
-    const relation = isMe ? "我" : (ring.includes(player.seat) ? relationLabel(ring, ring.indexOf(player.seat)) : "已胡");
-    const holdingExtra = player.handSize % 3 === 2;
-    const detail = [
-      `手牌 ${player.handSize} 张`,
-      ...(player.seat === match.currentPlayerSeat && match.phase === "playing" && holdingExtra ? ["待出牌"] : []),
-      `缺 ${player.missingSuit ? SUIT_LABEL[player.missingSuit] : "未定"}`,
-      ...(isMe ? [] : [`已出 ${player.discards.map(tileLabel).join(" ") || "无"}`]),
-      ...(player.won ? ["已胡"] : []),
-    ].join(" · ");
-    const row = element("div", {
-      className: `seat${player.seat === match.currentPlayerSeat ? " acting" : ""}${player.won ? " won" : ""}`,
-    },
-      element("span", { className: "tag", text: `${relation}·${player.seat} 号位` }),
-      element("span", { text: detail }),
-    );
-    // 副露摆成牌块，与四家同屏共用一份渲染 —— 以前只报「副露 1」，
-    // 看不出碰了什么、杠了什么，而副露直接决定番型。
-    // 别人的暗杠只亮一张、其余三张扣着（口径在服务端的 meld-visibility.ts）。
-    const melds = meldBox(player.melds);
-    if (melds.childElementCount > 0) row.append(melds);
-    box.append(row);
-  }
-
-  // 我的手牌：换三张阶段可点选，行牌阶段点两次同一张才出牌。按牌面排好，好找牌。
-  // 刚摸到的那张单独标出来 —— 摸牌是服务端自动做的，牌桌上唯一的痕迹就是
-  // 「手里多了一张」，不标出来会像凭空多一张。
-  if (match.phase === "playing") trackDrawnTile(match.hand);
-  else forgetDrawnTile();
-  selected.sync(match, actions, flow.current.name === "room" ? flow.current.notice : undefined);
-  discardSelection.sync(match, actions, flow.current.name === "room" ? flow.current.notice : undefined);
-  const hand = element("div", { className: "hand" });
-  let drawnMarked = false;
-  for (const [index, tile] of sortedHand(match.hand).entries()) {
-    const chosen = match.phase === "swapping" ? selected.has(index) : discardSelection.index === index;
-    const isDrawn = !drawnMarked && drawnTile !== null && tile === drawnTile;
-    if (isDrawn) drawnMarked = true;
-    const node = element("button", {
-      text: tileLabel(tile),
-      className: `tile${chosen ? " chosen" : ""}${isDrawn ? " drawn" : ""}`,
-      onClick: () => {
-        if (match.phase === "swapping") {
-          // 选满三张就替换最早选的那张，避免用户点第四张时不知所措。
-          selected.toggle(index);
-          render(flow.current);
-        } else if (match.phase === "playing" || match.phase === "claiming") {
-          const discard = discardSelection.click(match, index);
-          if (discard !== undefined) flow.discard(discard);
-          render(flow.current);
-        }
-      },
-    });
-    node.disabled = match.phase === "swapping" ? !selected.enabled : !discardSelection.canSelect(match, tile);
-    if (chosen) node.style.transform = "translateY(-8px)";
-    if (match.missingSuit && suitOf(tile) === match.missingSuit) node.classList.add("missing-suit");
-    hand.append(node);
-  }
-
-  const row = element("div", { className: "row" });
-  // 交了换三张之后服务端不再下发 `swap`，按钮会全部消失 —— 补一句状态，
-  // 免得看起来像卡住了（与四家同屏页保持一致）。
-  if (match.phase === "swapping" && !selected.enabled) {
-    row.append(element("span", { text: "已提交换牌，等待其他玩家" }));
-  }
-  if (match.phase === "swapping" && selected.enabled) {
-    row.append(
-      button(`换这三张（已选 ${selected.length}/3）`, () => {
-        const hand = sortedHand(match.hand);
-        if (!selected.valid(hand)) return;
-        const tiles = selected.tiles(hand);
-        selected.submit(() => flow.swap(tiles));
-        render(flow.current);
-      }, "primary"),
-      button("自动换三张", () => { selected.submit(() => flow.autoSwap()); render(flow.current); }),
-    );
-  }
-  if (match.phase === "missing" && actions.includes("choose-missing")) {
-    for (const suit of SUITS) {
-      row.append(button(`定缺 ${SUIT_LABEL[suit]}`, () => flow.chooseMissing(suit)));
-    }
-    row.append(button("自动定缺", () => flow.autoMissing()));
-  }
-  // 动作名与按钮的对应收在 action-buttons.ts，与四家同屏共用一份 —— 见那里的说明。
-  for (const spec of actionButtons(actions, match.phase)) {
-    row.append(button(spec.label, () => runAction(flow, spec.kind), spec.primary ? "primary" : ""));
-  }
-
-  if (row.childElementCount > 0) box.append(row);
-  box.append(hand, element("p", { className: "hint", text: `我的副露：${match.melds.map((meld) => `${meld.kind}${tileLabel(meld.tile)}`).join(" ") || "无"}` }),
-    element("p", { className: "hint", text: `我已出：${match.discards.map(tileLabel).join(" ") || "无"}` }));
-  return box;
-}
-
-function phaseLabel(phase: MatchState["phase"]): string {
-  return { swapping: "换三张", missing: "定缺", playing: "行牌", claiming: "等待别人确认", finished: "本局结束" }[phase];
 }
 
 flow.onChange(render);

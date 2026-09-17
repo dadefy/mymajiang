@@ -1,6 +1,8 @@
 /** 四方牌桌：外圈手牌、内圈副露、中央牌河与方向盘。 */
 export function installTableLayout(): void {
+  if (document.getElementById("table-layout-style")) return;
   const style = document.createElement("style");
+  style.id = "table-layout-style";
   style.textContent = `
     main{max-width:1680px;width:100%;padding:12px;overflow:auto}
     #board{position:relative;display:block;width:min(100%,calc((100dvh - 90px)*16/9));margin:0 auto;min-width:960px;aspect-ratio:16/9;background:radial-gradient(ellipse at center,#205a49,#123d32 65%,#102d26);border:10px solid #493b29;border-radius:28px;box-shadow:inset 0 0 0 2px #947c4b,inset 0 0 80px #061b1690;overflow:hidden;container-type:size}
@@ -9,6 +11,7 @@ export function installTableLayout(): void {
     #board .hand,#board .seat>.seat-card>.seat-head,#board .seat-card>.ops,#board .tiles-area>.melds{position:absolute;margin:0}
     #board .hand{display:flex;gap:4px;flex-wrap:nowrap;align-items:center;justify-content:center;overflow:visible;max-height:none}
     #board button.tile{min-width:0;padding:0;width:calc((100% - 52px)/14);height:100%;max-height:72px;border-radius:5px;box-shadow:0 4px 0 #b6b099,0 6px 8px #0004;font-size:clamp(15px,2vw,29px);flex-shrink:1}
+    #board button.tile.card-back{background:repeating-linear-gradient(45deg,#296d57,#296d57 4px,#225d4b 4px,#225d4b 8px);border:2px solid #dbd5b9}
     #board button.tile:disabled{opacity:1;cursor:default}
     #board button.tile.missing-suit{opacity:.55}
     #board button.tile.chosen{transform:translateY(-8px);background:#f2bd4d}
@@ -55,10 +58,10 @@ export function installTableLayout(): void {
     #board .discard-cell{padding:3px;background:#ffffff04;border:1px solid #e9e3c512;border-radius:6px;overflow:auto}
     #board .discard-cell.top{grid-area:1/1/2/4}#board .discard-cell.bottom{grid-area:3/1/4/4}
     #board .discard-cell.left{grid-area:2/1/3/2}#board .discard-cell.right{grid-area:2/3/3/4}
-    #board .discard-head{display:none}#board .discard-tiles{justify-content:center;gap:3px;margin:0}
+    #board .discard-tiles{display:flex;flex-wrap:wrap}#board .discard-head{display:none}#board .discard-tiles{justify-content:center;gap:3px;margin:0}
     #board .discard-cell .chip{width:clamp(17px,1.6vw,25px);height:clamp(21px,2vw,30px);font-size:clamp(9px,.85vw,12px);white-space:nowrap}
     .table-hub{position:absolute;left:43%;top:43%;width:12%;height:15%;background:linear-gradient(145deg,#174335,#0d2921);border:2px solid #b7a26b;border-radius:14px;box-shadow:0 6px 15px #0005;display:grid;grid-template:25% 50% 25% / 25% 50% 25%;text-align:center;align-items:center;color:#b9bca0}
-    .wind{font-size:clamp(15px,1.8vw,25px);font-weight:bold}.wind.active{color:#ffe39b;text-shadow:0 0 12px #eab842}
+    .wind{font-size:clamp(15px,1.8vw,25px);font-weight:bold}.wind.active{color:#fff;background:#dca61d;border:1px solid #fff2ad;border-radius:6px;text-shadow:0 1px 2px #704500,0 0 8px #fff;box-shadow:0 0 8px 3px #ffd34dcc,0 0 20px 5px #ffbd3566;z-index:1}
     .wind.bottom{grid-area:3/2}.wind.right{grid-area:2/3}.wind.top{grid-area:1/2}.wind.left{grid-area:2/1}
     .turn-clock{grid-area:2/2;font-size:clamp(24px,3vw,44px);font-weight:700;font-variant-numeric:tabular-nums;color:#f8eac6}.turn-clock.urgent{color:#ff967f}
     .wall-counter{position:absolute;left:55.5%;top:46%;width:4%;height:9%;display:flex;flex-direction:column;align-items:center;justify-content:center;border:1px solid #77a8bd77;border-radius:8px;background:#143e4c;color:#c5e7ec;font-size:11px}.wall-counter strong{font-size:clamp(19px,2vw,30px)}

@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+import {SingleTable} from '../../apps/client/dist/browser/single-table.js';
+const dom=new JSDOM('<html><head></head><body></body></html>');
+globalThis.document=dom.window.document;
+const sends=[];
+const swaps=[];
+const flow={discard:tile=>sends.push(tile),swap:tiles=>swaps.push(tiles)};
+for(let viewer=0;viewer<4;viewer++) {
+ const table=new SingleTable();
+ const screen={name:'room',snapshot:null,notice:undefined,roundFinished:false,lastResult:null,actions:['discard','hu'],match:{roomId:'r',roundNumber:1,seat:viewer,phase:'playing',currentPlayerSeat:viewer,hand:[0,0,2,9],melds:[],discards:[],missingSuit:null,won:false,tilesLeft:55,players:[0,1,2,3].map(seat=>({seat,handSize:4,melds:[],discards:[],missingSuit:null,won:false,matchDelta:0}))}};
+ const repaint=()=>document.body.replaceChildren(table.render(screen,flow,repaint));repaint();
+ const tiles=()=>document.querySelectorAll('.bottom .hand button');
+ assert.equal(document.querySelector('.bottom').dataset.seat,String(viewer));
+ assert.equal(document.querySelectorAll('.card-back').length,12);
+ assert.equal(document.querySelectorAll('.player-profile').length,4);
+ assert.equal(document.querySelectorAll('.ops').length,1);
+ assert.equal(document.querySelector('.wind.active').classList.contains('bottom'),true);
+ const before=sends.length;
+ tiles()[0].click();assert.equal(sends.length,before);assert.equal(tiles()[0].classList.contains('chosen'),true);
+ tiles()[1].click();assert.equal(sends.length,before);
+ tiles()[1].click();assert.equal(sends.length,before+1);
+ screen.actions=[];repaint();assert.equal(document.querySelectorAll('.ops').length,0);
+ screen.match.phase="swapping";screen.actions=["swap"];repaint();
+ tiles()[0].click();tiles()[1].click();tiles()[2].click();
+ document.querySelector(".ops button").click();assert.deepEqual(swaps.at(-1),[0,0,2]);
+ assert.equal(document.querySelectorAll(".ops").length,0);
+ table.dispose();
+}
+assert.equal(document.querySelectorAll('#table-layout-style').length,1);
+console.log('PASS: four independent viewpoints, hidden opponent hands, own actions only, two-click discard, active direction');
+dom.window.close();
