@@ -117,7 +117,13 @@ export function adminConsoleHtml(): string {
     async function api(path, options) {
       if (!token) throw new Error('尚未登录');
       const init = Object.assign({}, options || {});
-      init.headers = Object.assign({ Authorization: 'Bearer ' + token }, init.headers || {});
+      // ⚠️ 令牌走自定义头 X-Auth-Token，**不要用 Authorization**：
+      // 托管平台的反代会占用/污染 Authorization（实测服务端收到的是平台自己的令牌），
+      // 表现是「登录成功拿到令牌，但用它访问任何受保护接口都 401」。
+      // 两个客户端的传输层与三个脚本早就改过来了，只有这一处当时漏了
+      // —— 于是线上管理台登录完立刻掉回「请登录」，根本发不出密钥。
+      // 详见 docs/DEPLOYMENT.md 第五节第 1 条。
+      init.headers = Object.assign({ 'X-Auth-Token': token }, init.headers || {});
       if (init.body) init.headers['Content-Type'] = 'application/json';
       const response = await fetch(path, init);
       const text = await response.text();

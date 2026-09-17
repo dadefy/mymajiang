@@ -33,6 +33,7 @@ pnpm build          # 客户端产物 apps/client/dist，下面多数脚本要�
 | `probe-claims.mjs` | `PAGE`（默认本机 3000） | 本地 dist | ✓ 4 把 | 碰/杠/过 按钮出现过没有、各持续多久（同时盯协议帧与 DOM） |
 | `check-remote.mjs` | `BASE`（默认线上） | **也从线上抓** | ✓ 4 把 | 线上那一份代码的完整表现（⚠️ 验的是**已部署**的那份：改了没部署它会红，这正是它的用途） |
 | `check-board-geometry.mjs` | `PAGE`（默认本机 3000） | 本地 dist | ✓ 4 把 | **牌块的几何尺寸**（宽高比、副露方向、溢出）—— 这个要真浏览器，见下 |
+| `check-admin-console.mjs` | `PAGE`（默认本机 3012 `/admin`） | 服务端页面 | — | **管理台**：登录 → 签发 1 把密钥 → 明文当场显示；打印页面发出的每个请求及其状态码（红了能直接看出哪一步 401）。凭据从 `apps/server/.env` 读 |
 
 最实用的一个是最先写的那个：`check-countdown.mjs` 直接调渲染函数，
 能把「渲染层没写对」与「数据没传到」当场分开 —— 省掉一整轮来回猜。
@@ -47,6 +48,16 @@ pnpm build          # 客户端产物 apps/client/dist，下面多数脚本要�
 `getBoundingClientRect()` 一律返回 0。而「左右两家的牌被拉成 3:1 的长条」
 「侧边副露横着摆」这类缺陷，DOM 结构完全正确、只是尺寸不对 ——
 数节点一个都数不出来，必须真的量像素。
+
+`check-admin-console.mjs` 也用真浏览器，理由不同：它要验的是**页面自己发出去的请求**。
+管理台曾经把令牌放进 `Authorization` 头，而托管平台的反代会占用那个头，
+结果是「登录成功（那是唯一不带令牌的请求）、紧接着任何接口都 401」，管理员发不出密钥。
+**拿 curl 自己拼头是验不出来的** —— 自己拼的头跟页面真正发的不是一回事；
+只有让页面自己跑，才能量到它到底发了什么。它默认打本机，但**这个缺陷只在线上复现**：
+
+```bash
+PAGE=https://mianyang-mahjong-table.app.workbuddy.host/admin node tools/domcheck/check-admin-console.mjs
+```
 
 它用 CDP 驱动无头 Chrome / Edge（**两个都没有就打印「跳过」并退出 0，不算失败**：
 这条检查依赖本机装了什么，不该让没装的人每次看到凭空的红）。

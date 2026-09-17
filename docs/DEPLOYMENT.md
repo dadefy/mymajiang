@@ -241,6 +241,16 @@ SERVER_BASE_URL=https://牌桌.example.com node --env-file=.env scripts/acceptan
    所以应用令牌一律走自定义头 **`X-Auth-Token`**（服务端 `authToken()` 首选它，回退
    `Authorization`），两个客户端的传输层与**三个脚本**都照此发送。
    自建 Nginx 不会有这个问题，但用自定义头是通吃的做法。
+
+   ⚠️ **管理台页面（`admin-console.ts`）当时漏了这一条**，它仍把令牌放进 `Authorization` ——
+   于是线上管理台「登录成功、紧接着所有接口 401、立刻掉回请登录」，管理员**根本发不出密钥**
+   （本机复现不出来：本地两种头都收，只有线上才现形）。已改过来，
+   并留了 `tools/domcheck/check-admin-console.mjs` 守着；**跑这个检查要指向线上**，
+   打本机永远绿：
+   ```bash
+   PAGE=https://mianyang-mahjong-table.app.workbuddy.host/admin node tools/domcheck/check-admin-console.mjs
+   ```
+   以后再给管理台加接口，记得新请求也走 `api()`（它已经统一带上 `X-Auth-Token`）。
 2. **`.env` 会被一起上传**，所以 `loadEnvFile` 能读到（`JWT_SECRET` / COS 密钥 / 管理员密码都在）。
    好处是免配置，代价是**平台侧能看到这些明文** —— 正式环境建议改用平台的环境变量注入。
 3. **安装要加 `--ignore-scripts`**：沙箱里跑包的安装脚本会卡住或失败；
