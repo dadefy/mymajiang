@@ -8,7 +8,7 @@ import type {
   UploadResponse,
   UploadTransport,
 } from "../transport.js";
-import { DEFAULT_REQUEST_TIMEOUT_MS } from "../transport.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS, jsonBodyFor } from "../transport.js";
 
 /**
  * 浏览器版的三个传输适配器。
@@ -34,7 +34,10 @@ export class FetchHttpTransport implements HttpTransport {
     // authToken 说明：某些部署网关会覆盖/污染 Authorization 头，自定义头才能绕过。
     if (input.token) headers["X-Auth-Token"] = input.token;
     if (input.idempotencyKey) headers["Idempotency-Key"] = input.idempotencyKey;
-    if (input.body !== undefined) headers["Content-Type"] = "application/json";
+    // 写请求一律带 `Content-Type`，**没有 body 的也带**（详见 `jsonBodyFor` 的说明：
+    // 经隧道后 Fastify 会因此 415，而这个差异在局域网里根本复现不出来）。
+    const payload = jsonBodyFor(input.method, input.body);
+    if (payload !== undefined) headers["Content-Type"] = "application/json";
 
     // 浏览器这边能真中断，比 LayaAir 那侧干净。
     const controller = new AbortController();
@@ -44,7 +47,7 @@ export class FetchHttpTransport implements HttpTransport {
         method: input.method,
         headers,
         signal: controller.signal,
-        ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+        ...(payload === undefined ? {} : { body: payload }),
       });
 
       // 204 之类没有响应体，`json()` 会抛，所以先取文本再判断。

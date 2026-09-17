@@ -39,6 +39,31 @@ export interface HttpTransport {
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
+ * 这个请求最终要发出去的 JSON 请求体 —— `undefined` 表示「一个字节都不发」。
+ *
+ * 两套传输层（浏览器的 `fetch`、APK 的 `Laya.HttpRequest`）都用它来决定
+ * 「要不要带 `Content-Type`」和「body 写什么」，判据只留这一处。
+ *
+ * **写请求即使没有 body 也要发一个 `{}`**，这条看着多余，其实是一个只在公网部署下
+ * 才暴露的坑：
+ *
+ * - 局域网直连时，浏览器给无 body 的 `POST` 发 `Content-Length: 0`。Fastify 的
+ *   `isEmptyBody()` 判成「没有 body 要解析」，不查 `Content-Type`，直接进处理函数 ——
+ *   所以「建房」在局域网一直好好的。
+ * - 一旦经 Cloudflare 隧道（或任何把请求改写成 `Transfer-Encoding: chunked` 的代理），
+ *   `isEmptyBody()` 变成 false，Fastify 就去找 `Content-Type` 选解析器，**没有就回 415**。
+ *   而只补 `Content-Type` 也不够：Fastify 对「声明是 JSON 但 body 为空」同样会拒（400
+ *   `FST_ERR_CTP_EMPTY_JSON_BODY`）。
+ *
+ * 所以必须两头都补上：带类型、也带一个真正合法的空对象。GET/HEAD 照旧什么都不发。
+ */
+export function jsonBodyFor(method: string, body: unknown): string | undefined {
+  if (body !== undefined) return JSON.stringify(body);
+  if (method === "GET" || method === "HEAD") return undefined;
+  return "{}";
+}
+
+/**
  * 一次直传请求。
  *
  * `url` 指向**对象存储**（云上是 COS 自己的域名，本地驱动是服务端自己），

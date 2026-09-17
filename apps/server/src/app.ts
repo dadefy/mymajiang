@@ -199,6 +199,35 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   /**
+   * 兜底解析：**没有 `Content-Type`（或类型不认识）的请求体一律按 JSON 处理**。
+   *
+   * 这不是为了放宽校验，而是修一个只在公网部署下才出现的真实差异 ——
+   * 「没有 body 的写请求」（建房、开局、退群、注销……）在局域网直连时，浏览器会发
+   * `Content-Length: 0`，Fastify 的 `isEmptyBody()` 判成「没有 body 要解析」，直接放行；
+   * 但经 Cloudflare 隧道（或任何把请求改写成 `Transfer-Encoding: chunked` 的代理）之后，
+   * `isEmptyBody()` 变成 false，Fastify 于是去找 `''` 这个 Content-Type 对应的解析器，
+   * 找不到就回 415 `Unsupported Media Type` —— 再被下面的兜底错误处理器包成 409，
+   * 界面上就变成一句莫名其妙的英文。**同一份代码在局域网 100% 正常，只在隧道下失败**，
+   * 靠猜是查不出来的。
+   *
+   * `addContentTypeParser('*', …)` 在 Fastify 内部就是存到 `''` 这个键上（正是上面那次
+   * 查找用的键），所以这一条正好补住那个洞：空 body 当 `{}`，其余照常按 JSON 解析。
+   * 非法 JSON 仍然按 400 拒掉，真正的输入校验没有被放宽。
+   */
+  app.addContentTypeParser("*", { parseAs: "string" }, (_request, body, done) => {
+    const text = typeof body === "string" ? body.trim() : "";
+    if (text.length === 0) {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(text));
+    } catch {
+      done(new Error("INVALID_JSON_BODY"), undefined);
+    }
+  });
+
+  /**
    * 幂等回放：同一个键再次到达时不再执行处理函数，直接返回第一次的响应。
    *
    * 放在 `preHandler` 而不是写进每个路由，是为了让「哪些接口需要保护」只存在于一处
@@ -283,6 +312,24 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       return reply.status(400).send({ code: "INVALID_INPUT", message: code });
     }
     if (code === "UPLOAD_NOT_OWNED") return reply.status(403).send({ code });
+    /**
+     * Fastify 自己的「请求体解析」错误。
+     *
+     * 这些**不是业务冲突**，但以前会一路掉到最后那条 `DOMAIN_CONFLICT`：
+     * 状态码 409 加上 `message` 里的英文原文。而客户端 `ClientFlow.describe()` 对不认识的
+     * `message` 是**原样显示**的（见 apps/client/src/flow.ts），于是界面弹出的是
+     * "Unsupported Media Type" —— 把「公网隧道改写了无 body 请求」这种传输层问题
+     * 伪装成「你的账号有问题」，排查方向直接跑偏。
+     *
+     * 415 那条**故意不带 `message`**：没有可翻译的文案时，界面会退化成
+     * 「操作失败（UNSUPPORTED_MEDIA_TYPE）」，比一句英文原文有用。
+     */
+    if (code === "Unsupported Media Type") {
+      return reply.status(415).send({ code: "UNSUPPORTED_MEDIA_TYPE" });
+    }
+    if (code === "INVALID_JSON_BODY" || code.startsWith("Body is not valid JSON") || code.startsWith("Body cannot be empty")) {
+      return reply.status(400).send({ code: "INVALID_INPUT", message: code });
+    }
     // 密钥有效但还没建过账号：客户端要据此决定下一步是收昵称头像。
     if (code === "KEY_ACTIVATION_REQUIRED") return reply.status(409).send({ code });
     return reply.status(409).send({ code: "DOMAIN_CONFLICT", message: code });

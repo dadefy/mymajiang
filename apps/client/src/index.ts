@@ -1,7 +1,7 @@
 export { ApiClient, type ApiError, type ApiErrorKind, type ApiResult } from "./api-client.js";
 export { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "./flow.js";
 export { MatchSocket, type SocketEvent } from "./match-socket.js";
-export { DEFAULT_REQUEST_TIMEOUT_MS } from "./transport.js";
+export { DEFAULT_REQUEST_TIMEOUT_MS, jsonBodyFor } from "./transport.js";
 export {
   BrowserVoiceRecorder,
   clampSeconds,

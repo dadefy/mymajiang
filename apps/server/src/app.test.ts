@@ -1240,6 +1240,71 @@ describe("server API", () => {
     expect(protectedResponse.json()).toEqual({ code: "ACCOUNT_NOT_ACTIVE" });
   });
 
+  /**
+   * 回归：公网部署（Cloudflare 隧道）下「建房必 409」的根因。
+   *
+   * 同一个请求在局域网 100% 成功、经隧道 100% 失败，差别只在传输编码：
+   * - 直连：浏览器给无 body 的 `POST` 发 `Content-Length: 0`，Fastify 的 `isEmptyBody()`
+   *   判成「没有 body 要解析」，**根本不看 `Content-Type`**，直接进处理函数 → 201。
+   * - 经隧道：请求被改写成 `Transfer-Encoding: chunked`，`isEmptyBody()` 变成 false，
+   *   Fastify 就去按 `Content-Type` 找解析器，找不到 `''` 对应的 → 415
+   *   "Unsupported Media Type" → 再被兜底成 409 DOMAIN_CONFLICT。
+   *
+   * 所以「隧道下建房失败」看起来像账号状态问题，其实是传输层的坑。
+   */
+  it("无 body 的写请求被代理改写成 chunked 之后仍然能建房（公网隧道下 409 的根因）", async () => {
+    const { app, dependencies } = fixture();
+    const user = await createBetaUser(app, dependencies, "隧道建房");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/rooms",
+      headers: { authorization: `Bearer ${user.token}`, "transfer-encoding": "chunked" },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ status: "waiting" });
+  });
+
+  it("不带 Content-Type 但确实有 body 的请求按 JSON 解析，而不是回 415", async () => {
+    const { app, dependencies } = fixture();
+    const host = await createBetaUser(app, dependencies, "房主");
+    const guest = await createBetaUser(app, dependencies, "来客");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/rooms",
+      headers: { authorization: `Bearer ${host.token}` },
+    });
+    const { roomNo } = created.json() as { roomNo: string };
+
+    // payload 传**字符串**：light-my-request 只给非字符串 payload 自动补 Content-Type，
+    // 所以这里正好复现「有 body 却没有声明类型」这条路径。
+    const joined = await app.inject({
+      method: "POST",
+      url: "/v1/rooms/join",
+      headers: { authorization: `Bearer ${guest.token}` },
+      payload: `{"roomNo":"${roomNo}"}`,
+    });
+
+    expect(joined.statusCode).toBe(201);
+  });
+
+  it("请求体解析失败时回 400 输入错误，不再伪装成 409 业务冲突并吐出英文原文", async () => {
+    const { app, dependencies } = fixture();
+    const user = await createBetaUser(app, dependencies, "空体建房");
+
+    // 声明是 JSON 却一个字节都不发 —— Fastify 原生会抛 FST_ERR_CTP_EMPTY_JSON_BODY，
+    // 原文 "Body cannot be empty when content-type is set to 'application/json'"。
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/rooms",
+      headers: { authorization: `Bearer ${user.token}`, "content-type": "application/json" },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "INVALID_INPUT" });
+  });
+
   it("runs the room lifecycle from creation to start", async () => {
     const { app, dependencies, tokens } = fixture();
     const players = [];

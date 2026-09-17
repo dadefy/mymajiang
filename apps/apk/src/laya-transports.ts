@@ -8,7 +8,7 @@ import type {
   UploadResponse,
   UploadTransport,
 } from "@mianyang-mahjong/client";
-import { DEFAULT_REQUEST_TIMEOUT_MS } from "@mianyang-mahjong/client";
+import { DEFAULT_REQUEST_TIMEOUT_MS, jsonBodyFor } from "@mianyang-mahjong/client";
 
 export class LayaHttpTransport implements HttpTransport {
   constructor(
@@ -21,7 +21,9 @@ export class LayaHttpTransport implements HttpTransport {
     return new Promise((resolve, reject) => {
       const request = new Laya.HttpRequest();
       const headers = ["Accept", "application/json"];
-      if (input.body !== undefined) headers.push("Content-Type", "application/json");
+      // 与浏览器那套同一判据：写请求即使没有 body 也要带类型、也要发一个 `{}`。
+      const payload = jsonBodyFor(input.method, input.body);
+      if (payload !== undefined) headers.push("Content-Type", "application/json");
       if (input.token) headers.push("X-Auth-Token", input.token);
       if (input.idempotencyKey) headers.push("Idempotency-Key", input.idempotencyKey);
       let settled = false;
@@ -60,7 +62,7 @@ export class LayaHttpTransport implements HttpTransport {
       send.call(
         request,
         `${this.baseUrl}${input.path}`,
-        input.body === undefined ? null : JSON.stringify(input.body),
+        payload === undefined ? null : payload,
         input.method.toLowerCase(),
         "json",
         headers,

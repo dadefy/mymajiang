@@ -128,6 +128,39 @@ Chrome 默认会用它，表现是「公网地址打不开」，而排查会一�
 
 > ⚠️ `curl` **不读** Windows 的系统代理 —— 「我这边 curl 能通」不等于「浏览器能通」。
 
+**④ 隧道会把「无 body 的写请求」改成 chunked 编码，曾导致公网下建房/开局全部失败。**
+（2026-09-17 实测并已修，记在这里是因为**以后再加代理层还会遇到同一类问题**。）
+
+症状：局域网里建房、开局、退群一切正常；**一上公网就全挂**，界面弹出英文
+`Unsupported Media Type`，HTTP 状态是 409。同一条链路换成 Postman 之类带
+`Content-Type` 的请求又是好的 —— 非常容易被误判成「账号脏了」。
+
+根因（三层，缺一层都解释不通）：
+
+1. 浏览器对**没有 body 的 `POST`** 发 `Content-Length: 0`。Fastify 的 `isEmptyBody()`
+   要求「没有 `transfer-encoding` 且 `content-length` 为 0/缺失」，于是判成
+   「没有 body 要解析」，**连 `Content-Type` 都不看**，直接进处理函数 ⇒ 局域网一直正常。
+2. 经 Cloudflare 之后请求变成 `Transfer-Encoding: chunked`，`isEmptyBody()` 变成 false，
+   Fastify 转去按 `Content-Type` 选解析器，没有就回 **415**。
+3. `app.ts` 的错误兜底把不认识的错误一律包成 `409 DOMAIN_CONFLICT` 并把原文塞进
+   `message`，而客户端 `ClientFlow.describe()` 对不认识的 `message` 是**原样显示**的
+   ⇒ 传输层问题被伪装成业务冲突。
+
+修法是两头都补（都是必需的，不是二选一）：
+
+- **客户端**（`apps/client/src/transport.ts` 的 `jsonBodyFor`，两套传输层共用）：
+  写请求一律带 `Content-Type: application/json` **并**带一个 `{}`。
+  只补类型不行 —— Fastify 对「声明 JSON 但 body 为空」会回 400。
+- **服务端**（`apps/server/src/app.ts`）：注册兜底解析器
+  `addContentTypeParser('*', …)`（Fastify 内部就存成 `''` 这个键），
+  空 body 当 `{}`。这一侧覆盖**已经装在用户手机上的旧 APK**，
+  它们不会跟着服务端一起更新。
+- 错误兜底也改了：415 不再冒充 409，也不再吐英文原文。
+
+回归测试：`apps/server/src/app.test.ts` 里那三条
+（搜「公网隧道下 409 的根因」），用 `transfer-encoding: chunked` 复现，
+去掉兜底解析器就会红（实测 `expected 415 to be 201`）。
+
 ### 隧道下的自检顺序
 
 ```bash
@@ -135,6 +168,9 @@ curl -s 127.0.0.1:3000/health                                   # ① 本机通�
 journalctl -u mymj-tunnel | grep 'Registered tunnel connection'  # ② 隧道连上没有
 curl -s "$(cat apps/server/.public-url)/health"                 # ③ 从公网打回来
 ```
+
+> `/health` 只证明「HTTP 通」。隧道特有的坑（上面第 ④ 条）只在**写请求**上出现，
+> 所以还要真在**浏览器里点一次建房**才算验完 —— 别只看 `/health` 就收工。
 
 ## 部署完之后怎么验
 

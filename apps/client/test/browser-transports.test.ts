@@ -99,6 +99,35 @@ describe("FetchHttpTransport", () => {
     expect(requests[0]!.body).toBeUndefined();
   });
 
+  /**
+   * 回归：「建房」这类**没有 body** 的写请求，必须带 `Content-Type` 且带一个 `{}`。
+   *
+   * 起因是一个只在公网隧道下才出现的缺陷：局域网直连时浏览器发 `Content-Length: 0`，
+   * Fastify 判为「没有 body 要解析」直接放行；经 Cloudflare 隧道后同一请求变成
+   * `Transfer-Encoding: chunked`，Fastify 就去按 `Content-Type` 找解析器，没有便回 415，
+   * 再被兜底成 409 —— 现象是「隧道下建房失败、局域网秒建」，靠读代码根本看不出来。
+   * 只补 `Content-Type` 也还不够：Fastify 对「声明 JSON 但 body 为空」同样会拒。
+   */
+  it("没有请求体的写请求也带上 JSON 类型与空对象，免得经隧道被服务端拒掉", async () => {
+    const { impl, requests } = fakeFetch({ status: 201, text: '{"roomId":"room-1"}' });
+    const transport = new FetchHttpTransport("http://10.0.0.5:3000", impl);
+
+    await transport.request({ method: "POST", path: "/v1/rooms" });
+
+    expect(requests[0]!.headers["Content-Type"]).toBe("application/json");
+    expect(requests[0]!.body).toBe("{}");
+  });
+
+  it("DELETE 同样带上 JSON 类型与空对象", async () => {
+    const { impl, requests } = fakeFetch({ status: 204, text: "" });
+    const transport = new FetchHttpTransport("http://10.0.0.5:3000", impl);
+
+    await transport.request({ method: "DELETE", path: "/v1/friends/friend-1" });
+
+    expect(requests[0]!.headers["Content-Type"]).toBe("application/json");
+    expect(requests[0]!.body).toBe("{}");
+  });
+
   it("204 这种空响应体不会因为解析 JSON 而抛错", async () => {
     const { impl } = fakeFetch({ status: 204, text: "" });
     const transport = new FetchHttpTransport("http://10.0.0.5:3000", impl);
