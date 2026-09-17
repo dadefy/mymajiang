@@ -189,6 +189,8 @@ describe("PostgresMatchRoom", () => {
       // 座位控制权与暂离（migration 010）：新座位一律 human / 未暂离。
       "human",
       false,
+      // 主动退出标记（migration 012）：新座位一律 false。
+      false,
       null,
       // 保护期截止时刻（migration 011）：正常在座的人没有保护期。
       null,
@@ -424,11 +426,13 @@ describe("座位控制权与暂离的持久化", () => {
   /** 参数顺序与 `UPSERT_ROOM_PLAYER_SQL` 一一对应。 */
   const CONTROL = 8;
   const AWAY = 9;
-  const CONTROL_CHANGED_AT = 10;
+  /** 「当前仍处于主动退出状态」（migration 012）。 */
+  const RENOUNCED = 10;
+  const CONTROL_CHANGED_AT = 11;
   /** 保护期的**绝对**截止时刻（migration 011）。NULL = 没有保护期。 */
-  const RECONNECT_DEADLINE = 11;
+  const RECONNECT_DEADLINE = 12;
 
-  it("主动退出立刻把 control=trustee 写进数据库", async () => {
+  it("主动退出立刻把 control=trustee 与 renounced=true 写进数据库", async () => {
     const users = fourUsers();
     const { room, mark, timeline, store } = await startedRoom(users);
     const since = mark();
@@ -440,6 +444,8 @@ describe("座位控制权与暂离的持久化", () => {
     const [row] = statements(timeline, "insert:match_room_players", since);
     expect(row![CONTROL]).toBe("trustee");
     expect(row![AWAY]).toBe(false);
+    // renounced=true 是「全员放弃提前终局」的判据，重启后必须照原样恢复
+    expect(row![RENOUNCED]).toBe(true);
     expect(row![CONTROL_CHANGED_AT]).toBeInstanceOf(Date);
   });
 
@@ -518,6 +524,9 @@ describe("座位控制权与暂离的持久化", () => {
     expect(rows[0]![CONTROL]).toBe("trustee");
     // 转托管之后不该残留一个旧时刻
     expect(rows[0]![RECONNECT_DEADLINE]).toBeNull();
+    // 掉线到点转托管 ≠ 主动退出：renounced 必须写回 false，
+    // 否则重启后一次纯掉线会被误判成"放弃比赛"触发提前终局。
+    expect(rows[0]![RENOUNCED]).toBe(false);
   });
 
   it("重连时才发现窗口已过，那一次转换同样落库", async () => {
@@ -540,6 +549,43 @@ describe("座位控制权与暂离的持久化", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]![CONTROL]).toBe("trustee");
     expect(rows[0]![RECONNECT_DEADLINE]).toBeNull();
+  });
+
+  it("退出后真人重新进入：renounced 写回 false，哪怕控制权没变也要落库", async () => {
+    // 这条是 renounced 专属的坑：quit 之后真人回来（reconnect），control 仍是 trustee、
+    // 也没有控制权转换 —— 旧的 flush 条件只看 `changed`，这个标记就会留在库里，
+    // 重启后"全员放弃"判定会把一个真人在线的座位错误地算成主动放弃。
+    const users = fourUsers();
+    const { store, timeline, room, mark } = await startedRoom(users);
+
+    room.quitToTrustee("B");
+    await store.flush();
+    const since = mark();
+
+    expect(room.reconnect("B")).toBe(false); // 没有控制权转换
+    await store.flush();
+
+    const rows = statements(timeline, "insert:match_room_players", since);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]![RENOUNCED]).toBe(false);
+    expect(rows[0]![CONTROL]).toBe("trustee"); // 进来 ≠ 接管
+  });
+
+  it("重启后从数据库恢复 renounced —— quit 过的座位仍是主动放弃状态", async () => {
+    const users = [account("A", 600, "room-1"), account("B", 500, "room-1")];
+    const { store } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 3 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "human", away: false, renounced: false, control_changed_at: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: true, opening_balance: "500", raw_delta: "0", control: "trustee", away: false, renounced: true, control_changed_at: new Date(2) },
+      ],
+    });
+
+    const room = store.rooms.get("room-1")!;
+    expect(room.players.get("A")!.renounced).toBe(false);
+    expect(room.players.get("B")!.renounced).toBe(true);
+    // 恢复出的状态足以支撑"全员放弃"判定：4 座全这样恢复时，实时层必须能判出终局
+    expect(room.players.get("B")).toMatchObject({ control: "trustee", renounced: true });
   });
 
   it("重启后从数据库恢复托管座位 —— 不能一律当 human", async () => {

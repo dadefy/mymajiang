@@ -1101,5 +1101,118 @@ describe("退出托管与重新接管", () => {
     // 而发起动作的这一家本身不受影响
     expect(room.players.get(userIds[0]!)!.control).toBe("human");
   });
+
+  it("条件 A：四人全部退出 → 当场提前终局，托管不再自动打到第 7/8 局", async () => {
+    // 真实测试暴露的问题的端到端回归：quit 不删 socket，人还挂在牌桌上，
+    // 旧行为是 4 个托管你一张我一张把剩下的局打完 —— 现在必须在第 4 个 quit 落地时散场。
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 20,
+      claimTimeoutMs: 20,
+      interRoundPauseMs: 0,
+      roundsPlayed: 7, // 本局是第 8 局；提前终局后大局必须停在 7 局而不是打满
+    });
+
+    for (const client of clients) client.send({ type: "quit" });
+    for (const client of clients) {
+      const finished = await readUntil(client, (message) => message.type === "match-finished", 10_000);
+      expect(finished.result.reason).toBe("dissolved");
+      expect(finished.result.completedRounds).toBe(7);
+    }
+    expect(room.status).toBe("dissolved");
+
+    // 对局已摘除：再发任何对局消息都被拒
+    clients[0]!.send({ type: "request_takeover" });
+    const error = await readUntil(clients[0]!, (message) => message.type === "error");
+    expect(error.message).toBe("Match has not started");
+  });
+
+  it("条件 B：四人全部断线且保护期全过 → 不靠任何操作触发，自动提前终局", async () => {
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+      reconnectWindowMs: 200,
+    });
+
+    for (const client of clients) client.close();
+    // 最后一个保护期到点（窗口定时器）就是终局时刻
+    await waitFor(() => room.status === "dissolved", 10_000);
+    expect(room.completedRounds).toBe(0);
+    for (const player of room.players.values()) {
+      // 掉线到点转托管 ≠ 主动退出：renounced 全程 false；
+      // 终局后 finalize 会把控制权统一作废回 human（托管/放弃标记不残留）。
+      expect(player.control).toBe("human");
+      expect(player.renounced).toBe(false);
+    }
+    // 0 局完成：谁的余额都不动（内测账号的初始分是 10000）
+    for (const player of room.players.values()) {
+      expect(player.account.points).toBe(10000);
+    }
+  });
+
+  it("条件 B 混合形态：3 人退出 + 1 人掉线，凑齐条件后提前终局", async () => {
+    const { clients, room, userIds } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+      reconnectWindowMs: 300,
+    });
+
+    for (const index of [0, 1, 2]) clients[index]!.send({ type: "quit" });
+    await readUntil(clients[2]!, (message) => message.type === "game" && message.state.control === "trustee");
+    // 第 4 座还在线（人工控制），3 个退出凑不齐条件
+    expect(room.status).toBe("playing");
+
+    clients[3]!.close();
+    await waitFor(() => room.players.get(userIds[3]!)!.reconnectDeadline !== undefined);
+    // 掉线座位还在 120 秒保护期内：绝不终局（这是"掉线 ≠ 放弃"的边界）
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(room.status).toBe("playing");
+
+    // 保护期过点 → 掉线座位转托管 → 条件凑齐 → 终局。
+    // 终局后 finalize 把控制权统一作废回 human，renounced 也不残留 ——
+    // 关键断言是「掉线座位从未被算成主动放弃」。
+    await waitFor(() => room.status === "dissolved", 10_000);
+    expect(room.players.get(userIds[3]!)!.renounced).toBe(false);
+    expect(room.players.get(userIds[3]!)!.control).toBe("human");
+  });
+
+  it("全员暂离不终局：暂离明确表示还会回来，时间再久也不散场", async () => {
+    const { clients, room, userIds } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+      reconnectWindowMs: 100,
+    });
+
+    for (const index of [0, 1, 2, 3]) {
+      expect(room.markAway(userIds[index]!, true)).toBe(true);
+      clients[index]!.close(); // 暂离中断开：不排保护期（暂离免疫窗口）
+    }
+    // 远超任何保护期：如果暂离被误判成放弃，这里早就 dissolved 了
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(room.status).toBe("playing");
+    for (const player of room.players.values()) expect(player.away).toBe(true);
+  });
+
+  it("局间停留中全员退出：不开下一局，直接提前终局", async () => {
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 20,
+      claimTimeoutMs: 20,
+      interRoundPauseMs: 60_000, // 停留足够长：退出一定落在停留期内
+      roundsPlayed: 6, // 本局是第 7 局，打完还有第 8 局 ⇒ 进入局间停留
+    });
+
+    // 等第 7 局自然打完、进入局间停留
+    await readUntil(clients[0]!, (message) => message.type === "round-finished", 30_000);
+    expect(room.completedRounds).toBe(7);
+
+    for (const client of clients) client.send({ type: "quit" });
+    for (const client of clients) {
+      const finished = await readUntil(client, (message) => message.type === "match-finished", 10_000);
+      expect(finished.result.reason).toBe("dissolved");
+      expect(finished.result.completedRounds).toBe(7);
+    }
+    // 没开出第 8 局：大局停在 7 局收尾
+    expect(room.status).toBe("dissolved");
+    expect(room.completedRounds).toBe(7);
+  });
 });
 

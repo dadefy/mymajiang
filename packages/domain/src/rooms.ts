@@ -65,6 +65,20 @@ export interface RoomPlayer {
   away: boolean;
   /** 控制权最近一次变更的时刻，供排查与界面展示用。 */
   controlChangedAt?: Date;
+  /**
+   * 「这个玩家**当前仍处于**一次明确的主动退出状态」（持久化，migration 012）。
+   *
+   * ⚠️ 它是**状态**，不是历史记录 —— 「这个人曾经点过退出」：
+   *   * `quitToTrustee()`（WS quit 帧）置 true：这是唯一把座位标记成"主动放弃"的路径；
+   *   * 120 秒保护期到期转托管置 false：网络断线不等价于主动退出；
+   *   * `resumeControl()`（重新接管）置 false；
+   *   * `reconnect()`（真人重新进入牌局/重建连接）置 false —— 即使 control 仍是 trustee，
+   *     人回来了就不能再被视为"放弃了这场比赛"（否则 4 人 quit 后有人回来看看，
+   *     会被误判进"全员主动放弃"而提前终局）。
+   *
+   * `markAway` / `disconnect` **有意不碰它**：暂离与断线都不改变"是否主动放弃"。
+   */
+  renounced: boolean;
 }
 
 /**
@@ -141,6 +155,7 @@ export class MatchRoom {
       connected: true,
       control: "human",
       away: false,
+      renounced: false,
     });
   }
 
@@ -156,6 +171,7 @@ export class MatchRoom {
       connected: true,
       control: "human",
       away: false,
+      renounced: false,
     });
   }
 
@@ -240,6 +256,11 @@ export class MatchRoom {
    * 因此这里在窗口已过时**就地转为托管**，并返回"控制权变了吗"让调用方落库与广播；
    * 正常情况下窗口到期由实时层的定时器先触发，这一段是兜底（服务刚重启、定时器还没排上等）。
    *
+   * ⚠️ renounced 在这里清成 false：auth 建立牌局连接就是「真人重新进入牌局」这一明确事件
+   * （`reconnect` 只被 WS auth 调用）。quit 后原地留在牌桌的人不会走到这里 —— 他的
+   * socket 一直开着，没有新连接，"主动放弃"的标记原样保留。
+   * control **不因进入而改变**：回来先看到「托管中 + 重新接管」，要人工操作必须显式接管。
+   *
    * @returns 控制权是否因此次进入而改变（true = 已转托管，调用方需要持久化）
    */
   reconnect(userId: string): boolean {
@@ -255,6 +276,7 @@ export class MatchRoom {
       controlChanged = true;
     }
     player.connected = true;
+    player.renounced = false;
     delete player.disconnectedAt;
     delete player.reconnectDeadline;
     return controlChanged;
@@ -273,6 +295,9 @@ export class MatchRoom {
     if (player.control !== "human") return false;
     if (!player.reconnectDeadline || player.reconnectDeadline.getTime() > this.now().getTime()) return false;
     this.setControl(player, "trustee");
+    // 120 秒到期转托管 ≠ 主动退出：renounced 必须回到 false，
+    // 否则网络断线会被误判成"放弃比赛"，提前终局条件就会被掉线触发。
+    player.renounced = false;
     return true;
   }
 
@@ -300,6 +325,8 @@ export class MatchRoom {
       if (player.reconnectDeadline === undefined) continue;
       if (player.reconnectDeadline.getTime() > now) continue;
       this.setControl(player, "trustee");
+      // 同 expireReconnectWindow：到期转托管不是主动退出。
+      player.renounced = false;
       changed.push(userId);
     }
     return changed;
@@ -318,6 +345,9 @@ export class MatchRoom {
     if (this.status !== "playing") throw new Error("Room is not playing");
     if (player.control === "trustee") return false;
     this.setControl(player, "trustee");
+    // 主动退出：座位进入「明确的主动放弃」状态（migration 012）。
+    // 这是 renounced=true 的唯一写入点 —— 网络断线的托管化走不到这里。
+    player.renounced = true;
     // 退出的人不在大厅，暂离标记一并清掉（presence 由 control 主导，这里只是不留脏数据）
     player.away = false;
     return true;
@@ -336,8 +366,58 @@ export class MatchRoom {
     if (this.status !== "playing") return false;
     if (player.control === "human") return false;
     this.setControl(player, "human");
+    // 重新接管 = 回到人工：自然不再处于"主动放弃"状态。
+    player.renounced = false;
     player.away = false;
     return true;
+  }
+
+  /**
+   * 「这一局已经打不下去了吗」—— 提前终局的**唯一判据**（migration 012 配套）。
+   *
+   * 每个座位必须都已失去有效在线参与，满足**任一**条即算该座出局：
+   *   * `renounced` —— 明确的主动退出（quit）。**socket 还连着也算**：
+   *     4 个人都点了退出、人都还挂在牌桌上看，也已经没有人参与这一局，
+   *     不该再由 4 个托管自动打到第 7/8 局（真实测试暴露的问题）；
+   *   * 失联且保护期已过：`!connected && !away && (已托管 || 墙钟 deadline 已过)`。
+   *     异常断线仍尊重 120 秒窗口；暂离（away）**明确不算**。
+   *
+   * 幂等、纯读；终局动作见 {@link abortAbandonedMatch}。
+   */
+  matchAbandoned(): boolean {
+    if (this.status !== "playing") return false;
+    const now = this.now().getTime();
+    for (const player of this.players.values()) {
+      if (player.renounced) continue;
+      if (player.away) return false;
+      if (player.connected) return false;
+      if (player.control !== "trustee") {
+        // 还在人工的失联座位：保护期没过就不算（120 秒窗口内不终止）。
+        if (!player.reconnectDeadline || player.reconnectDeadline.getTime() > now) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 提前终局：当前小局作废，大局按**已完成的小局**结算收尾。
+   *
+   *   * **绝不调用** `recordCompletedRound()` —— 当前小局的 events 只存在于
+   *     引擎内存与 `match_round_states` 快照里，从未进过任何永久账
+   *     （`match_rounds` / `point_ledger` / `raw_delta` / 账号积分），
+   *     所以作废实现就是"丢弃引擎 + 清快照"，无需任何积分冲正；
+   *     `rawDeltas` 结构上只含已完成局（它唯一的写点就是 `recordCompletedRound`）。
+   *   * 复用 `finalize("dissolved")`：status → dissolved、清 activeMatchId、
+   *     入账与 ledger 全部走现有结算链（`PostgresMatchRoom.finalize` 覆写自动落库），
+   *     `final_reason='dissolved'` + `completed_rounds<8` 即可在战绩里识别"提前结束"。
+   *   * **幂等**：`status !== "playing"` 直接返回 undefined —— 重复触发、多路触发
+   *     （quit、window 定时器、settleExpiredSeats、断线回调）只有第一次真正结算。
+   *
+   * 0 局完成场景：`rawDeltas` 全 0 → `accountDeltas` 全 0 → 不写任何 ledger，余额不动。
+   */
+  abortAbandonedMatch(): RoomResult | undefined {
+    if (this.status !== "playing") return undefined;
+    return this.finalize("dissolved");
   }
 
   /**
@@ -451,6 +531,7 @@ export class MatchRoom {
       // 房间对象还留在内存里，不复位的话会带着 trustee 残留到下一次读取。
       player.control = "human";
       player.away = false;
+      player.renounced = false;
       delete player.controlChangedAt;
       delete player.disconnectedAt;
       delete player.reconnectDeadline;

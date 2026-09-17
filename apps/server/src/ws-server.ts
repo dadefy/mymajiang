@@ -40,6 +40,14 @@ interface ActiveMatch {
    * 只有一个控制来源"的兜底保证（光靠 `clearActionTimers` 是挡不住这条路径的）。
    */
   seatEpoch: Map<number, number>;
+  /**
+   * 提前终局进行中 / 已完成（migration 012 配套「全员放弃提前终局」）。
+   *
+   * 终局可由多条路径触发（quit、断线回调、120 秒窗口定时器、墙钟结算、局间停留），
+   * 且定时器回调一旦排进事件队列就撤不干净 —— 这个标志保证**只有第一次真正结算**，
+   * 后续触发（包括已经在飞的 `broadcastState`）看到它就直接返回。
+   */
+  terminating?: boolean;
 }
 
 export interface RealtimeOptions {
@@ -476,7 +484,55 @@ function buildRealtimeServer(
       clearWindowTimer(active, seat);
     }
     await broadcastState(active);
+    // 墙钟结算可能正好凑齐提前终局条件（服务重启后恢复的对局尤其靠这里补判 ——
+    // 定时器没了，只有按数据库里的绝对时刻重判这一条路）。
+    if (abandonmentReached(active)) await terminateAbandonedMatch(active);
     return true;
+  }
+
+  /**
+   * 提前终局的**唯一判定入口**：判据在域层（`MatchRoom.matchAbandoned`，migration 012），
+   * 这里只做守卫拼接 —— 幂等标志、房间还在进行中，两者都满足才继续。
+   * 纯读、无副作用，多路调用安全。
+   */
+  function abandonmentReached(active: ActiveMatch): boolean {
+    return !active.terminating && active.room.status === "playing" && active.room.matchAbandoned();
+  }
+
+  /**
+   * 全员失去有效在线参与时的提前终局动作（migration 012 配套）。
+   *
+   *   * 全部座位世代 +1 —— 任何已排进事件循环的自动出牌 / 托管回调开火时都会发现自己过期；
+   *   * 撤掉这一局的全部定时器（动作 / 120 秒保留期 / 局间停留 / 延迟落盘）；
+   *   * `room.abortAbandonedMatch()` → `finalize("dissolved")`：当前小局作废
+   *     （**不**走 `recordCompletedRound`，不写积分账、不记 completedRounds），
+   *     大局按已完成的小局结算，`PostgresMatchRoom.finalize` 覆写自动落库；
+   *   * 给还连着的四家发 `match-finished`（复用整场结算帧的拼装 `matchSettlement`）；
+   *   * 清掉这一局的快照（`match_round_states`）、把对局从 `activeMatches` 摘除。
+   *
+   * 进入即置 `terminating`：从置位到 `abortAbandonedMatch()` 之间没有任何 `await`，
+   * 这一段是原子的；之后的重复触发（多路判定、在途回调）都被标志挡住。
+   */
+  async function terminateAbandonedMatch(active: ActiveMatch): Promise<void> {
+    if (active.terminating) return;
+    active.terminating = true;
+    for (const seat of active.seatsByUser.values()) {
+      active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
+    }
+    clearActionTimers(active);
+    clearWindowTimers(active);
+    clearInterRoundTimer(active);
+    cancelSaveTimer(active);
+    const matchResult = active.room.abortAbandonedMatch();
+    if (!matchResult) return;
+    for (const player of active.room.players.values()) dependencies.accountStore.saveAccount(player.account);
+    await dependencies.accountStore.flush?.();
+    for (const connection of seatConnections.get(active)?.values() ?? []) {
+      connection.send({ type: "match-finished", result: matchSettlement(active.room, matchResult) });
+    }
+    dependencies.gameStateStore?.clear(active.room.roomId);
+    activeMatches.delete(active.room.roomId);
+    seatConnections.delete(active);
   }
 
   /** 给一个连接发"我这一座"的完整视角：对局帧 + 当前可用操作。 */
@@ -567,6 +623,11 @@ function buildRealtimeServer(
       if (!active.room.expireReconnectWindow(userId)) return;
       active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
       void broadcastState(active).catch(() => undefined);
+      // 最后一个保护期到点 = 条件 B（全员失联且都已过保护期 / 已退出）可能成立的时刻。
+      // 判据仍是域层墙钟；没凑齐时这里是无副作用的纯读。
+      if (abandonmentReached(active)) {
+        void terminateAbandonedMatch(active).catch(() => undefined);
+      }
     }, Math.max(0, deadline.getTime() - Date.now()));
     timer.unref();
     let timers = windowTimers.get(active);
@@ -632,6 +693,9 @@ function buildRealtimeServer(
   }
 
   async function broadcastState(active: ActiveMatch): Promise<void> {
+    // 提前终局后的在途回调（托管定时器、断线广播、群/座位事件）到这里一律直接返回：
+    // 对局已从 activeMatches 摘除，再广播只会发出一个已 dissolved 房间的过期帧。
+    if (active.terminating) return;
     clearActionTimers(active);
     const seatMap = seatConnections.get(active);
     const game = active.game;
@@ -679,6 +743,11 @@ function buildRealtimeServer(
       // （就是上面那道闸）保证重入幂等。
       if (interRoundPauseMs <= 0) {
         // 测试路径：与加停留之前完全一致，立刻开下一局。
+        // 但开之前先看一眼终局条件 —— 停留（哪怕 0 毫秒）期间凑齐了全员放弃，就该收尾而不是开下一局。
+        if (abandonmentReached(active)) {
+          await terminateAbandonedMatch(active);
+          return;
+        }
         active.game = new MahjongGame(
           randomInt(0, 2 ** 31),
           [...active.seatsByUser.keys()] as [string, string, string, string],
@@ -689,6 +758,11 @@ function buildRealtimeServer(
       }
       const timer = setTimeout(() => {
         interRoundTimers.delete(active);
+        // 局间停留期间凑齐了终局条件（停留中最后一人退出/断线过保护期）：收尾，不开下一局。
+        if (abandonmentReached(active)) {
+          void terminateAbandonedMatch(active).catch(() => undefined);
+          return;
+        }
         active.game = new MahjongGame(
           randomInt(0, 2 ** 31),
           [...active.seatsByUser.keys()] as [string, string, string, string],
@@ -845,6 +919,8 @@ function buildRealtimeServer(
         // 20:00 断线、deadline 20:02、20:10 才恢复 ⇒ 此刻就认定"已过期"，
         // 不因为"刚重启过"再送一个 120 秒。返回的 true 表示它已经广播过一次。
         const settled = await settleExpiredSeats(active);
+        // 墙钟结算可能已触发提前终局：对局已摘除，match-finished 已发，不再发对局帧。
+        if (active.terminating) return;
         sendPlayerState(connection, active, seat);
         // 另外三家也要立刻看到「暂离」消失 —— 上面那一发只发给回来的本人。
         if (returnedFromLobby && !settled) await broadcastState(active);
@@ -913,6 +989,9 @@ function buildRealtimeServer(
     // 过期时这一座当场转托管，下面的控制权闸门随即拒绝它的动作 ——
     // 于是"到点了还没回来"在任何一条路径上都不会漏判，也不会重复判。
     await settleExpiredSeats(active);
+    // 墙钟结算可能已触发提前终局：房间已 dissolved，后续动作一律不再受理
+    // （match-finished 已经发出，客户端此刻应停在结算界面）。
+    if (active.terminating) return;
     const game = active.game;
     const seat = active.seatsByUser.get(connection.userId);
     if (seat === undefined) return sendError(connection, "Not seated in this match");
@@ -932,10 +1011,16 @@ function buildRealtimeServer(
       if (active.room.players.get(connection.userId)?.seat !== seat) {
         return sendError(connection, "SEAT_NOT_OWNED");
       }
-      if (active.room.quitToTrustee(connection.userId)) {
-        clearWindowTimer(active, seat);
-        await announceControlChange(active, seat);
+      const quitChanged = active.room.quitToTrustee(connection.userId);
+      if (quitChanged) clearWindowTimer(active, seat);
+      // 全员放弃判定放在广播**之前**：第 4 个人点退出时不再走「广播新控制权 → 重排
+      // 托管定时器 → 4 个托管自动打完剩下的局」，而是当场收尾发 match-finished。
+      // 这正是真实测试暴露的问题（4 人全部退出后托管自动打到第 7/8 局）的修复点。
+      if (abandonmentReached(active)) {
+        await terminateAbandonedMatch(active);
+        return;
       }
+      if (quitChanged) await announceControlChange(active, seat);
       sendPlayerState(connection, active, seat);
       return;
     }
@@ -1035,6 +1120,12 @@ function buildRealtimeServer(
         // 另外三家要看到这一座"人走了"：纯掉线显示「掉线」，暂离中的人断开仍显示「暂离」
         // （`presenceOf` 里暂离优先于连接状态 —— 他明确说过自己还会回来）。
         void broadcastState(active).catch(() => undefined);
+        // 断开可能正好凑齐终局条件（例如「3 人已退出 + 第 4 人本就已托管后断开」）。
+        // 刚掉线的人工座位带 120 秒保护期，域层判据会正确地暂不终止 —— 那要等
+        // `scheduleWindowExpiry` 的定时器到点再判（条件 B 走的就是这条路）。
+        if (abandonmentReached(active)) {
+          void terminateAbandonedMatch(active).catch(() => undefined);
+        }
       }
     },
   }, mode);

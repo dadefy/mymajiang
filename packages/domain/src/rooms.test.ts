@@ -392,6 +392,145 @@ describe("match room", () => {
     expect(room.resumeControl("B")).toBe(false);
     expect(() => room.quitToTrustee("B")).toThrow("not playing");
   });
+
+  it("条件 A：四人全部主动退出，socket 还连着也算放弃，当场作废当前小局", () => {
+    // 真实测试暴露的问题：4 个人全部点退出以后，不能再由 4 个 TRUSTEE 自动打到第 7/8 局。
+    // quit 不动 connected —— 所以这里四家 connected 全程为 true，判据必须越过它看 renounced。
+    const { room, users } = readyRoom();
+    room.start("A");
+    const round: RecordedRound = {
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: -100 },
+        { playerId: "B", delta: 100 },
+      ],
+      winnerSeats: [1],
+      nextDealerSeat: 1,
+    };
+    // 先正常打完 1 小局，第 2 小局「进行中」时四人陆续退出
+    expect(room.recordCompletedRound(round)).toBeUndefined();
+    for (const id of ["A", "B", "C", "D"]) {
+      room.quitToTrustee(id);
+      // 没凑齐之前绝不终局：哪怕 3 家已退出，最后 1 家还在线就得继续
+      if (id !== "D") expect(room.matchAbandoned()).toBe(false);
+    }
+    expect(room.matchAbandoned()).toBe(true);
+
+    const result = room.abortAbandonedMatch();
+    // 当前（第 2）小局作废：只按已完成的 1 局结算
+    expect(result).toMatchObject({ reason: "dissolved", completedRounds: 1 });
+    expect(result?.rawDeltas).toEqual([
+      { playerId: "A", delta: -100 },
+      { playerId: "B", delta: 100 },
+    ]);
+    expect(users.map((user) => user.points)).toEqual([500, 600, 500, 500]);
+    // 终局把托管与放弃标记一并作废
+    for (const player of room.players.values()) {
+      expect(player.control).toBe("human");
+      expect(player.renounced).toBe(false);
+    }
+    // 幂等：重复触发（多路判定）只有第一次真正结算
+    expect(room.abortAbandonedMatch()).toBeUndefined();
+  });
+
+  it("条件 B：混合退出与掉线 —— 掉线座位在保护期内不算放弃，墙钟过点后才凑齐", () => {
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { room, users } = readyRoom([600, 500, 500, 500], () => new Date(now));
+    room.start("A");
+    for (const id of ["A", "B", "C"]) room.quitToTrustee(id);
+    room.disconnect("D"); // 人工座位掉线：保护期到 00:02:00
+    expect(room.players.get("D")!.reconnectDeadline).toBeDefined();
+    // 保护期内：掉线不等于放弃
+    expect(room.matchAbandoned()).toBe(false);
+    now += 120_001;
+    // 墙钟过点：条件 B 成立（0 局完成 → 无任何积分变动）
+    expect(room.matchAbandoned()).toBe(true);
+    const result = room.abortAbandonedMatch();
+    expect(result).toMatchObject({ reason: "dissolved", completedRounds: 0 });
+    // 0 局完成：没有任何已入账的变动，accountDeltas 为空（余额一分不动）
+    expect(result?.accountDeltas).toEqual([]);
+    expect(users.map((user) => user.points)).toEqual([600, 500, 500, 500]);
+  });
+
+  it("120 秒到期转托管不是主动放弃：renounced 必须回到 false，纯掉线不许触发终局", () => {
+    // 掉线被误判成「放弃比赛」是明确禁止项：网络抖一下就散场，等于惩罚掉线。
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { room } = readyRoom([600, 500, 500, 500], () => new Date(now));
+    room.start("A");
+    room.disconnect("B");
+    now += 120_001;
+    expect(room.expireReconnectWindow("B")).toBe(true);
+    expect(room.players.get("B")!.renounced).toBe(false);
+    // B 已托管，但 A/C/D 还在线 ⇒ 绝不终局
+    expect(room.matchAbandoned()).toBe(false);
+  });
+
+  it("全员暂离不算放弃：暂离明确表示还会回来，时间再久也不提前终局", () => {
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { room } = readyRoom([600, 500, 500, 500], () => new Date(now));
+    room.start("A");
+    for (const id of ["A", "B", "C", "D"]) {
+      room.markAway(id, true);
+      room.disconnect(id); // 暂离免疫 120 秒窗口
+    }
+    now += 600_000; // 10 分钟，远超任何保护期
+    expect(room.matchAbandoned()).toBe(false);
+  });
+
+  it("打了 7 小局后第 8 局中全员放弃：前 7 局照常入账，第 8 局作废", () => {
+    const { room, users } = readyRoom();
+    room.start("A");
+    const round: RecordedRound = {
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: -100 },
+        { playerId: "B", delta: 100 },
+      ],
+      winnerSeats: [1],
+      nextDealerSeat: 1,
+    };
+    for (let index = 0; index < 7; index += 1) expect(room.recordCompletedRound(round)).toBeUndefined();
+    for (const id of ["A", "B", "C", "D"]) room.quitToTrustee(id);
+    const result = room.abortAbandonedMatch();
+    expect(result).toMatchObject({ reason: "dissolved", completedRounds: 7 });
+    // raw -700 超过 A 的开局分 600 ⇒ 封顶到 -600；封顶是零和对称的，B 也只入账 +600
+    expect(result?.accountDeltas).toEqual([
+      { playerId: "A", delta: -600 },
+      { playerId: "B", delta: 600 },
+    ]);
+    expect(users.map((user) => user.points)).toEqual([0, 1100, 500, 500]);
+  });
+
+  it("退出后重新进入：renounced 清回 false（真人回到牌局），但控制权仍是托管", () => {
+    // auth 建立牌局连接就是「真人重新进入」这一明确事件 —— 一个真人回来，
+    // 「全员放弃」就不再成立，哪怕他还没点重新接管。
+    const { room } = readyRoom();
+    room.start("A");
+    for (const id of ["A", "B", "C", "D"]) room.quitToTrustee(id);
+    expect(room.matchAbandoned()).toBe(true);
+    expect(room.reconnect("B")).toBe(false);
+    expect(room.players.get("B")).toMatchObject({ renounced: false, control: "trustee", connected: true });
+    expect(room.matchAbandoned()).toBe(false);
+  });
+
+  it("重新接管清掉主动放弃标记", () => {
+    const { room } = readyRoom();
+    room.start("A");
+    room.quitToTrustee("B");
+    expect(room.players.get("B")!.renounced).toBe(true);
+    expect(room.resumeControl("B")).toBe(true);
+    expect(room.players.get("B")!.renounced).toBe(false);
+  });
+
+  it("matchAbandoned 幂等纯读：waiting / finished / dissolved 房间恒为 false", () => {
+    const { room } = readyRoom();
+    expect(room.matchAbandoned()).toBe(false); // waiting
+    room.start("A");
+    for (const id of ["A", "B", "C", "D"]) room.quitToTrustee(id);
+    room.abortAbandonedMatch();
+    expect(room.status).toBe("dissolved");
+    expect(room.matchAbandoned()).toBe(false); // dissolved
+  });
 });
 
 

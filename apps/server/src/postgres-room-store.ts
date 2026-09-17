@@ -36,6 +36,11 @@ interface RoomPlayerRow {
   /** `VARCHAR(16)`：只有 'human' / 'trustee' 两个合法值（表上有 CHECK）。 */
   control: string;
   away: boolean;
+  /**
+   * 「当前仍处于一次明确的主动退出状态」（migration 012）。
+   * 状态不是历史：quit 置 true；120s 到期转托管 / 重新接管 / 真人重新进入牌局都置 false。
+   */
+  renounced: boolean;
   control_changed_at: Date | null;
   /**
    * 人工控制权保护期的**绝对截止时刻**（墙钟，migration 011）。
@@ -62,13 +67,13 @@ const UPSERT_ROOM_SQL = `INSERT INTO match_rooms (
 
 const UPSERT_ROOM_PLAYER_SQL = `INSERT INTO match_room_players (
     room_id, user_id, seat, joined_at, ready, opening_balance, raw_delta, account_delta,
-    control, away, control_changed_at, reconnect_deadline
-  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    control, away, renounced, control_changed_at, reconnect_deadline
+  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
   ON CONFLICT (room_id, user_id) DO UPDATE SET
     seat = EXCLUDED.seat, ready = EXCLUDED.ready,
     opening_balance = EXCLUDED.opening_balance, raw_delta = EXCLUDED.raw_delta,
     account_delta = EXCLUDED.account_delta,
-    control = EXCLUDED.control, away = EXCLUDED.away,
+    control = EXCLUDED.control, away = EXCLUDED.away, renounced = EXCLUDED.renounced,
     control_changed_at = EXCLUDED.control_changed_at,
     reconnect_deadline = EXCLUDED.reconnect_deadline`;
 
@@ -238,8 +243,13 @@ export class PostgresMatchRoom extends MatchRoom {
 
   /** `reconnect()` 在窗口已过时会就地转托管，那次转换同样要落库。 */
   override reconnect(userId: string): boolean {
+    const player = this.players.get(userId);
+    const prevRenounced = player?.renounced ?? false;
     const changed = super.reconnect(userId);
-    if (changed) this.flushPlayer(userId);
+    // renounced 也可能在 reconnect 里变（真人重新进入牌局 → 不再视为主动放弃）：
+    // 没有控制权变化时只要这个标记变了同样要写，否则重启后"他已经回来了"会被忘掉，
+    // 四人 quit 的终局判定会错误地把一个真人在线的座位算成主动放弃。
+    if (changed || (this.players.get(userId)?.renounced ?? false) !== prevRenounced) this.flushPlayer(userId);
     return changed;
   }
 
@@ -437,7 +447,7 @@ export class PostgresRoomStore {
       ),
       database.pool.query<RoomPlayerRow>(
         `SELECT p.room_id, p.user_id, p.seat, p.joined_at, p.ready, p.opening_balance, p.raw_delta,
-                p.control, p.away, p.control_changed_at, p.reconnect_deadline
+                p.control, p.away, p.renounced, p.control_changed_at, p.reconnect_deadline
            FROM match_room_players p
            JOIN match_rooms r ON r.room_id = p.room_id
           WHERE r.status IN ('waiting', 'playing') ORDER BY p.joined_at ASC, p.user_id ASC`,
@@ -482,6 +492,9 @@ export class PostgresRoomStore {
           // 而它又没人连接，整局就会卡在等人工操作上 —— 这正是这两个字段存在的理由。
           control: storedControl(player.control, roomId, userId),
           away: player.away,
+          // 「主动退出」状态照库恢复：quit 后重启，这个座位仍然是"主动放弃"，
+          // 提前终局判定不能因为重启而漏掉它。
+          renounced: player.renounced,
           ...(player.control_changed_at === null ? {} : { controlChangedAt: player.control_changed_at }),
           // ⚠️ 保护期**照原样恢复，不重算**。这是墙钟语义的关键：
           // 断线发生在 20:00、deadline 是 20:02、服务 20:10 才起来 ——
@@ -567,6 +580,9 @@ function roomPlayerParameters(room: MatchRoom, userId: string, accountDelta: num
     accountDelta,
     player.control,
     player.away,
+    // 「当前仍处于主动退出状态」（migration 012）：quit 为 true，
+    // 120s 到期转托管 / 重新接管 / 真人重新进入牌局都回 false。状态，不是历史记录。
+    player.renounced,
     player.controlChangedAt ?? null,
     // 保护期的绝对截止时刻。NULL 表示"没有保护期"——写库时**不**按当前时间重算，
     // 否则服务重启后一次 flush 就会把旧的 deadline 顶成一个新的 120 秒，
