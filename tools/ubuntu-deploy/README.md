@@ -12,7 +12,9 @@
 | `99-upload-from-dev.sh` | **开发机**（Windows / Git Bash） | 打包仓库（排除 node_modules / dist / .env / 密钥台账）并传到服务器 |
 | `01-os-setup.sh` | 服务器 | 基础包 → Node 22 → pnpm → PostgreSQL（建库建角色）→ 运行账号 `mymj` →（可选）防火墙 |
 | `02-deploy-app.sh` | 服务器 | 装依赖 → 构建 → 生成 `.env` → 装 systemd 服务 → 启动 → `/health` 自检 |
+| `03-public-access.sh` | 服务器 | 装 cloudflared → 起公网隧道 → 补 `TRUST_PROXY` → 自检（**要公网访问就跑这个**） |
 | `mymj.service` | — | systemd 单元模板，`02` 会替换占位符后装到 `/etc/systemd/system/` |
+| `mymj-tunnel.service` / `mymj-tunnel-run` | — | 公网隧道单元与包装脚本，`03` 装到 `/etc/systemd/system/` 与 `/usr/local/bin/` |
 | `nginx-mymj.conf` | 服务器（可选） | Nginx 反代，含 WebSocket 的 `Upgrade` 头 |
 
 **顺序：先传代码，再跑 `01`，最后跑 `02`。**
@@ -71,6 +73,69 @@ sudo systemctl restart mymj
 > ⚠️ **国内服务器 + 域名要先 ICP 备案**才允许用 80/443 对外提供服务。
 > 没备案时：用上面的 IP 直连档先跑，或者把机器放到境外 / 中国香港。
 
+## 要「互联网能访问」时：走隧道，不要走端口映射
+
+```bash
+sudo bash tools/ubuntu-deploy/03-public-access.sh
+```
+
+跑完会打印一个 `https://<随机词>.<随机词>.trycloudflare.com` 的地址，**HTTPS，能直接用**。
+
+### 为什么不是「路由器端口映射 + 公网 IP」
+
+**因为在多数国内宽带上这条路根本走不通**（本项目实测，2026-09-17）：
+
+```text
+1: 192.168.3.1        ← 自己的路由器
+2: 192.168.1.1        ← 上一级路由器
+3: 172.16.0.1         ← 再上一级（园区/运营商）
+6: 119.6.197.130      ← 才到联通骨干
+```
+
+是**三层私网 NAT**，而且上面两层不是你的设备 —— 端口映射只能打通自己那一层。
+用第三方节点从境外回连验证过：`175.154.16.55:3000` 三个国家的节点**全部 connection timed out**。
+
+隧道方向是**从内往外建立连接**，天然绕开 NAT，且 Cloudflare 边缘直接终结 TLS，
+所以 `location.origin` 推出来的 `wss://` 也能直接用（实时通道与 HTTP 共用端口，见 `ws-server.ts`）。
+
+### 三个必须知道的点
+
+**① 地址每次重启都会变**（quick tunnel 的固有属性，不是配置问题）。
+当前地址记在服务器上：
+
+```bash
+cat /srv/mianyang-mahjong/apps/server/.public-url
+systemctl status mymj-tunnel          # 或 journalctl -u mymj-tunnel -f
+```
+
+**要固定地址**，得二选一：自己的域名 + Cloudflare 命名隧道（要买个域名并改 NS），
+或换 Tailscale Funnel（要注册账号，地址形如 `https://<机器名>.<tailnet>.ts.net`）。
+
+**② `TRUST_PROXY=loopback` 是必需项，不是优化项。**
+隧道是从本机 `127.0.0.1` 转发进来的 ⇒ 服务端看到的客户端 IP 全是回环地址。
+不设这项，限流会把**所有公网用户算成一个 IP**：一个人的操作就能把全站每分钟 30 次的
+登录额度吃光。`03` 会自动补上这一行并重启服务。
+取 `loopback` 而不是 `true`：只信任本机来的转发，局域网直连的客户端伪造
+`X-Forwarded-For` 无效，绕不过限流。
+
+**③ 你自己的浏览器可能打不开这个地址 —— 先怀疑系统代理。**
+这台开发机长期挂着一个**连不通**的系统代理（`127.0.0.1:65532`），
+Chrome 默认会用它，表现是「公网地址打不开」，而排查会一路怀疑到应用上去。
+两条对策：
+
+- 把 `*.trycloudflare.com` 加进 Windows 代理绕过列表（用通配，隧道地址怎么变都不影响）；
+- 探针脚本已默认 `--no-proxy-server`（需要走代理时给 `PROXY_SERVER=host:port`）。
+
+> ⚠️ `curl` **不读** Windows 的系统代理 —— 「我这边 curl 能通」不等于「浏览器能通」。
+
+### 隧道下的自检顺序
+
+```bash
+curl -s 127.0.0.1:3000/health                                   # ① 本机通不通
+journalctl -u mymj-tunnel | grep 'Registered tunnel connection'  # ② 隧道连上没有
+curl -s "$(cat apps/server/.public-url)/health"                 # ③ 从公网打回来
+```
+
 ## 部署完之后怎么验
 
 在服务器上（`apps/server` 目录，`.env` 就在那儿）：
@@ -97,6 +162,13 @@ node tools/domcheck/check-lobby-flow.mjs
 `/v1/rooms → 409`，界面上只留一句「这个账号还在一局没打完的牌局里，先回那一局打完再来」，
 从第 ④ 步开始整片失败。**看着像功能坏了，其实只是账号脏了。**
 每次换一组新密钥：`node --env-file=.env scripts/seed-testers.mjs 探甲 探乙 探丙 探丁`
+
+⚠️ **打公网地址（走隧道）时，这个四标签页探针不可靠**：隧道单程约 0.9 秒，
+而探针里的 `clickUntil` 是「点一次 → 等 5 秒 → 没变就再点」，注释里就写着
+「线上延迟大时尤其明显」。实测同一份代码局域网 **40/40**、隧道 **20/40**，
+失败点集中在建房那一步。
+**要确认隧道本身通不通，别用它** —— 单开一个标签页手动过一遍更快也更准：
+登录 → 大厅 → 建房 → 看等待区有没有 4 个座位和房间号。
 
 ⚠️ 在 Git Bash 里跑探针时**别写 `KEYS=... timeout 300 node ...`** ——
 这个 `timeout` 会把环境变量吞掉，脚本读到空值，然后报「需要 4 把已激活的密钥，当前 0 把」。

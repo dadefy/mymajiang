@@ -1,0 +1,22 @@
+[Unit]
+Description=mymajiang 公网访问隧道（Cloudflare Quick Tunnel）
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/
+After=network-online.target @APP_SERVICE@.service
+Wants=network-online.target
+# 隧道依赖外网，断网重连属于常态，重启额度给宽松一些
+# ⚠️ StartLimit* 必须写在 [Unit] 段（systemd 230 起）；写在 [Service] 里会被静默忽略
+StartLimitIntervalSec=300
+StartLimitBurst=30
+
+[Service]
+Type=simple
+User=@APP_USER@
+ExecStart=/usr/local/bin/mymj-tunnel-run
+Restart=always
+RestartSec=5
+# 隧道和牌局服务各自独立，一方重启不牵连另一方
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

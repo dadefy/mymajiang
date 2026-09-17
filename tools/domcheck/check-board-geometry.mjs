@@ -44,6 +44,12 @@ if (KEYS.length !== 4) {
   process.exit(0);
 }
 
+// 探针量的是**应用本身**，中间任何代理都是不受控变量。这台开发机的系统里长期挂着
+// 一个连不通的代理，Chrome 默认会用它，于是「公网地址打不开」看着像应用故障。
+// 默认直连；确实需要走代理时给 PROXY_SERVER=host:port。
+const PROXY_SERVER = process.env.PROXY_SERVER ?? "";
+const proxyArgs = PROXY_SERVER ? [`--proxy-server=${PROXY_SERVER}`] : ["--no-proxy-server"];
+
 const failures = [];
 const check = (ok, message) => {
   console.log(`${ok ? "  ok  " : "  FAIL"} ${message}`);
@@ -55,6 +61,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const profile = mkdtempSync(join(tmpdir(), "mymj-geometry-"));
 const chrome = spawn(browser, [
   "--headless=new",
+  ...proxyArgs,
   `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${profile}`,
   "--window-size=1280,900",

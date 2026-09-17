@@ -38,9 +38,16 @@ const env = Object.fromEntries(readFileSync(ENV_PATH, "utf8")
   .map((line) => { const i = line.indexOf("="); return [line.slice(0, i).trim(), line.slice(i + 1).trim()]; }));
 if (!env.ADMIN_ID || !env.ADMIN_PASSWORD) throw new Error(".env 里缺 ADMIN_ID / ADMIN_PASSWORD");
 
+// 探针量的是**应用本身**，中间任何代理都是不受控变量。这台开发机的系统里长期挂着
+// 一个连不通的代理，Chrome 默认会用它，于是「公网地址打不开」看着像应用故障。
+// 默认直连；确实需要走代理时给 PROXY_SERVER=host:port。
+const PROXY_SERVER = process.env.PROXY_SERVER ?? "";
+const proxyArgs = PROXY_SERVER ? [`--proxy-server=${PROXY_SERVER}`] : ["--no-proxy-server"];
+
 const profile = mkdtempSync(join(tmpdir(), "mymj-admin-"));
 const chrome = spawn(CHROME, [
   "--headless=new",
+  ...proxyArgs,
   `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${profile}`,
   `--window-size=${WIDTH},${HEIGHT}`,

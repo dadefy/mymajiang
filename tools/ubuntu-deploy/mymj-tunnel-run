@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# 起一条 Cloudflare Quick Tunnel，把本机 3000 端口暴露成公网 HTTPS 地址。
+#
+# 为什么要包一层：quick tunnel 的域名是**每次启动随机生成**的，cloudflared 只把它
+# 打在日志里。包一层是为了把「当前地址」落到一个固定文件，运维时 cat 一下就有。
+#
+# ⚠️ 这个地址会随重启变化。要**固定地址**就得用「命名隧道 + 自己的域名」，
+#    见同目录 README.md 的「公网访问」一节。
+#
+# 环境变量：
+#   MYMJ_TUNNEL_TARGET    隧道指向哪儿（默认 http://127.0.0.1:3000）
+#   MYMJ_TUNNEL_URL_FILE  公网地址写到哪个文件
+#   CLOUDFLARED           cloudflared 可执行文件路径
+set -u
+
+CLOUDFLARED="${CLOUDFLARED:-/usr/local/bin/cloudflared}"
+TARGET="${MYMJ_TUNNEL_TARGET:-http://127.0.0.1:3000}"
+URL_FILE="${MYMJ_TUNNEL_URL_FILE:-/srv/mianyang-mahjong/apps/server/.public-url}"
+
+[ -x "$CLOUDFLARED" ] || { echo "找不到 cloudflared：$CLOUDFLARED" >&2; exit 1; }
+
+# 先占位，免得运维看到的是上一次的旧地址（旧的比没有更坏）
+printf '%s\n' "(隧道正在建立，稍等几秒…)" > "$URL_FILE" 2>/dev/null || true
+
+# --protocol http2：很多网络封 UDP 7844，QUIC 会连不上；http2 走 443 最稳。
+# 日志既打给 journal（systemctl status 能看到），也解析出地址写进 URL_FILE。
+"$CLOUDFLARED" tunnel --no-autoupdate --protocol http2 --url "$TARGET" 2>&1 | \
+while IFS= read -r line; do
+  printf '%s\n' "$line"
+  case "$line" in
+    *trycloudflare.com*)
+      url="$(printf '%s' "$line" | sed -n 's#.*\(https://[A-Za-z0-9._-]\{1,\}\.trycloudflare\.com\).*#\1#p')"
+      if [ -n "$url" ]; then printf '%s\n' "$url" > "$URL_FILE"; fi
+      ;;
+  esac
+done

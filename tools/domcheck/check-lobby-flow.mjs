@@ -40,6 +40,12 @@ const PORT = Number(process.env.CDP_PORT ?? 9337);
 const PAGE = process.env.PAGE ?? "http://127.0.0.1:3012/debug";
 const SHOT = process.env.SHOT ?? "";
 const KEYS = (process.env.KEYS ?? "").split(",").map((each) => each.trim()).filter(Boolean);
+// 探针量的是**应用本身**，中间任何代理都是不受控变量。
+// 这台开发机的系统里长期挂着一个连不通的代理，Chrome 默认会用它，于是
+// 「公网地址打不开」—— 排查半天发现是代理，跟应用一点关系没有（实测踩过一次）。
+// 默认直连；确实需要走代理时给 PROXY_SERVER=host:port。
+const PROXY_SERVER = process.env.PROXY_SERVER ?? "";
+const proxyArgs = PROXY_SERVER ? [`--proxy-server=${PROXY_SERVER}`] : ["--no-proxy-server"];
 if (KEYS.length < 4) throw new Error(`需要 4 把已激活的密钥（KEYS 逗号分隔），当前 ${KEYS.length} 把`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,6 +63,7 @@ const chrome = spawn(CHROME, [
   "--headless=new",
   `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${profile}`,
+  ...proxyArgs,
   "--window-size=1280,900",
   "--hide-scrollbars",
   "--no-first-run",
