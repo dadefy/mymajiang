@@ -336,8 +336,15 @@ async function main() {
 
   const groups = await must("/v1/groups", { token: first.token });
   check("主页群列表可读", Array.isArray(groups.groups) && groups.groups.length === 0);
+  // 战绩接口只在**带数据库**的部署里可用；内存模式按设计返回 501。
+  // 两种都算符合设计 —— 这条原先写死 501，一旦换到带库的部署（NODE_ENV=production）
+  // 就会误报失败，而实际上那是**功能更全**的那种部署。
   const matches = await call("/v1/matches", { token: first.token });
-  check("内存模式下战绩返回 501（设计如此）", matches.status === 501, `HTTP ${matches.status}`);
+  check(
+    "战绩接口符合当前部署模式（内存 501 / 带库 200）",
+    matches.status === 501 || (matches.status === 200 && Array.isArray(matches.body?.matches)),
+    `HTTP ${matches.status}`,
+  );
 
   // ---------- B. 房间号 ----------
 

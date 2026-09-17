@@ -20,7 +20,15 @@
  *   PAGE=http://127.0.0.1:3012/debug KEYS=... SHOT=大厅流程.png node tools/domcheck/check-lobby-flow.mjs
  *
  * 副作用：会真的建一个群、发两条消息（其中一张图片）、建一个房间并在里面开局。
- * 本机内存模式重启即清空。
+ *
+ * ⚠️ **每组 4 把密钥只能跑一次**（除非跑在内存模式的本地实例上）。
+ * 原因：跑到结尾牌局是**开着**的，四个账号身上都挂着「进行中的牌局」。
+ * 本地内存模式重启服务即清空，所以能反复跑；但换成**带数据库的部署**
+ * （NODE_ENV=production + PostgreSQL）就清不掉了，第二次跑会在建房那一步撞
+ * `/v1/rooms → 409`，界面上只留一句「这个账号还在一局没打完的牌局里，先回那一局打完再来」，
+ * 后面从 ④ 开始整片失败 —— 看着像功能坏了，其实只是账号脏了。
+ * 对策：每次换一组全新密钥：
+ *   node --env-file=.env scripts/seed-testers.mjs 探甲 探乙 探丙 探丁
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";

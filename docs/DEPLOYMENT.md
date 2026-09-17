@@ -16,6 +16,11 @@
 > **两档都必须开着 `/debug`**（`DEBUG_CLIENT` 别设成 `false`）。
 > APK 与 LayaAir 的 Web 版都还没构建出来，`/debug` 是**目前唯一能用的界面**。
 
+> 📦 **自己的 Ubuntu 机器**：下面这些步骤已经脚本化了，放在 `tools/ubuntu-deploy/`
+> （传代码 → 装 Node/pnpm/PostgreSQL → 构建 → systemd 常驻 → 自检，另含 Nginx 反代配置
+> 与 systemd 单元的坑）。照 `tools/ubuntu-deploy/README.md` 走最短路径即可；
+> 本文档继续作为**环境变量与原理**的事实来源。
+
 ---
 
 ## 一、环境变量

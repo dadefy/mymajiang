@@ -1,0 +1,63 @@
+# 绵阳血战麻将 —— systemd 单元模板
+#
+# 不要直接拷这个文件：02-deploy-app.sh 会把 @APP_DIR@ / @APP_USER@ 替换掉再装到
+# /etc/systemd/system/mymj.service。
+#
+# 手工装的话：
+#   sed "s#@APP_DIR@#/srv/mianyang-mahjong#g; s#@APP_USER@#mymj#g; \
+#        s#@NODE_BIN@#$(command -v node)#g" \
+#     mymj.service | sudo tee /etc/systemd/system/mymj.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now mymj
+
+[Unit]
+Description=Mianyang Mahjong server (绵阳血战麻将)
+Documentation=file://@APP_DIR@/docs/DEPLOYMENT.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+# 重启风暴保护：5 分钟内超过 10 次就停下，别把日志刷爆。
+#
+# ⚠️ 这两个必须放在 [Unit] 段，不能放 [Service]。
+# systemd 230 起把它们从 [Service] 移到了 [Unit]；放错位置**不会报错、只是被忽略** ——
+# 只在 journal 里留一行 "Unknown key name 'StartLimitIntervalSec' in section 'Service', ignoring."，
+# 看上去一切正常，实际上限流完全没生效。Ubuntu 20.04 是 systemd 245，正好中招。
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=@APP_USER@
+Group=@APP_USER@
+WorkingDirectory=@APP_DIR@/apps/server
+
+# 环境变量服务端自己读 apps/server/.env（process.loadEnvFile，路径不受启动目录影响），
+# 所以这里不写 Environment= —— 配置只有一处，免得两边不一致。
+# 也正因为这样，WorkingDirectory 必须是 apps/server：
+# STORAGE_DRIVER=local 的 STORAGE_LOCAL_DIR 默认是相对路径 storage/blobs。
+#
+# @NODE_BIN@ 由部署脚本按 `command -v node` 填进去，**别硬写 /usr/bin/node**：
+# apt / NodeSource 装的 node 在 /usr/bin，而官方 tarball 装的在 /usr/local/bin。
+# 写死的话换一种装法服务就起不来，报 "No such file or directory"。
+ExecStart=@NODE_BIN@ dist/main.js
+
+Restart=always
+RestartSec=3
+
+# 服务端自己处理 SIGTERM：退出前会把排队中的积分与流水写盘，
+# 所以 stop 用默认的 SIGTERM 就好，别加 KillSignal=SIGKILL。
+KillMode=mixed
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mymj
+
+# 只给它需要的东西：代码、家目录、临时目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@/apps/server/storage
+
+[Install]
+WantedBy=multi-user.target
