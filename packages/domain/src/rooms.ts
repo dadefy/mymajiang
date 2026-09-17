@@ -161,7 +161,7 @@ export class MatchRoom {
     if (this.status !== "waiting") throw new Error("Room is not waiting to start");
     if (requesterId !== this.ownerId) throw new Error("Only the room owner can start the match");
     if (this.players.size !== MIANYANG_XZ_1_0.playerCount) throw new Error("Four players are required");
-    if ([...this.players.values()].some((player) => !player.ready)) throw new Error("All players must be ready");
+    // 四人入座后房主直接开局，不再要求逐个准备。
 
     // Seats are fixed at start, densely from join order, so the table layout never shifts afterwards.
     const ordered = [...this.players.values()]

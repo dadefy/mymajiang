@@ -285,6 +285,44 @@ export class ClientFlow {
   }
 
   /** 输入密钥：已激活的进主页，没激活的进资料页。 */
+  get currentUserId(): string | undefined { return this.me?.userId; }
+  get activeRoomNumber(): string | undefined { return this.activeRoom?.roomNo; }
+  async enterAccount(userId: string, password: string): Promise<void> {
+    this.set({ name: "key-entry", busy: true });
+    const result = await this.api.loginAccount(userId.trim(), password);
+    if (result.ok) await this.enterHome(result.value);
+    else this.set({ name: "key-entry", busy: false, error: result.error.code === "INVALID_CREDENTIALS" ? "账号或密码错误，请确认已用密钥登录并设置密码" : describe(result.error) });
+  }
+  async savePassword(password: string): Promise<string> {
+    const result = await this.api.setPassword(password);
+    return result.ok ? "密码已设置，可使用账号 ID 和密码登录" : describe(result.error);
+  }
+  searchGroups(query: string) { return this.api.searchGroups(query.trim()); }
+  async createGroup(name: string): Promise<string | undefined> {
+    const result = await this.api.createGroup(name.trim());
+    if (!result.ok) return describe(result.error);
+    await this.openChat(result.value.groupId);
+  }
+  async joinGroup(groupNo: string): Promise<string | undefined> {
+    const result = await this.api.joinGroup(groupNo);
+    if (!result.ok) return describe(result.error);
+    await this.openChat(result.value.groupId);
+  }
+  async manageGroup(action: string, body: object): Promise<string | undefined> {
+    if (this.screen.name !== "chat") return;
+    const result = await this.api.manageGroup(this.screen.groupId, action, body);
+    if (!result.ok) return describe(result.error);
+    await this.refreshChat();
+  }
+  listShareGroups() { return this.api.groups(); }
+  async shareRoom(groupId: string): Promise<string | undefined> {
+    const roomNo = this.screen.name === "room" ? this.screen.roomNo : this.activeRoom?.roomNo;
+    if (!roomNo) return "请先创建或加入房间";
+    const result = await this.api.sendGroupMessage(groupId, { type: "room_invite", content: JSON.stringify({ roomNo }) }, newIdempotencyKey());
+    if (!result.ok) return describe(result.error);
+    if (this.screen.name === "chat") await this.refreshChat();
+  }
+
   async enterKey(rawKey: string): Promise<void> {
     const key = rawKey.trim();
     this.set({ name: "key-entry", busy: true });
@@ -322,6 +360,7 @@ export class ClientFlow {
     // 无条件再设会让「回首页」多闪一次（onChange 是按对象引用比的，值一样也算一次变化）。
     if (!this.screen.busy) this.set({ ...this.screen, busy: true });
     const [groups, matches, me] = await Promise.all([this.api.groups(), this.api.matches(), this.api.me()]);
+    if (me.ok) this.activeRoom = me.value.activeRoom;
     const matchesUnavailable = !matches.ok && matches.error.kind === "unavailable";
     const failure = groups.ok ? (matches.ok || matchesUnavailable ? null : matches.error) : groups.error;
     this.set({
@@ -335,7 +374,7 @@ export class ClientFlow {
       groups: groups.ok ? groups.value.groups : [],
       matches: matches.ok ? matches.value.matches : [],
       matchesUnavailable,
-      activeRoom: this.screen.activeRoom,
+      activeRoom: this.activeRoom,
       busy: false,
       ...(failure ? { error: describe(failure) } : {}),
     });
@@ -361,16 +400,16 @@ export class ClientFlow {
    * 不如在这里直接说清楚该输什么 —— 输错号码是内测里最常见的一种「点了没反应」。
    */
   async joinRoom(rawRoomNo: string): Promise<void> {
-    if (this.screen.name !== "home") return;
+    if (this.screen.name !== "home" && this.screen.name !== "chat") return;
     const roomNo = rawRoomNo.trim();
     if (!/^\d{6}$/.test(roomNo)) {
-      this.set({ ...this.screen, busy: false, error: "房间号是 6 位数字，请再确认一下" });
+      this.set({ ...this.screen, ...(this.screen.name === "home" ? { busy: false } : {}), error: "房间号是 6 位数字，请再确认一下" });
       return;
     }
-    this.set({ ...this.screen, busy: true });
+    this.set({ ...this.screen, ...(this.screen.name === "home" ? { busy: true } : {}) });
     const joined = await this.api.joinRoom(roomNo);
     if (!joined.ok) {
-      this.set({ ...this.screen, busy: false, error: describe(joined.error) });
+      this.set({ ...this.screen, ...(this.screen.name === "home" ? { busy: false } : {}), error: describe(joined.error) });
       return;
     }
     await this.enterRoom(joined.value.roomId, joined.value.roomNo);
@@ -395,7 +434,14 @@ export class ClientFlow {
   async leaveRoom(): Promise<void> {
     // 对局中离开会被服务端拒绝（规则不允许中途走人），那就留在这一局里 ——
     // 主页因此要照旧显示「回到房间」，所以 `activeRoom` 原样带着走。
-    if (this.roomId) await this.api.leaveRoom(this.roomId);
+    if (this.roomId) {
+      const result = await this.api.leaveRoom(this.roomId);
+      if (!result.ok) {
+        if (this.screen.name === "room") this.set({ ...this.screen, notice: describe(result.error) });
+        return;
+      }
+      this.activeRoom = null;
+    }
     this.closeSocket();
     this.roomId = null;
     // 不能用 refreshHome()：当前页面还是 room，它会在原地返回。

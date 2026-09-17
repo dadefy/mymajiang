@@ -13,6 +13,7 @@ export interface UserAccount {
    * 管理员手工建号时为空。
    */
   invitationKeyHash?: string;
+  passwordHash?: string;
   activeMatchId?: string;
   createdAt: Date;
 }
@@ -31,6 +32,7 @@ export interface CreateAccountInput {
   avatarUrl: string;
   /** 用邀请密钥激活时传入；管理员手工建号时省略。 */
   invitationKeyHash?: string;
+  passwordHash?: string;
 }
 
 /** 注销之后所有人看到的昵称。原来的昵称属于个人信息，注销时一并抹掉。 */

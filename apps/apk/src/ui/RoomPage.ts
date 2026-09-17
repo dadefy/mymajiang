@@ -1,3 +1,4 @@
+import { shareDialog, socialAvatar } from "./SocialDialogs.js";
 import type { ApiClient, ClientFlow, MatchState, MatchResult, RoomResult, RoomSnapshot, Screen, Suit, Tile } from "@mianyang-mahjong/client";
 import { matchTimeText, roundLabel, winSummaryText } from "@mianyang-mahjong/client";
 import {
@@ -41,7 +42,7 @@ export class RoomPage {
   private readonly playerHeading: Laya.Label;
   private readonly playerList: Laya.VBox;
   private readonly waitingControls: Laya.Box;
-  private readonly readyButton: Laya.Box;
+  private readonly waitingTable: Laya.Box;
   private readonly startButton: Laya.Box;
   private readonly matchArea: Laya.Box;
   private readonly resultOverlay: Laya.Box;
@@ -102,7 +103,10 @@ export class RoomPage {
     this.playerList = scrollList(this.view, 75, 220, 600, 300);
 
     this.waitingControls = box(this.view, 0, 560, 750, 110);
-    this.readyButton = textButton(this.waitingControls, "准备", 75, 0, 220, 88, THEME.accentDark, () => void this.toggleReady());
+    this.waitingTable = box(this.view, 25, 180, 700, 750, "#195b3d");
+    this.waitingControls.y = 970;
+    textButton(this.waitingControls, "分享名片", 35, 0, 260, 80, THEME.accentDark, () => shareDialog(this.view, this.flow));
+    textButton(this.view, "返回大厅", 260, 1220, 230, 70, THEME.accentDark, () => { void this.flow.backHome(); });
     this.startButton = textButton(this.waitingControls, "开始对局", 345, 0, 220, 88, THEME.accentDark, () => void this.flow.startMatch());
 
     this.matchArea = box(this.view, 0, 150, 750, 1184);
@@ -148,6 +152,7 @@ export class RoomPage {
     }
     // 房间号进房时不一定知道（快照才带），所以每次都跟最新值走，别退回空字符串。
     this.roomNo = screen.roomNo ?? this.roomNo;
+    this.snapshot = screen.snapshot ?? this.snapshot;
     this.match = screen.match;
     this.actions = screen.actions;
     this.actionLocked = false;
@@ -174,8 +179,9 @@ export class RoomPage {
     const inProgress = this.match !== null || this.snapshot?.status === "playing";
     this.exitButton.visible = !inProgress;
 
-    this.playerHeading.visible = waiting;
-    this.playerList.parent.visible = waiting;
+    this.playerHeading.visible = false;
+    this.playerList.parent.visible = false;
+    this.waitingTable.visible = waiting;
     this.waitingControls.visible = waiting;
     this.matchArea.visible = this.match !== null;
     if (waiting) {
@@ -187,23 +193,30 @@ export class RoomPage {
   }
 
   private renderPlayers(): void {
+    this.waitingTable.removeChildren();
     const players = this.snapshot?.players ?? [];
-    const me = this.getMe();
-    refill(this.playerList, players.length, (index, row) => {
-      const player = players[index]!;
-      const marks = [player.ready ? "✓已准备" : "未准备", player.connected ? "" : "· 离线"].filter(Boolean).join(" ");
-      label(row, `座位${index} · ${player.nickname}${me?.userId === player.userId ? "（我）" : ""}`, 26, { width: 460 }).pos(20, 10);
-      label(row, `${player.points} 分 ${marks}`, 22, { width: 560, color: THEME.textDim }).pos(20, 46);
-      row.size(600, 84);
-      row.bgColor = me?.userId === player.userId ? THEME.panelBg2 : THEME.panelBg;
-    });
+    const me = Math.max(0, players.findIndex((player) => player.userId === this.getMe()?.userId));
+    const positions = [[255, 560], [495, 285], [255, 30], [15, 285]];
+    for (let index = 0; index < 4; index++) {
+      const player = players[(me + index) % 4];
+      const [x, y] = positions[index]!;
+      const seat = box(this.waitingTable, x!, y!, 190, 160);
+      socialAvatar(seat, player?.nickname ?? "＋", player?.avatarUrl, 59, 0);
+      label(seat, player?.nickname ?? "等待入座", 24, { width: 190, align: "center" }).pos(0, 83);
+      if (player) {
+        label(seat, `ID ${player.userId}`, 19, { width: 190, align: "center" }).pos(0, 114);
+        if (player.userId === this.snapshot?.ownerId) label(seat, "房主", 20, { width: 190, align: "center", color: "#f1d18c" }).pos(0, 141);
+      }
+    }
+    label(this.waitingTable, `房间 ${this.roomNo}\n${players.length}/4 人`, 30, { width: 290, align: "center", wordWrap: true }).pos(205, 330);
   }
 
   private renderWaitingControls(): void {
-    const me = this.getMe();
-    const mine = this.snapshot?.players.find((player) => player.userId === me?.userId);
-    setButtonText(this.readyButton, mine?.ready ? "取消准备" : "准备");
-    this.startButton.visible = this.snapshot?.ownerId === me?.userId;
+    this.startButton.visible = this.snapshot?.ownerId === this.getMe()?.userId;
+    const full = this.snapshot?.players.length === 4;
+    this.startButton.mouseEnabled = full;
+    this.startButton.alpha = full ? 1 : 0.45;
+    setButtonText(this.startButton, full ? "开始游戏" : "等待四人到齐");
   }
 
   private renderMatch(match: MatchState): void {
@@ -486,12 +499,6 @@ export class RoomPage {
     this.handSignature = "";
   }
 
-  private async toggleReady(): Promise<void> {
-    const me = this.getMe();
-    const mine = this.snapshot?.players.find((player) => player.userId === me?.userId);
-    await this.flow.setReady(!(mine?.ready ?? false));
-    void this.poll();
-  }
 
   private schedulePolling(): void {
     if (this.pollTimer !== null) return;

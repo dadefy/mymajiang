@@ -55,6 +55,21 @@ describe("LocalDiskBlobStorage", () => {
     expect(Number(url.searchParams.get("expires")) * 1000).toBeGreaterThan(Date.now());
   });
 
+  it("不配对外域名时签出**相对地址**：浏览器不会跨域，图片才发得出去", async () => {
+    // 之前的缺陷：直传地址来自一条会过期的配置项（PUBLIC_BASE_URL 记的是上一次
+    // 部署的域名）。站点一换域，所有直传都成了跨域 PUT —— 浏览器先吃一次 CORS 预检，
+    // 于是「图片上传失败」，而报错长得跟网络故障一样。本地驱动的文件本来就是
+    // **这台服务器自己**收发的，相对地址才是对的，也少一处要配的东西。
+    const directory = await mkdtemp(join(tmpdir(), "mymj-blobs-"));
+    directories.push(directory);
+    const storage = new LocalDiskBlobStorage(directory, "", SECRET);
+
+    const upload = await storage.presignUpload({ key: KEY, contentType: "image/png" });
+    expect(upload.url.startsWith("/v1/blobs/")).toBe(true);
+    expect(new URL(upload.url, "http://any-host.example").pathname).toBe(`/v1/blobs/${KEY}`);
+    expect(await storage.presignDownload(KEY)).toMatch(/^\/v1\/blobs\//);
+  });
+
   it("上传签名可验证，且绑定内容类型", async () => {
     const storage = await storageAt();
     const presigned = await storage.presignUpload({ key: KEY, contentType: "image/jpeg" });

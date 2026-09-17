@@ -133,6 +133,54 @@ async function startFourPlayerRoom(
 }
 
 describe("server API", () => {
+  it("密钥绑定账号可设置密码，两种登录返回同一账号且不泄露密码哈希", async () => {
+    const { app, dependencies } = fixture();
+    const user = await createBetaUser(app, dependencies, "密码测试");
+    const login = (userId: string, password: string) => app.inject({ method: "POST", url: "/v1/auth/account", payload: { userId, password } });
+    expect((await login(user.userId, "password123")).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/v1/account/password", payload: { password: "password123" } })).statusCode).toBe(401);
+    const set = await app.inject({ method: "POST", url: "/v1/account/password", headers: { "x-auth-token": user.token }, payload: { password: "password123" } });
+    expect(set.statusCode).toBe(200);
+    const stored = dependencies.accountStore.findAccountById(user.userId)!;
+    expect(stored.passwordHash).toMatch(/^scrypt\$/);
+    expect(stored.passwordHash).not.toContain("password123");
+    const byAccount = await login(user.userId, "password123");
+    expect(byAccount.statusCode).toBe(200);
+    expect(byAccount.json().userId).toBe(user.userId);
+    expect(byAccount.json()).not.toHaveProperty("passwordHash");
+    expect((await login(user.userId, "incorrect")).statusCode).toBe(401);
+    const byKey = await app.inject({ method: "POST", url: "/v1/auth/login", payload: { key: user.key } });
+    expect(byKey.json().userId).toBe(user.userId);
+    stored.status = "permanently_banned";
+    expect((await login(user.userId, "password123")).statusCode).toBe(401);
+  });
+
+  it("群搜索、群权限、邀请名片与四人免准备开局", async () => {
+    const { app, dependencies } = fixture();
+    const users = [];
+    for (const name of ["群主", "管理员", "成员", "牌友"]) users.push(await createBetaUser(app, dependencies, name));
+    const call = (index: number, method: "GET" | "POST", url: string, payload?: object) => app.inject({ method, url, headers: { "x-auth-token": users[index]!.token }, ...(payload ? { payload } : {}) });
+    const group = (await call(0, "POST", "/v1/groups", { name: "晚间牌友" })).json();
+    expect(group.ownerId).toBe(users[0]!.userId);
+    const found = await call(1, "GET", "/v1/groups/search?q=" + encodeURIComponent("晚间"));
+    expect(found.json().groups[0].groupNo).toBe(group.groupNo);
+    for (const index of [1, 2, 3]) await call(index, "POST", "/v1/groups/join", { groupNo: group.groupNo });
+    const base = `/v1/groups/${group.groupId}`;
+    expect((await call(2, "POST", base + "/notice", { notice: "越权" })).statusCode).toBeGreaterThanOrEqual(400);
+    expect((await call(0, "POST", base + `/members/${users[1]!.userId}/admin`, { enabled: true })).statusCode).toBe(200);
+    expect((await call(1, "POST", base + "/notice", { notice: "欢迎约牌" })).statusCode).toBe(200);
+    const room = (await call(0, "POST", "/v1/rooms")).json();
+    expect(room.roomNo).toMatch(/^\d{6}$/);
+    expect((await call(2, "POST", base + "/messages", { type: "room_invite", content: JSON.stringify({ roomNo: room.roomNo }) })).statusCode).toBeGreaterThanOrEqual(400);
+    const invite = await call(0, "POST", base + "/messages", { type: "room_invite", content: JSON.stringify({ roomNo: room.roomNo }) });
+    expect(invite.statusCode).toBe(201);
+    for (const index of [1, 2, 3]) expect((await call(index, "POST", "/v1/rooms/join", { roomNo: JSON.parse(invite.json().content).roomNo })).statusCode).toBe(201);
+    expect((await call(1, "POST", `/v1/rooms/${room.roomId}/start`)).statusCode).toBeGreaterThanOrEqual(400);
+    expect((await call(0, "POST", `/v1/rooms/${room.roomId}/start`)).statusCode).toBe(200);
+    expect((await call(0, "POST", base + "/transfer", { userId: users[1]!.userId })).statusCode).toBe(200);
+    expect((await call(1, "GET", base)).json().role).toBe("owner");
+  });
+
   it("reports health", async () => {
     const { app } = fixture();
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -702,31 +750,20 @@ describe("server API", () => {
     // 所以这里注入的是空串 —— 隧道与反向代理下都自动正确。
     expect(page.body).toContain('"socketUrl":""');
 
-    // 四家同屏页面：同样只在服务端生成，模块复用 /debug 那个静态目录
-    // （所以不需要为它另配一条静态路由）。
+    // 四家同屏已暂停：旧入口跳转到单人界面，旧启动模块也不可访问。
     const multi = await app.inject({ method: "GET", url: "/multi" });
-    expect(multi.statusCode).toBe(200);
-    expect(multi.headers["content-type"]).toContain("text/html");
+    expect(multi.statusCode).toBe(302);
+    expect(multi.headers.location).toBe("/debug");
     expect(multi.headers["cache-control"]).toBe("no-store");
-    expect(multi.body).toMatch(/\/debug\/[a-z0-9]+\/browser\/multi-client\.js/);
-    expect(multi.body).toContain('"socketUrl":""');
-
-    // 静态模块也必须 no-store。文件名里没有内容哈希、URL 每次部署都不变，
-    // 一旦被 CDN 缓存住，**部署完成后用户加载到的仍是旧 JS**（HTML 是新的、模块是旧的），
-    // 看起来就像「改的东西没生效」。实测踩过：源站已是新版，CDN 仍返回 32 分钟前的副本。
-    const asset = await app.inject({ method: "GET", url: "/debug/browser/multi-client.js" });
-    expect(asset.statusCode).toBe(200);
-    expect(asset.headers["cache-control"]).toBe("no-store");
-
-    // 这两个页面都是**模板字符串**拼出来的，而 CSS 注释里写一个反引号就会把字符串
-    // 截断：症状是 HTML 只剩前半截、样式整段消失，而且不一定报错。
-    // 「收尾标签在不在」是最省事的一道闸 —— 这个坑已经踩过两次了。
-    for (const body of [page.body, multi.body]) {
-      expect(body.trimEnd().endsWith("</html>")).toBe(true);
+    const prefix = page.body.match(/(\/debug\/[a-z0-9]+)\/browser\/debug-client\.js/)![1];
+    for (const prefixPath of ["/debug", prefix]) {
+      expect((await app.inject({ method: "GET", url: `${prefixPath}/browser/multi-client.js` })).statusCode).toBe(404);
+      const asset = await app.inject({ method: "GET", url: `${prefixPath}/browser/debug-client.js` });
+      expect(asset.statusCode).toBe(200);
+      expect(asset.headers["cache-control"]).toBe("no-store");
     }
-    // 牌块样式：副露与弃牌堆共用；.chip.back 是**扣着**的牌（暗杠只亮一张）。
+    expect(page.body.trimEnd().endsWith("</html>")).toBe(true);
     expect(page.body).toContain(".chip.back");
-    expect(multi.body).toContain(".chip.back");
 
     // 根路径把人送到内测客户端：分享出去的网址不该是个 404。
     const root = await app.inject({ method: "GET", url: "/" });
@@ -1375,6 +1412,29 @@ describe("server API", () => {
       payload: { key: outsider.key },
     });
     expect(outsiderLogin.json().activeRoom).toBeNull();
+  });
+
+  it("still points at a room that has not started yet", async () => {
+    const { app, dependencies } = fixture();
+    const owner = await createBetaUser(app, dependencies, "甲");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/rooms",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: {},
+    });
+    expect(created.statusCode).toBe(201);
+    const { roomId, roomNo } = created.json();
+
+    // `activeMatchId` 是**开局那一刻**（`MatchRoom.start()`）才写进账号的，
+    // 等人入座那段时间它是空的。只看这个字段的话，玩家点「返回大厅」之后
+    // 大厅里「返回房间 NNNNNN」的入口就没了 —— 人回不去自己那间房。
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { key: owner.key },
+    });
+    expect(login.json().activeRoom).toEqual({ roomId, roomNo, status: "waiting", playerCount: 1 });
   });
 
   it("lets a player who is already seated come back by room number", async () => {

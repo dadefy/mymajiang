@@ -21,8 +21,14 @@ export class LocalDiskBlobStorage implements BlobStorage {
 
   constructor(
     directory: string,
-    /** 服务端对外可达的地址，例如 `http://127.0.0.1:3000`；签出来的 URL 指向它。 */
-    private readonly publicBaseUrl: string,
+    /**
+     * 服务端对外可达的地址，例如 `http://127.0.0.1:3000`；签出来的 URL 指向它。
+     *
+     * **留空则签发相对地址**（`/v1/blobs/...`）—— 本地驱动的文件本来就由**这台服务器**
+     * 自己在 `/v1/blobs/*` 上收发，相对地址一定同源，也就不存在跨域与配错域名的问题。
+     * 只有「存与取不在同一个域」时才需要填它。
+     */
+    private readonly publicBaseUrl: string = "",
     private readonly signingSecret: string,
   ) {
     if (signingSecret.length < 32) throw new Error("Blob signing secret must contain at least 32 characters");

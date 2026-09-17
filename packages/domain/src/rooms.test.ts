@@ -39,12 +39,11 @@ describe("match room", () => {
     expect(new MatchRoom("room-1", "012345", account("A")).roomNo).toBe("012345");
   });
 
-  it("requires four ready players and only allows the owner to start", () => {
+  it("requires four players without ready and only allows the owner to start", () => {
     const { room } = readyRoom();
     expect(() => room.start("B")).toThrow("Only the room owner");
     room.setReady("D", false);
-    expect(() => room.start("A")).toThrow("All players must be ready");
-    room.setReady("D", true);
+    for (const id of ["A", "B", "C"]) room.setReady(id, false);
     room.start("A");
     expect(room.status).toBe("playing");
     expect(() => room.leave("D")).toThrow("cannot leave");

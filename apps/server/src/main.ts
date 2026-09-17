@@ -110,11 +110,21 @@ const trustProxy = trustProxySetting();
 // 对象存储。两种驱动：
 //   * `local` —— 文件落磁盘，用自签名 URL 模拟云端预签名直传，不需要云账号；
 //   * `cos`   —— 腾讯云 COS。桶上开默认加密即可，预签名直传会自动加密，代码不用管。
-const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
+// ⚠️ 本地驱动**不用对外域名**，签发出来的就是 `/v1/blobs/...` 这样的相对地址。
+//
+// 直传地址必须和页面**同源**：浏览器发起的是个 PUT，跨域时先吃一次 CORS 预检，
+// 于是「图片发不出去」，而报错长得跟网络故障一模一样（探针上看到的就是
+// 「图片上传失败，请检查网络后重试」）。
+//
+// 之前这里读 `PUBLIC_BASE_URL`，而它记的是**上一次部署的域名**：站点一换域，
+// 这个文件就永远指向错的主机 —— 本地开、线上开，两边都是跨域，而且错得很安静。
+// 本地驱动的文件本来就是**这台服务器自己**在 `/v1/blobs/*` 上收发的，
+// 相对地址因此总是对的。**别把 PUBLIC_BASE_URL 接回来**：让一个会过期的配置项
+// 决定「图片能不能发」，代价是一次线上事故、排查时还看不出是配置问题。
 const localBlobStorage = process.env.STORAGE_DRIVER === "local"
   ? new LocalDiskBlobStorage(
       process.env.STORAGE_LOCAL_DIR ?? "storage/blobs",
-      publicBaseUrl,
+      "",
       process.env.STORAGE_SIGNING_SECRET ?? requiredEnvironment("JWT_SECRET"),
     )
   : undefined;

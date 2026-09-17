@@ -23,6 +23,7 @@ describe("PostgresAccountStore", () => {
       users: [{
         user_id: "1234567890",
         invitation_key_hash: "a".repeat(64),
+        password_hash: "persisted-password-hash",
         nickname: "内测用户",
         avatar_url: "avatar",
         status: "active",
@@ -35,6 +36,7 @@ describe("PostgresAccountStore", () => {
     const store = await PostgresAccountStore.load(database);
     const account = store.findAccountById("1234567890")!;
     expect(account.points).toBe(800);
+    expect(account.passwordHash).toBe("persisted-password-hash");
     expect(account.invitationKeyHash).toBe("a".repeat(64));
     // 登录就是这一个查询：密钥哈希 → 账号。
     expect(store.findAccountByInvitationKeyHash("a".repeat(64))?.userId).toBe("1234567890");
@@ -44,6 +46,7 @@ describe("PostgresAccountStore", () => {
     await store.flush();
     const write = statements.find((entry) => entry.sql.includes("INSERT INTO users"));
     expect(write?.parameters).toContain(900);
+    expect(write?.parameters).toContain("persisted-password-hash");
   });
 
   it("keeps the invitation binding out of the conflicting update", async () => {

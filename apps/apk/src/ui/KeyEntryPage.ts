@@ -25,6 +25,10 @@ export class KeyEntryPage {
 
     textButton(this.view, "进 入", 225, 610, 300, 88, THEME.accentDark, () => void this.submit());
 
+    const account = field(this.view, 75, 840, 600, 80, "账号 ID", 10).input;
+    const password = field(this.view, 75, 940, 600, 80, "登录密码", 200).input; password.type = "password";
+    textButton(this.view, "账号登录", 225, 1050, 300, 80, THEME.accentDark, () => { if (!this.busy) void this.flow.enterAccount(account.text, password.text); });
+
     this.errorLabel = label(this.view, "", 26, { width: 750, align: "center", color: THEME.bad, wordWrap: true });
     this.errorLabel.pos(0, 740);
     this.busyLabel = label(this.view, "登录中…", 26, { width: 750, align: "center", color: THEME.textDim });

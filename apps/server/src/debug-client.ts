@@ -296,6 +296,10 @@ export async function serveDebugAsset(path: string, reply: FastifyReply): Promis
   if (target !== root && !target.startsWith(root + sep)) {
     return reply.status(404).send({ code: "NOT_FOUND" });
   }
+  // 暂停四家同屏入口，也阻止旧页面重新加载其启动模块。
+  if (target === resolve(root, "browser/multi-client.js")) {
+    return reply.header("Cache-Control", "no-store").status(404).send({ code: "NOT_FOUND" });
+  }
   let body: Buffer;
   try {
     body = await readFile(target);
@@ -322,11 +326,11 @@ export function registerDebugClient(app: FastifyInstance, options: DebugClientOp
     .type("text/html; charset=utf-8")
     .send(debugClientHtml(options)));
 
-  // 四家同屏：一台设备开四条连接，一个人打完整局。内测时不必真的凑四个人。
+  // 四家同屏暂时关闭，旧书签统一回到单人界面；保留实现供以后恢复。
   app.get("/multi", async (_request: FastifyRequest, reply: FastifyReply) => reply
     .header("Cache-Control", "no-store")
     .type("text/html; charset=utf-8")
-    .send(multiClientHtml(options)));
+    .redirect("/debug"));
 
   // 静态模块。页面里引用的是带版本段的路径（`/debug/<version>/browser/x.js`）；
   // 这里同时兼容不带版本段的旧路径（`/debug/browser/x.js`，老书签与已缓存页面里的引用）：

@@ -1,8 +1,11 @@
-import type { ClientFlow, Screen, VoiceRecorder } from "@mianyang-mahjong/client";
+import { settingsDialog, SOCIAL, socialAvatar } from "./SocialDialogs.js";
+import type { ClientFlow, Screen, VoiceRecorder, GroupMessageView } from "@mianyang-mahjong/client";
 import { BrowserVoiceRecorder, MAX_VOICE_SECONDS } from "@mianyang-mahjong/client";
 import { buildMessageRows, describeGroupHeader, estimateMessageHeight, type ChatMessageRow } from "./chat-model.js";
 import { pickImage } from "./file-picker.js";
-import { THEME, box, field, label, refill, setButtonText, textButton } from "./widgets.js";
+import { THEME as BASE_THEME, box, field, label, refill, setButtonText, textButton } from "./widgets.js";
+
+const THEME = { ...BASE_THEME, panelBg: "#f7f7f7", panelBg2: "#d7e5dc", text: SOCIAL.ink, textDim: SOCIAL.dim, accentDark: SOCIAL.green };
 
 /** 消息行宽度；右侧要留出撤回按钮的位置。 */
 const ROW_WIDTH = 690;
@@ -27,6 +30,7 @@ export class ChatPage {
   private readonly emptyLabel: Laya.Label;
   private readonly statusLabel: Laya.Label;
   private readonly input: Laya.TextInput;
+  private messages: GroupMessageView[] = [];
   private sending = false;
   private uploading = false;
   /** 录音是页面的本地状态（`Screen` 里没有它）：它是纯界面过程，不影响业务数据。 */
@@ -40,13 +44,14 @@ export class ChatPage {
   ) {
     this.view = new Laya.Box();
     this.view.size(750, 1334);
+    this.view.bgColor = SOCIAL.bg;
     parent.addChild(this.view);
 
     const header = box(this.view, 0, 0, 750, 110, THEME.panelBg);
     textButton(header, "返回", 24, 25, 130, 60, THEME.panelBg2, () => void this.flow.backHome());
     this.titleLabel = label(header, "", 30, { width: 420, align: "center", bold: true });
     this.titleLabel.pos(165, 42);
-    textButton(header, "刷新", 596, 25, 130, 60, THEME.panelBg2, () => void this.flow.refreshChat());
+    textButton(header, "群设置", 596, 25, 130, 60, SOCIAL.green, () => { if (this.flow.current.name === "chat") settingsDialog(this.view, this.flow, this.flow.current); });
 
     this.metaLabel = label(this.view, "", 22, { width: 690, color: THEME.textDim });
     this.metaLabel.pos(30, 124);
@@ -105,6 +110,7 @@ export class ChatPage {
     this.statusLabel.color = screen.error ? THEME.bad : THEME.warn;
     this.statusLabel.visible = status.length > 0;
 
+    this.messages = screen.messages;
     this.renderMessages(buildMessageRows(screen.messages, { meId: screen.meId, now: new Date() }));
   }
 
@@ -197,20 +203,33 @@ export class ChatPage {
     let total = 0;
     refill(this.messageList, rows.length, (index, row) => {
       const item = rows[index]!;
-      const height = estimateMessageHeight(item.content);
+      const message = this.messages[index]!;
+      const isImage = !item.recalled && message.type === "image";
+      const isInvite = !item.recalled && message.type === "room_invite";
+      const height = isImage ? 320 : isInvite ? 245 : estimateMessageHeight(item.content);
       total += height + 10;
       row.size(ROW_WIDTH, height);
-      row.bgColor = item.tone === "mine" ? THEME.panelBg2 : item.tone === "system" ? THEME.fieldBg : THEME.panelBg;
-
-      const who = label(row, `${item.sender}  ${item.time}`, 22, { width: 540, color: THEME.textDim });
-      who.pos(20, 14);
-      const body = label(row, item.content, 28, {
-        width: 540,
-        wordWrap: true,
-        color: item.tone === "system" ? THEME.textDim : THEME.text,
-      });
-      body.pos(20, 50);
-      body.height = Math.max(36, height - 66);
+      const bubbleX = item.mine ? 100 : 78;
+      socialAvatar(row, item.sender, undefined, item.mine ? 620 : 0, 0, 60);
+      const bubble = box(row, bubbleX, 34, 500, height - 40, item.mine ? "#a5e877" : SOCIAL.panel);
+      label(row, `${item.sender}  ${item.time}`, 20, { width: 500, color: SOCIAL.dim }).pos(bubbleX, 4);
+      if (isImage) {
+        const image = new Laya.Image(); image.skin = message.content; image.pos(12, 12); image.size(260, 240); bubble.addChild(image);
+        image.on(Laya.Event.CLICK, null, () => {
+          const preview = box(this.view, 0, 0, 750, 1334, "#202622"); preview.zOrder = 120;
+          const full = new Laya.Image(); full.skin = message.content; full.pos(25, 190); full.size(700, 900); preview.addChild(full);
+          textButton(preview, "关闭图片", 250, 1160, 250, 70, SOCIAL.green, () => preview.destroy(true));
+        });
+      } else if (isInvite) {
+        let roomNo = "";
+        try { const invite = JSON.parse(message.content); if (/^\d{6}$/.test(invite.roomNo)) roomNo = invite.roomNo; } catch { /* 历史无效名片 */ }
+        label(bubble, "绵阳麻将 · 房间邀请", 28, { color: SOCIAL.ink }).pos(18, 18);
+        label(bubble, roomNo ? `房间号 ${roomNo}` : "邀请已失效", 26, { color: SOCIAL.ink }).pos(18, 65);
+        if (roomNo) textButton(bubble, "点击进入房间", 18, 112, 450, 60, SOCIAL.green, () => { void this.flow.joinRoom(roomNo); });
+      } else {
+        const body = label(bubble, item.content, 28, { width: 465, wordWrap: true, color: item.tone === "system" ? SOCIAL.dim : SOCIAL.ink });
+        body.pos(16, 12); body.height = height - 60;
+      }
 
       if (item.canRecall) {
         textButton(row, "撤回", ROW_WIDTH - 132, 12, 112, 48, THEME.panelBg2, () => void this.flow.recallMessage(item.key));

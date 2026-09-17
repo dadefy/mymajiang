@@ -6,6 +6,7 @@ import { PostgresWriteQueue } from "./postgres-write-queue.js";
 interface AccountRow {
   user_id: string;
   invitation_key_hash: string | null;
+  password_hash: string | null;
   nickname: string;
   avatar_url: string;
   status: UserAccount["status"];
@@ -29,6 +30,7 @@ export class PostgresAccountStore extends InMemoryAccountStore {
     for (const row of accounts.rows) {
       const account: UserAccount = {
         userId: row.user_id.trim(),
+        ...(row.password_hash ? { passwordHash: row.password_hash } : {}),
         nickname: row.nickname,
         avatarUrl: row.avatar_url,
         status: row.status,

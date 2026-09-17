@@ -1,10 +1,10 @@
+import { lobby, chat, avatar, shareDialog } from "./lobby.js";
 import { SingleTable } from "./single-table.js";
 
 import { roundScorePop } from "./round-result.js";
 import { matchResultPanel } from "./match-result.js";
-import { ClientFlow, MAX_VOICE_SECONDS, type Screen } from "../flow.js";
+import { ClientFlow, type Screen } from "../flow.js";
 import { ApiClient } from "../api-client.js";
-import type { GroupMessageView } from "../protocol.js";
 
 import { button, element } from "./dom.js";
 import { readRuntimeConfig } from "./runtime-config.js";
@@ -13,8 +13,6 @@ import { roundResultText } from "./result-text.js";
 
 
 import { BrowserSocketTransportFactory, FetchHttpTransport, FetchUploadTransport } from "./transports.js";
-import { BrowserVoiceRecorder } from "./voice-recorder.js";
-import { MediaCache } from "./media-cache.js";
 
 /**
  * 给内部联网测试用的浏览器调试客户端。
@@ -42,29 +40,8 @@ function panel(title: string, ...children: HTMLElement[]): HTMLElement {
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const bar = document.querySelector<HTMLDivElement>("#bar")!;
 
-/**
- * 图片与语音的本地缓存。
- *
- * 服务端签发的读取地址只有几十秒有效期（私有桶只能靠签名读），而消息画到页面上会一直留着 ——
- * 所以这里第一次加载就抓成本地 blob 地址，之后与签名是否过期无关。
- */
-const mediaCache = new MediaCache({
-  load: async (sourceUrl) => {
-    const response = await fetch(sourceUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.blob();
-  },
-});
-
-/** 当前页面上那串消息的重画函数；媒体加载完成时只重画它，不动别的。 */
-let repaintMessages: (() => void) | undefined;
-
-// 媒体状态一变（下载完成或失败）就重画消息列表。整页重画会清掉正在输入的草稿与滚动位置，
-// 所以渲染层登记的是「只重画消息」这件事。
-mediaCache.onChange(() => repaintMessages?.());
-
 const table = new SingleTable();
-document.title = "绵阳血战麻将 · 单人牌桌";
+document.title = "绵阳麻将 · 大厅";
 
 // ---------- 渲染 ----------
 
@@ -85,9 +62,9 @@ function syncRoomPolling(inRoom: boolean): void {
 
 function render(screen: Screen): void {
   table.dispose();
+  if (screen.name === "chat") { renderBar(screen); syncRoomPolling(false); const node = chat(screen, flow); if (app.firstChild !== node) app.replaceChildren(node); return; }
   app.replaceChildren();
   // 每次重画都先解绑：渲染层自己再登记（否则会指向已经卸载的那份 DOM）。
-  repaintMessages = undefined;
   renderBar(screen);
   syncRoomPolling(screen.name === "room");
   switch (screen.name) {
@@ -112,7 +89,9 @@ function renderBar(screen: Screen): void {
     bar.append(
       element("span", { text: `房间号 ${screen.roomNo ?? "读取中…"}` }),
       element("span", { className: "spacer" }),
-      button("离开房间", () => void flow.leaveRoom()),
+      button("分享名片", () => shareDialog(flow)),
+      button("返回大厅", () => void flow.backHome()),
+      button("退出房间", () => void flow.leaveRoom()),
     );
   } else {
     bar.append(element("span", { text: "绵阳血战麻将 · 单人牌桌" }));
@@ -131,7 +110,10 @@ function renderKeyEntry(screen: Extract<Screen, { name: "key-entry" }>): void {
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") void flow.enterKey(input.value);
   });
-  app.append(panel("输入邀请密钥",
+  const account = element("input", { className: "text" }); account.placeholder = "账号 ID"; account.autocomplete = "username";
+  const password = element("input", { className: "text" }); password.type = "password"; password.placeholder = "登录密码"; password.autocomplete = "current-password";
+  app.append(panel("账号登录", account, password, button("登录大厅", () => void flow.enterAccount(account.value, password.value), "primary")));
+  app.append(panel("密钥登录",
     input,
     element("div", { className: "row" }, submit),
     ...(errorLine(screen.error) ? [errorLine(screen.error)!] : []),
@@ -155,261 +137,31 @@ function renderProfile(screen: Extract<Screen, { name: "profile" }>): void {
 }
 
 function renderHome(screen: Extract<Screen, { name: "home" }>): void {
-  const joinInput = element("input", { className: "text" });
-  joinInput.placeholder = "6 位房间号（建房的人告诉你）";
-  joinInput.maxLength = 6;
-
-  app.append(
-    panel("开始打牌",
-      // 进行中的对局排在最前：有人退出后重新登录，第一眼就该看到「回去接着打」。
-      ...(screen.activeRoom
-        ? [
-            element("div", { className: "row" },
-              element("span", {
-                text: `你有一局没打完：房间号 ${screen.activeRoom.roomNo}（${screen.activeRoom.playerCount} 人）`,
-              }),
-              button("回到对局", () => void flow.rejoinActiveRoom(), "primary"),
-            ),
-          ]
-        : []),
-      element("div", { className: "row" },
-        button("建一个新房间", () => void flow.createRoom(), "primary"),
-        joinInput,
-        button("加入", () => void flow.joinRoom(joinInput.value.trim())),
-      ),
-      ...(errorLine(screen.error) ? [errorLine(screen.error)!] : []),
-    ),
-    renderGroups(screen),
-    renderMatches(screen),
-  );
-}
-
-/**
- * 一条群消息。
- *
- * 图片与语音的 `content` 是服务端签发的**带时效**读取地址（私有桶只能靠签名读），
- * 所以先过 `mediaCache` 抓成本地地址再渲染 —— 直接用那个地址，过一会儿就变成裂图。
- */
-function messageNode(message: GroupMessageView): HTMLElement {
-  const row = element("p");
-  row.append(element("span", { className: "hint", text: `${message.senderNickname ?? message.senderId}：` }));
-
-  if (message.type === "image") row.append(imagePart(message));
-  else if (message.type === "voice") row.append(voicePart(message));
-  else row.append(element("span", { text: message.content }));
-  return row;
-}
-
-function imagePart(message: GroupMessageView): HTMLElement {
-  const state = mediaCache.peek(message.messageId) ?? mediaCache.resolve(message.messageId, message.content);
-  if (state.status === "ready") {
-    const image = element("img", { className: "thumb" });
-    image.src = state.url;
-    image.alt = "图片";
-    image.title = "点开看原图";
-    // 本地地址在新标签页里同样有效。
-    image.addEventListener("click", () => window.open(state.url, "_blank"));
-    return image;
-  }
-  if (state.status === "loading") return element("span", { className: "hint", text: "（图片加载中…）" });
-  return button("图片加载失败，点这里重试", () => {
-    mediaCache.resolve(message.messageId, message.content, { retry: true });
-  });
-}
-
-function voicePart(message: GroupMessageView): HTMLElement {
-  const seconds = message.voiceSeconds === undefined ? "" : ` ${message.voiceSeconds} 秒`;
-  const state = mediaCache.peek(message.messageId) ?? mediaCache.resolve(message.messageId, message.content);
-  if (state.status === "ready") {
-    const audio = element("audio", { className: "voice" });
-    audio.controls = true;
-    audio.src = state.url;
-    return element("span", { className: "voice-wrap" },
-      element("span", { className: "hint", text: `语音${seconds} ` }),
-      audio,
-    );
-  }
-  if (state.status === "loading") return element("span", { className: "hint", text: `（语音${seconds} 加载中…）` });
-  return button("语音加载失败，点这里重试", () => {
-    mediaCache.resolve(message.messageId, message.content, { retry: true });
-  });
-}
-
-function renderGroups(screen: Extract<Screen, { name: "home" }>): HTMLElement {
-  const list = element("div", { className: "list" });
-  if (screen.groups.length === 0) {
-    list.append(element("p", { className: "hint", text: "还没有加入任何群聊。" }));
-  }
-  for (const group of screen.groups) {
-    const messages = element("div", { className: "messages" });
-    const input = element("input", { className: "text" });
-    input.placeholder = "发一条消息";
-    let current: GroupMessageView[] = [];
-    /**
-     * 画一批消息。
-     *
-     * `scrollToBottom` 只在「刚拉到 / 刚发出」时为真：媒体加载完成引起的那次重画要保住
-     * 用户当前的滚动位置，否则正在往上翻历史的人会被拽回底部。
-     */
-    const paint = (list: GroupMessageView[], scrollToBottom = false): void => {
-      const offset = messages.scrollTop;
-      messages.replaceChildren();
-      for (const message of list) messages.append(messageNode(message));
-      messages.scrollTop = scrollToBottom ? messages.scrollHeight : offset;
-    };
-    const load = async (): Promise<void> => {
-      const result = await flow.groupMessages(group.groupId, 30);
-      if (!result.ok) {
-        messages.replaceChildren(element("p", { className: "error", text: "拉取消息失败" }));
-        return;
-      }
-      current = result.value.messages;
-      paint(current, true);
-    };
-    repaintMessages = () => paint(current);
-    input.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || !input.value.trim()) return;
-      const content = input.value;
-      input.value = "";
-      void flow.sendGroupText(group.groupId, content).then(load);
-    });
-
-    // 图片直传：签发 → 打到存储的 PUT → 用对象键发消息，三步都在 flow 里。
-    // 这里只负责把用户选的文件读成字节。
-    const picker = element("input", { className: "text" });
-    picker.type = "file";
-    picker.accept = "image/*";
-    picker.addEventListener("change", () => {
-      const chosen = picker.files?.[0];
-      if (!chosen) return;
-      picker.value = "";
-      void (async () => {
-        const bytes = new Uint8Array(await chosen.arrayBuffer());
-        const sent = await flow.uploadGroupImage(group.groupId, {
-          bytes,
-          contentType: chosen.type || "image/png",
-        });
-        if (!sent.ok) {
-          messages.append(element("p", { className: "error", text: sent.error }));
-          return;
-        }
-        await load();
-      })();
-    });
-
-    // 语音：点一下开始录，再点一下停止并发送。录音器是浏览器通用的那一份。
-    const recorder = new BrowserVoiceRecorder();
-    let recording = false;
-    let recordTimer: ReturnType<typeof setInterval> | undefined;
-    const voiceButton = button("录音", () => {
-      void (async () => {
-        if (recording) {
-          if (recordTimer) clearInterval(recordTimer);
-          recordTimer = undefined;
-          recording = false;
-          voiceButton.textContent = "录音";
-          const recorded = await recorder.stop();
-          if (!recorded) return;
-          const sent = await flow.uploadGroupVoice(group.groupId, recorded);
-          if (!sent.ok) {
-            messages.append(element("p", { className: "error", text: sent.error }));
-            return;
-          }
-          await load();
-          return;
-        }
-        try {
-          await recorder.start();
-        } catch {
-          messages.append(element("p", {
-            className: "error",
-            text: "录不了音：需要允许麦克风权限，且页面要在 HTTPS 或 localhost 下",
-          }));
-          return;
-        }
-        recording = true;
-        recordTimer = setInterval(() => {
-          voiceButton.textContent = `录音 ${recorder.elapsedSeconds()}s`;
-          // 到上限就自动停（服务端只收 1–60 秒）。
-          if (recorder.elapsedSeconds() >= MAX_VOICE_SECONDS) voiceButton.click();
-        }, 500);
-      })();
-    });
-
-    list.append(element("div", { className: "group" },
-      element("div", { className: "row" },
-        element("strong", { text: group.name }),
-        element("span", { className: "hint", text: `号 ${group.groupNo} · ${group.memberCount} 人` }),
-        element("span", { className: "spacer" }),
-        button("加载消息", () => void load()),
-      ),
-      messages,
-      element("div", { className: "row" }, input, picker, voiceButton),
-    ));
-  }
-  return panel("群聊", list);
-}
-
-function renderMatches(screen: Extract<Screen, { name: "home" }>): HTMLElement {
-  const list = element("div", { className: "list" });
-  if (screen.matches.length === 0) {
-    // 战绩需要数据库：内存模式下查不了，这与「自己没打过」是两回事。
-    list.append(element("p", {
-      className: "hint",
-      text: screen.matchesUnavailable ? "当前运行模式没有战绩记录（服务端未配置数据库）。" : "还没有战绩。",
-    }));
-  }
-  for (const match of screen.matches) {
-    const mine = match.me ? `我 ${match.me.accountDelta >= 0 ? "+" : ""}${match.me.accountDelta}` : "没参加";
-    list.append(element("p", {
-      text: `${match.roomId} · ${match.completedRounds} 局 · ${match.finalReason} · ${mine}`,
-    }));
-  }
-  return panel("我的战绩", list);
+  app.append(lobby(screen, flow));
 }
 
 function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   const snapshot = screen.snapshot;
-  const players = element("div", { className: "list" });
-  if (snapshot) {
-    for (const player of snapshot.players) {
-      players.append(element("p", {
-        text: `${player.nickname}（${player.userId}）· 积分 ${player.points} · ${player.ready ? "已准备" : "未准备"} · ${player.connected ? "在线" : "离线"}`,
-      }));
+  if (!screen.match) {
+    const board = element("div", { className: "waiting-table" });
+    const mine = snapshot?.players.findIndex((player) => player.userId === flow.currentUserId) ?? 0;
+    const directions = ["south", "east", "north", "west"];
+    for (let index = 0; index < 4; index++) {
+      const player = snapshot?.players[(Math.max(mine, 0) + index) % 4];
+      const seat = element("div", { className: `waiting-seat ${directions[index]}` });
+      if (player) seat.append(avatar(player.nickname, player.avatarUrl), element("strong", { text: player.nickname }), element("small", { text: `ID ${player.userId}` }), ...(player.userId === snapshot?.ownerId ? [element("span", { className: "owner-badge", text: "房主" })] : []));
+      else seat.append(avatar("＋"), element("span", { text: "等待入座" }));
+      board.append(seat);
     }
-  }
-
-  const controls = element("div", { className: "row" });
-  if (snapshot?.status === "waiting") {
-    // 开局的两个硬条件（四人麻将）：满 4 人、且全部准备。
-    // 不满足时**直接禁用按钮并说明原因** —— 否则点下去只会被服务端拒，
-    // 看到的是一行不显眼的小字，非常像「点了没反应」。
-    const seated = snapshot.players.length;
-    const allReady = seated === 4 && snapshot.players.every((player) => player.ready);
-    const blockedReason = seated < 4
-      ? `还差 ${4 - seated} 个人才能开局`
-      : (snapshot.players.some((player) => !player.ready) ? "还有玩家没有准备" : "");
-
-    const startButton = button("开始对局（房主）", () => void flow.startMatch(), "primary");
-    if (!allReady) {
-      startButton.disabled = true;
-      startButton.title = blockedReason;
+    const count = snapshot?.players.length ?? 0;
+    const center = element("div", { className: "waiting-center" }, element("h2", { text: `房间 ${screen.roomNo ?? "…"}` }), element("p", { text: `${count}/4 人 · 绵阳血战麻将` }));
+    if (snapshot?.ownerId === flow.currentUserId && snapshot?.status === "waiting") {
+      const start = button("开始游戏", () => void flow.startMatch(), "primary"); start.disabled = count !== 4; center.append(start);
     }
-    controls.append(
-      button("我准备好了", () => void flow.setReady(true)),
-      button("取消准备", () => void flow.setReady(false)),
-      startButton,
-      ...(blockedReason ? [element("span", { className: "hint", text: blockedReason })] : []),
-    );
+    center.append(element("p", { className: "hint", text: count < 4 ? `还差 ${4 - count} 位牌友` : "四人已到齐，等待房主开始" }), button("邀请牌友", () => shareDialog(flow)));
+    board.append(center); app.append(board);
+    if (screen.notice) app.append(element("p", { className: "error", text: screen.notice }));
   }
-
-  if (!screen.match) app.append(
-    panel(`房间（${snapshot?.status ?? "连接中"}）${snapshot ? ` · 已打 ${snapshot.completedRounds} 局` : ""}`,
-      players,
-      controls,
-      ...(screen.notice ? [element("p", { className: "hint", text: screen.notice })] : []),
-    ),
-  );
 
   if (screen.match) {
     app.append(table.render(screen, flow, () => render(flow.current)));

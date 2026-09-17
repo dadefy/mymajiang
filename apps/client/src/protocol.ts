@@ -59,6 +59,7 @@ export interface FriendRequestView {
 }
 
 export interface RoomPlayerView {
+  avatarUrl?: string;
   userId: string;
   nickname: string;
   points: number;
@@ -276,7 +277,7 @@ export interface GroupDetail {
   allMuted: boolean;
   memberCount: number;
   role: "owner" | "admin" | "member";
-  members: Array<{ userId: string; role: "owner" | "admin" | "member" }>;
+  members: Array<{ userId: string; role: "owner" | "admin" | "member"; nickname?: string; avatarUrl?: string }>;
 }
 
 /** `GET /v1/groups/:groupId/messages`：一页消息，`messages` 按时间升序（旧 → 新）。 */

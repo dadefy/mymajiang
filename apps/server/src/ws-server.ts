@@ -21,6 +21,8 @@ interface ActiveMatch {
   seatsByUser: Map<string, number>;
   roundNumber: number;
   actionDeadlineAt?: number;
+  deadlineGame?: MahjongGame;
+  deadlinePhase?: MahjongGame["phase"];
   /** 快照节流：上次真正落盘的时间；undefined 表示还没写过。 */
   lastSavedAt?: number;
   /** 快照节流：距上次落盘之后状态又变过，尚未写盘。 */
@@ -349,11 +351,20 @@ function buildRealtimeServer(
   function scheduleAutoActions(active: ActiveMatch): void {
     const timers = new Map<number, ReturnType<typeof setTimeout>>();
     const game = active.game;
-    active.actionDeadlineAt = Date.now() + (game.phase === "claiming" ? claimTimeoutMs : playTimeoutMs);
+    // 同一局的并行选择阶段共用固定截止时间，某一家提交不延长其他家的时间。
+    const preserveDeadline = active.deadlineGame === game
+      && active.deadlinePhase === game.phase
+      && (game.phase === "swapping" || game.phase === "missing")
+      && active.actionDeadlineAt !== undefined;
+    if (!preserveDeadline) {
+      active.actionDeadlineAt = Date.now() + (game.phase === "claiming" ? claimTimeoutMs : playTimeoutMs);
+    }
+    active.deadlineGame = game;
+    active.deadlinePhase = game.phase;
     for (const player of game.players) {
       const actions = game.allowedActions(player.id);
       if (actions.length === 0) continue;
-      const delay = game.phase === "claiming" ? claimTimeoutMs : playTimeoutMs;
+      const delay = Math.max(0, active.actionDeadlineAt! - Date.now());
       const timer = setTimeout(() => {
         if (active.game !== game || game.allowedActions(player.id).length === 0) return;
         try {

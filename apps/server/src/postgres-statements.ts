@@ -11,11 +11,11 @@ import type { PointLedgerEntry, UserAccount } from "@mianyang-mahjong/domain";
 
 export const UPSERT_ACCOUNT_SQL = `INSERT INTO users (
     user_id, invitation_key_hash, nickname, avatar_url, status, points,
-    active_match_id, created_at, updated_at
-  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+    active_match_id, created_at, password_hash, updated_at
+  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
   ON CONFLICT (user_id) DO UPDATE SET
     nickname = EXCLUDED.nickname, avatar_url = EXCLUDED.avatar_url,
-    status = EXCLUDED.status, points = EXCLUDED.points,
+    status = EXCLUDED.status, points = EXCLUDED.points, password_hash = EXCLUDED.password_hash,
     active_match_id = EXCLUDED.active_match_id, updated_at = NOW()`;
 
 export function accountParameters(account: UserAccount): readonly unknown[] {
@@ -30,6 +30,7 @@ export function accountParameters(account: UserAccount): readonly unknown[] {
     account.points,
     account.activeMatchId ?? null,
     account.createdAt,
+    account.passwordHash ?? null,
   ];
 }
 

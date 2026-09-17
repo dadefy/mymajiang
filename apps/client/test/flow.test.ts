@@ -830,10 +830,37 @@ describe("ClientFlow", () => {
     expect(sent?.body).toEqual({ roomNo: "654321" });
   });
 
+  it("从群邀请加入房间失败留在聊天，成功后进入房间", async () => {
+    const { flow, http } = await chatWith();
+    let accepted = false;
+    http.on((request) => request.path === "/v1/rooms/join", () => accepted
+      ? { status: 200, body: { roomId: "r-card", roomNo: "123456", status: "waiting", playerCount: 2 } }
+      : { status: 409, body: { code: "ROOM_NOT_FOUND" } });
+    stubRoom(http, "r-card");
+    await flow.joinRoom("123456");
+    expect(flow.current).toMatchObject({ name: "chat", groupId: "g1" });
+    accepted = true;
+    await flow.joinRoom("123456");
+    expect(flow.current).toMatchObject({ name: "room", roomNo: "123456" });
+  });
+
+  it("返回大厅不退出房间，并可回到原房间；退出失败仍留在房间", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION_WITH_ACTIVE_ROOM);
+    stubHome(http, [], [], () => ({ activeRoom: SESSION_WITH_ACTIVE_ROOM.activeRoom }));
+    http.onJson("POST", "/v1/rooms/room-1/leave", 409, { code: "Players cannot leave after the match starts" });
+    stubRoom(http, "room-1", "654321");
+    await flow.enterKey("key"); await flow.rejoinActiveRoom(); await flow.backHome();
+    expect(flow.current).toMatchObject({ name: "home", activeRoom: { roomNo: "654321" } });
+    expect(http.requests.some((request) => request.path.endsWith("/leave"))).toBe(false);
+    await flow.rejoinActiveRoom(); await flow.leaveRoom();
+    expect(flow.current).toMatchObject({ name: "room" });
+  });
+
   it("对局中途退出的人重新登录后能一键回到房间", async () => {
     const { flow, http, sockets } = flowWith();
     http.onJson("POST", "/v1/auth/login", 200, SESSION_WITH_ACTIVE_ROOM);
-    stubHome(http);
+    stubHome(http, [], [], () => ({ activeRoom: SESSION_WITH_ACTIVE_ROOM.activeRoom }));
     stubRoom(http, "room-1", "654321");
     await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
 

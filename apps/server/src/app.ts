@@ -155,8 +155,14 @@ function sessionView(account: UserAccount, dependencies: AppDependencies) {
  */
 function activeRoomView(account: UserAccount, dependencies: AppDependencies) {
   const roomId = account.activeMatchId;
-  if (!roomId) return null;
-  const room = dependencies.roomStore.get(roomId);
+  // ⚠️ `activeMatchId` 是**开局那一刻**才写进账号的（`MatchRoom.start()`），
+  // 等人入座的那段时间它是空的。只看这个字段的话，玩家从**等待中的房间**点
+  // 「返回大厅」，大厅里「返回房间 NNNNNN」那个入口就凭空消失了 —— 人回不去自己的房间，
+  // 只能手抄 6 位房号重进。所以还要按「谁在哪个房间里」反查一次。
+  // 房间数量有限，一次线性扫描无所谓；真到了需要索引的规模，该换的是存储而不是这里。
+  const room = (roomId ? dependencies.roomStore.get(roomId) : undefined)
+    ?? [...dependencies.roomStore.values()]
+      .find((each) => each.players.has(account.userId) && (each.status === "waiting" || each.status === "playing"));
   if (!room || (room.status !== "waiting" && room.status !== "playing")) return null;
   if (!room.players.has(account.userId)) return null;
   return {
@@ -244,6 +250,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       return reply.status(401).send({ code });
     }
     // 密钥格式不对是客户端问题；密钥不存在或已撤销等同于认证失败。
+    if (code === "INVALID_CREDENTIALS") return reply.status(401).send({ code });
     if (code === "KEY_MALFORMED") return reply.status(400).send({ code });
     if (code === "KEY_INVALID" || code === "KEY_REVOKED") return reply.status(401).send({ code });
     // 管理员登录：凭据不对与用户侧一样按认证失败处理，不区分「账号不存在」和「密码错」。
@@ -319,6 +326,27 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       ...sessionView(account, dependencies),
       token: await dependencies.tokens.issueUserToken(account.userId),
     });
+  });
+
+  const userPasswords = new ScryptPasswordHasher();
+  const dummyPasswordHash = userPasswords.hash("unused-account-password");
+  app.post("/v1/auth/account", async (request) => {
+    enforceRateLimit(dependencies.rateLimiter, `auth:${request.ip}`, dependencies.rateLimitRules.authByIp);
+    const body = z.object({ userId: z.string().trim().regex(/^\d{10}$/), password: z.string().min(1).max(200) }).parse(request.body);
+    enforceRateLimit(dependencies.rateLimiter, `account-login:${body.userId}`, dependencies.rateLimitRules.authByIp);
+    const account = dependencies.accountStore.findAccountById(body.userId);
+    const valid = userPasswords.verify(body.password, account?.passwordHash ?? dummyPasswordHash);
+    if (!account || !valid || account.status !== "active") throw new Error("INVALID_CREDENTIALS");
+    return { ...sessionView(account, dependencies), token: await dependencies.tokens.issueUserToken(account.userId) };
+  });
+  app.post("/v1/account/password", async (request) => {
+    const account = await requireUser(request.headers, dependencies);
+    const body = z.object({ password: z.string().min(8).max(200) }).parse(request.body);
+    enforceRateLimit(dependencies.rateLimiter, `password:${account.userId}`, dependencies.rateLimitRules.authByIp);
+    account.passwordHash = userPasswords.hash(body.password);
+    dependencies.accountStore.saveAccount(account);
+    await dependencies.accountStore.flush?.();
+    return { userId: account.userId, passwordSet: true };
   });
 
   app.post("/v1/auth/login", async (request) => {
@@ -788,6 +816,14 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     return { groups };
   });
 
+  app.get("/v1/groups/search", async (request) => {
+    await requireUser(request.headers, dependencies);
+    const { q } = z.object({ q: z.string().trim().min(1).max(30) }).parse(request.query);
+    return { groups: [...dependencies.groupService.groups.values()]
+      .filter((group) => !group.dissolvedAt && (group.groupNo === q || group.name.toLocaleLowerCase().includes(q.toLocaleLowerCase())))
+      .slice(0, 30).map((group) => ({ groupId: group.groupId, groupNo: group.groupNo, name: group.name, memberCount: group.members.size })) };
+  });
+
   app.get("/v1/groups/:groupId", async (request) => {
     const params = z.object({ groupId: z.string().min(1) }).parse(request.params);
     const user = await requireUser(request.headers, dependencies);
@@ -804,7 +840,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       role: group.members.get(user.userId)?.role ?? "member",
       members: [...group.members.values()]
         .sort((left, right) => left.joinedAt.getTime() - right.joinedAt.getTime())
-        .map((member) => ({ userId: member.userId, role: member.role })),
+        .map((member) => ({ userId: member.userId, role: member.role, nickname: dependencies.accountStore.findAccountById(member.userId)?.nickname, avatarUrl: dependencies.accountStore.findAccountById(member.userId)?.avatarUrl })),
     };
   });
 
@@ -821,6 +857,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     // 既不必为上传单独建表，也挡住了「引用别人的文件」。
     if (body.type === "image" || body.type === "voice") {
       if (!isOwnedKey(body.content, user.userId, body.type)) throw new Error("UPLOAD_NOT_OWNED");
+    }
+    if (body.type === "room_invite") {
+      const invite = z.object({ roomNo: z.string().regex(/^\d{6}$/) }).parse(JSON.parse(body.content));
+      const room = findRoomByNo(dependencies, invite.roomNo);
+      if (!room || room.status !== "waiting") throw new Error("ROOM_NOT_FOUND");
+      if (!room.players.has(user.userId)) throw new Error("ROOM_ACCESS_DENIED");
+      body.content = JSON.stringify({ roomNo: room.roomNo, ownerNickname: room.players.get(room.ownerId)?.account.nickname ?? "房主" });
     }
     const message = dependencies.groupService.sendMessage({
       groupId: params.groupId,
@@ -1122,6 +1165,7 @@ function roomSnapshot(room: MatchRoom) {
       .map((player) => ({
         userId: player.account.userId,
         nickname: player.account.nickname,
+        avatarUrl: player.account.avatarUrl,
         points: player.account.points,
         ready: player.ready,
         connected: player.connected,

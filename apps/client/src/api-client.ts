@@ -235,6 +235,27 @@ export class ApiClient {
 
   // ---------- 群聊 ----------
 
+  async loginAccount(userId: string, password: string): Promise<ApiResult<SessionView>> {
+    const result = await this.call<SessionView>({ method: "POST", path: "/v1/auth/account", body: { userId, password } });
+    if (result.ok) this.bearer = result.value.token;
+    return result;
+  }
+  setPassword(password: string): Promise<ApiResult<{ userId: string }>> {
+    return this.call({ method: "POST", path: "/v1/account/password", body: { password } });
+  }
+  createGroup(name: string): Promise<ApiResult<{ groupId: string }>> {
+    return this.call({ method: "POST", path: "/v1/groups", body: { name } });
+  }
+  searchGroups(q: string): Promise<ApiResult<{ groups: Array<{ groupId: string; groupNo: string; name: string; memberCount: number }> }>> {
+    return this.call({ method: "GET", path: `/v1/groups/search?q=${encodeURIComponent(q)}` });
+  }
+  joinGroup(groupNo: string): Promise<ApiResult<{ groupId: string }>> {
+    return this.call({ method: "POST", path: "/v1/groups/join", body: { groupNo } });
+  }
+  manageGroup(groupId: string, action: string, body: object): Promise<ApiResult<unknown>> {
+    return this.call({ method: "POST", path: `/v1/groups/${encodeURIComponent(groupId)}/${action}`, body });
+  }
+
   groups(): Promise<ApiResult<{ groups: GroupSummary[] }>> {
     return this.call({ method: "GET", path: "/v1/groups" });
   }

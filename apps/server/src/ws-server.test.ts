@@ -221,6 +221,54 @@ describe("WebSocket 对局", () => {
     for (const client of clients) client.close();
   }, 30000);
 
+  it("换三张与定缺提交不重置其他家的截止时间，超时仍自动推进", async () => {
+    const { dependencies, tokens } = fixture();
+    const port = 3900 + Math.floor(Math.random() * 100);
+    const wss = await createWebSocketServer(dependencies, port, { playTimeoutMs: 1000 });
+    wssInstances.push(wss);
+    const ids = ["甲", "乙", "丙", "丁"].map((n) => createBetaUser(dependencies, n));
+    const room = makeRoom(dependencies, ids);
+    const clients: TestClient[] = [];
+    const nextGame = async (client: TestClient) => {
+      for (;;) {
+        const message = await client.next() as { type: string; state: { phase: string; actionDeadlineAt: number } };
+        if (message.type === "game") return message.state;
+      }
+    };
+    try {
+      for (const id of ids) {
+        const client = new TestClient();
+        clients.push(client);
+        await client.connect(port);
+        client.send({ type: "auth", token: await tokens.issueUserToken(id), roomId: room.roomId });
+        await client.next();
+      }
+      clients[0]!.send({ type: "start" });
+      let states = await Promise.all(clients.map(nextGame));
+      for (const [phase, action, nextPhase] of [
+        ["swapping", "auto-swap", "missing"],
+        ["missing", "auto-missing", "playing"],
+      ] as const) {
+        const deadline = states[0]!.actionDeadlineAt;
+        expect(states.every((state) => state.phase === phase)).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        clients[0]!.send({ type: action });
+        states = await Promise.all(clients.map(nextGame));
+        expect(states.every((state) => state.actionDeadlineAt === deadline)).toBe(true);
+        // 其余三家不操作，必须在原截止时间到达时全部自动完成。
+        states = await Promise.all(clients.map(async (client) => {
+          let state;
+          do { state = await nextGame(client); } while (state.phase === phase);
+          return state;
+        }));
+        expect(Date.now()).toBeLessThan(deadline + 500);
+        expect(states.every((state) => state.phase === nextPhase && state.actionDeadlineAt > deadline)).toBe(true);
+      }
+    } finally {
+      for (const client of clients) client.close();
+    }
+  }, 10000);
+
   it("未开局发操作返回 error", async () => {
     const { dependencies, tokens } = fixture();
     const port = 3300 + Math.floor(Math.random() * 100);

@@ -1,0 +1,25 @@
+// 隔离的本机 UI 验证环境，不读取 .env，不连接正式数据。
+import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import { createApp, createInMemoryDependencies } from '../../apps/server/dist/app.js';
+import { TokenService } from '../../apps/server/dist/auth.js';
+import { CryptoInvitationKeyCodec } from '../../apps/server/dist/invitation-key-codec.js';
+import { createAttachedWebSocketServer } from '../../apps/server/dist/ws-server.js';
+import { ScryptPasswordHasher } from '../../apps/server/dist/password-hasher.js';
+import { LocalDiskBlobStorage } from '../../apps/server/dist/local-blob-storage.js';
+const port = Number(process.env.LOBBY_PREVIEW_PORT || 3188);
+const secret = randomUUID() + randomUUID();
+const storageDir = new URL('./.lobby-preview-uploads/', import.meta.url).pathname.replace(/^\/(.:)/, '$1');
+await mkdir(storageDir, { recursive: true });
+const storage = new LocalDiskBlobStorage(storageDir, `http://127.0.0.1:${port}`, secret);
+let id=1800000000, groupNo=32000000;
+const dependencies=createInMemoryDependencies({tokens:new TokenService(secret),invitationKeyCodec:new CryptoInvitationKeyCodec(),createKeyId:randomUUID,createUserId:()=>String(++id),createLedgerId:randomUUID,createRoomId:randomUUID,createGroupId:randomUUID,createGroupNo:()=>String(++groupNo),createMessageId:randomUUID,createFriendRequestId:randomUUID,createAdminAuditId:randomUUID,debugClient:true,blobStorage:storage,localBlobStorage:storage});
+const users=['青竹','听雨','晚风','小满'].map(nickname=>{ const key=dependencies.invitationKeys.issue({count:1,note:'UI preview',actorId:'preview'})[0].key; const user=dependencies.accountService.activateWithKey({key,nickname,avatarUrl:'avatar'});user.points=2000;user.passwordHash=new ScryptPasswordHasher().hash('Preview123!');return user; });
+const group=dependencies.groupService.createGroup(users[0], '周末牌友');
+for(const user of users.slice(1)) dependencies.groupService.joinByGroupNo(user,group.groupNo);
+dependencies.groupService.sendMessage({groupId:group.groupId,sender:users[1],type:'text',content:'晚上有空吗？一起打两局。'});
+dependencies.groupService.sendMessage({groupId:group.groupId,sender:users[0],type:'text',content:'好呀，我来开房间，稍后把邀请发到群里。'});
+dependencies.groupService.createGroup(users[0], '绵阳麻将交流');
+const app=createApp(dependencies);createAttachedWebSocketServer(app.server,dependencies);
+await app.listen({host:'127.0.0.1',port});
+console.log(`Preview http://127.0.0.1:${port}/debug · account ${users[0].userId} · password Preview123!`);

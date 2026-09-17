@@ -1,148 +1,41 @@
-import type { ActiveRoomView, ClientFlow, GroupSummary, MatchSummary, Screen } from "@mianyang-mahjong/client";
-import { THEME, box, field, fmtDelta, label, refill, scrollList, setButtonText, textButton } from "./widgets.js";
-
-const ROLE_NAMES: Record<GroupSummary["role"], string> = { owner: "群主", admin: "管理员", member: "" };
-
-function shortDate(iso: string): string {
-  const at = new Date(iso);
-  const pad = (value: number): string => (value < 10 ? `0${value}` : String(value));
-  return `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
-}
-
-/** 主页：我的信息、建房/进房、群列表与战绩。 */
+import type { ClientFlow, Screen } from "@mianyang-mahjong/client";
+import { box, field, label, refill, scrollList, textButton } from "./widgets.js";
+import { groupDialog, passwordDialog, socialAvatar, SOCIAL } from "./SocialDialogs.js";
 export class HomePage {
   readonly view: Laya.Box;
-  private readonly meLabel: Laya.Label;
-  private readonly roomInput: Laya.TextInput;
-  private readonly errorLabel: Laya.Label;
-  private readonly busyLabel: Laya.Label;
-  private readonly groupList: Laya.VBox;
-  private readonly matchList: Laya.VBox;
-  private readonly groupEmpty: Laya.Label;
-  private readonly matchEmpty: Laya.Label;
-  private readonly rejoinButton: Laya.Box;
-  private busy = false;
-
-  constructor(
-    private readonly flow: ClientFlow,
-    parent: Laya.Stage,
-  ) {
-    this.view = new Laya.Box();
-    this.view.size(750, 1334);
-    parent.addChild(this.view);
-
-    // 顶部：我的信息 + 登出
-    const header = box(this.view, 0, 0, 750, 110, THEME.panelBg);
-    this.meLabel = label(header, "", 26, { wordWrap: false });
-    this.meLabel.pos(30, 40);
-    textButton(header, "登出", 610, 25, 110, 60, THEME.panelBg2, () => this.flow.signOut());
-
-    // 建房 / 进房 / 刷新
-    textButton(this.view, "创建房间", 75, 150, 220, 80, THEME.accentDark, () => void this.flow.createRoom());
-    // 房间号是 6 位数字：输入框直接限长，用户少输一位一眼就能看出来。
-    this.roomInput = field(this.view, 320, 150, 240, 80, "6 位房间号", 6).input;
-    textButton(this.view, "加入", 585, 150, 90, 80, THEME.panelBg2, () => void this.joinRoom());
-    textButton(this.view, "刷新列表", 75, 250, 220, 64, THEME.panelBg2, () => void this.flow.refreshHome());
-
-    // 进行中的对局入口：有人退出后重新进来，靠它直接回到牌桌接着打。
-    // 没有对局时整个按钮不显示，不用「点了才知道不行」。
-    this.rejoinButton = textButton(this.view, "", 320, 250, 355, 64, THEME.accentDark, () => void this.flow.rejoinActiveRoom());
-    this.rejoinButton.visible = false;
-
-    this.errorLabel = label(this.view, "", 24, { width: 600, align: "center", color: THEME.bad, wordWrap: true });
-    this.errorLabel.pos(75, 330);
-    this.busyLabel = label(this.view, "处理中…", 24, { width: 600, align: "center", color: THEME.textDim });
-    this.busyLabel.pos(75, 330);
-    this.busyLabel.visible = false;
-
-    // 群聊列表
-    label(this.view, "我的群聊", 28, { bold: true }).pos(75, 395);
-    this.groupList = scrollList(this.view, 75, 440, 600, 320);
-    this.groupEmpty = label(this.view, "还没有加入任何群", 24, { width: 600, align: "center", color: THEME.textDim });
-    this.groupEmpty.pos(75, 580);
-
-    // 战绩列表
-    label(this.view, "最近战绩", 28, { bold: true }).pos(75, 800);
-    this.matchList = scrollList(this.view, 75, 845, 600, 430);
-    this.matchEmpty = label(this.view, "还没有打过牌", 24, { width: 600, align: "center", color: THEME.textDim });
-    this.matchEmpty.pos(75, 1000);
+  private readonly heading: Laya.Label;
+  private readonly list: Laya.VBox;
+  private readonly status: Laya.Label;
+  private readonly returnButton: Laya.Box;
+  constructor(private readonly flow: ClientFlow, parent: Laya.Stage) {
+    this.view = box(parent, 0, 0, 750, 1334, SOCIAL.bg);
+    const header = box(this.view, 0, 0, 750, 115, "#f7f7f7");
+    this.heading = label(header, "大厅", 34, { color: SOCIAL.ink, bold: true }); this.heading.pos(30, 35);
+    textButton(header, "创建群聊", 535, 25, 190, 65, SOCIAL.green, () => groupDialog(this.view, flow, "create"));
+    textButton(this.view, "搜索群聊 · 群名称 / 群号", 25, 140, 700, 65, "#cbd5ce", () => groupDialog(this.view, flow, "search"));
+    textButton(this.view, "创建房间", 25, 235, 210, 75, SOCIAL.green, () => { void flow.createRoom(); });
+    const room = field(this.view, 250, 235, 285, 75, "6 位房间号", 6).input;
+    textButton(this.view, "加入", 550, 235, 175, 75, SOCIAL.green, () => { void flow.joinRoom(room.text); });
+    this.returnButton = textButton(this.view, "返回我的房间", 25, 330, 700, 60, SOCIAL.green, () => { void flow.rejoinActiveRoom(); });
+    label(this.view, "群聊", 25, { color: SOCIAL.dim }).pos(30, 425);
+    this.list = scrollList(this.view, 0, 475, 750, 660);
+    this.status = label(this.view, "", 23, { width: 690, color: "#9e5942", wordWrap: true }); this.status.pos(30, 1145);
+    textButton(this.view, "设置登录密码", 25, 1240, 245, 65, SOCIAL.green, () => passwordDialog(this.view, flow));
+    textButton(this.view, "刷新", 290, 1240, 185, 65, "#788d7e", () => { void flow.refreshHome(); });
+    textButton(this.view, "退出登录", 495, 1240, 230, 65, "#788d7e", () => flow.signOut());
   }
-
   show(screen: Screen): void {
     if (screen.name !== "home") return;
-    this.meLabel.text = `${screen.me.nickname}  ID:${screen.me.userId}  积分:${screen.me.points}`;
-    this.busy = screen.busy;
-    this.busyLabel.visible = screen.busy;
-    this.errorLabel.visible = !screen.busy && screen.error !== undefined;
-    this.errorLabel.text = screen.error ?? "";
-    this.renderRejoin(screen.activeRoom);
-    this.renderGroups(screen.groups);
-    this.renderMatches(screen.matches, screen.matchesUnavailable);
-  }
-
-  /** 进行中的对局入口。服务端只在「这间房还能回去」时才给（见登录响应的 `activeRoom`）。 */
-  private renderRejoin(active: ActiveRoomView | null): void {
-    this.rejoinButton.visible = active !== null;
-    if (active) setButtonText(this.rejoinButton, `回到对局 ${active.roomNo}（${active.playerCount} 人）`);
-  }
-
-  private async joinRoom(): Promise<void> {
-    const roomNo = this.roomInput.text.trim();
-    // 号码不对时由 flow 给出「房间号是 6 位数字」的提示，这里只是不白跑一趟。
-    if (this.busy || roomNo.length === 0) return;
-    await this.flow.joinRoom(roomNo);
-  }
-
-  private renderGroups(groups: GroupSummary[]): void {
-    this.groupEmpty.visible = groups.length === 0;
-    refill(this.groupList, groups.length, (index, row) => {
-      const group = groups[index]!;
-      const role = ROLE_NAMES[group.role];
-      const title = label(row, `${group.name}（${group.groupNo}）${role ? " · " + role : ""}`, 26, { width: 440, bold: group.role === "owner" });
-      title.pos(20, 10);
-      const second = group.notice.length > 0
-        ? `公告：${group.notice}`
-        : `${group.memberCount} 人${group.lastMessageAt ? " · 最近消息 " + shortDate(group.lastMessageAt) : ""}`;
-      const detail = label(row, second, 22, { width: 440, color: THEME.textDim });
-      detail.pos(20, 48);
-      const enter = label(row, "进入 >", 22, { width: 110, align: "right", color: THEME.accent });
-      enter.pos(470, 32);
-      row.size(600, 88);
-      row.bgColor = THEME.panelBg;
-      // 点一行就进群聊：消息列表与实时推送都在群聊页里。
-      // 写成块语句而不是 `() => void ...`：`EventDispatcher.on` 的 listener 参数类型是 `Function`，
-      // 表达式体推不出返回类型，`noImplicitAny` 下会报 TS7011。
-      row.on(Laya.Event.CLICK, null, () => {
-        void this.flow.openChat(group.groupId);
-      });
-    });
-  }
-
-  private renderMatches(matches: MatchSummary[], unavailable: boolean): void {
-    this.matchEmpty.visible = matches.length === 0;
-    // 「没打过牌」和「这个模式查不了战绩」是两回事，别让内测的人以为系统坏了。
-    this.matchEmpty.text = unavailable
-      ? "当前运行模式没有战绩记录（服务器未配置数据库）"
-      : "还没有打过牌";
-    refill(this.matchList, matches.length, (index, row) => {
-      const match = matches[index]!;
-      const mine = match.me?.accountDelta ?? 0;
-      const title = label(
-        row,
-        `房间 ${match.roomId} · ${match.completedRounds} 局 · ${match.finalReason === "three-winners" ? "打满" : "解散"}`,
-        26,
-        { width: 600 },
-      );
-      title.pos(20, 10);
-      const detail = label(
-        row,
-        `我的分 ${fmtDelta(mine)}  ·  ${shortDate(match.finalizedAt)}`,
-        22,
-        { width: 600, color: mine >= 0 ? THEME.good : THEME.bad },
-      );
-      detail.pos(20, 48);
-      row.size(600, 88);
-      row.bgColor = THEME.panelBg;
+    this.heading.text = `大厅 · ${screen.me.nickname}`;
+    this.returnButton.visible = !!screen.activeRoom;
+    this.status.text = screen.error ?? `账号 ${screen.me.userId} · ${screen.me.points} 分`;
+    refill(this.list, screen.groups.length || 1, (index, row) => {
+      const group = screen.groups[index]; row.size(750, 115); row.bgColor = SOCIAL.panel;
+      if (!group) { label(row, "还没有群聊，创建或搜索群聊开始聊天", 25, { color: SOCIAL.dim }).pos(30, 40); return; }
+      socialAvatar(row, group.name, undefined, 25, 22);
+      label(row, group.name, 29, { width: 510, color: SOCIAL.ink }).pos(120, 22);
+      label(row, group.notice || `${group.memberCount} 位牌友 · 群号 ${group.groupNo}`, 22, { width: 600, color: SOCIAL.dim }).pos(120, 65);
+      row.on(Laya.Event.CLICK, null, () => { void this.flow.openChat(group.groupId); });
     });
   }
 }
