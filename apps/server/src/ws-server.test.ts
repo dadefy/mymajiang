@@ -1214,5 +1214,43 @@ describe("退出托管与重新接管", () => {
     expect(room.status).toBe("dissolved");
     expect(room.completedRounds).toBe(7);
   });
+
+  it("终局后托管定时器全部失效：不再 autoAct、不再开下一小局（timer 竞态）", async () => {
+    // 测试 14：托管 autoAct 是 0ms 定时器，且 `setTimeout` 到点后 clearTimeout 救不回来 ——
+    // 全靠 seatEpoch 失效 + terminating 守卫。若竞态没处理干净，下面这 1 秒足够
+    // 托管打出好几手甚至一整小局（那正是本功能要修的原 bug）。
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 20,
+      claimTimeoutMs: 20,
+      interRoundPauseMs: 0,
+    });
+
+    for (const client of clients) client.send({ type: "quit" });
+    for (const client of clients) await readUntil(client, (message) => message.type === "match-finished", 10_000);
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    // 终局后一切冻结：不记任何小局、不开下一局、状态不再变
+    expect(room.status).toBe("dissolved");
+    expect(room.completedRounds).toBe(0);
+  });
+
+  it("多路同时触发（4 个 quit 一起落地）只结算一次：match-finished 每家至多一帧", async () => {
+    // 测试 15：4 个 quit 几乎同时入队，每一个 quit 处理器、以及随后任何路径都会
+    // 跑一遍终局判定 —— terminating 幂等标志必须保证只有第一次真正结算。
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+
+    for (const client of clients) client.send({ type: "quit" });
+    for (const client of clients) {
+      await readUntil(client, (message) => message.type === "match-finished", 10_000);
+      // 终局帧之后再等一小段：不允许出现第二帧 match-finished（重复结算）
+      const duplicate = await client.next(400).catch(() => null);
+      expect(duplicate === null || (duplicate as { type: string }).type !== "match-finished").toBe(true);
+    }
+    expect(room.status).toBe("dissolved");
+    expect(room.completedRounds).toBe(0);
+  });
 });
 

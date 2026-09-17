@@ -522,6 +522,37 @@ describe("match room", () => {
     expect(room.players.get("B")!.renounced).toBe(false);
   });
 
+  it("当前小局的实时杠分/胡牌流水不进最终积分：作废只看已完成小局", () => {
+    // 测试 13：事件账本（game.events，含杠分、胡牌付分、花猪/查叫退税）只存在于引擎内存；
+    // `rawDeltas` 的唯一写点是 recordCompletedRound，而作废路径**根本不读引擎、不调它** ——
+    // 结构上杜绝了"当前局打了一半的杠分混进最终结算"。
+    const { room } = readyRoom();
+    room.start("A");
+    // 已正常完成 1 局：A -100 / B +100
+    room.recordCompletedRound({
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: -100 },
+        { playerId: "B", delta: 100 },
+      ],
+      winnerSeats: [1],
+      nextDealerSeat: 1,
+    });
+    for (const id of ["A", "B", "C", "D"]) room.quitToTrustee(id);
+    const completedBefore = room.completedRounds;
+    const rawBefore = [...(room.rawDeltas ?? new Map()).entries()];
+
+    const result = room.abortAbandonedMatch();
+
+    // 没有把当前小局记进战绩、也没有往累计里掺入实时流水
+    expect(room.completedRounds).toBe(completedBefore);
+    expect([...(room.rawDeltas ?? new Map()).entries()]).toEqual(rawBefore);
+    expect(result?.rawDeltas).toEqual([
+      { playerId: "A", delta: -100 },
+      { playerId: "B", delta: 100 },
+    ]);
+  });
+
   it("matchAbandoned 幂等纯读：waiting / finished / dissolved 房间恒为 false", () => {
     const { room } = readyRoom();
     expect(room.matchAbandoned()).toBe(false); // waiting

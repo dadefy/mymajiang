@@ -493,8 +493,9 @@ export class PostgresRoomStore {
           control: storedControl(player.control, roomId, userId),
           away: player.away,
           // 「主动退出」状态照库恢复：quit 后重启，这个座位仍然是"主动放弃"，
-          // 提前终局判定不能因为重启而漏掉它。
-          renounced: player.renounced,
+          // 提前终局判定不能因为重启而漏掉它。migration 012 之后该列 NOT NULL DEFAULT false，
+          // 老行读出来就是 false；`?? false` 只是防御半行数据（测试 fake / 手工修补）。
+          renounced: player.renounced ?? false,
           ...(player.control_changed_at === null ? {} : { controlChangedAt: player.control_changed_at }),
           // ⚠️ 保护期**照原样恢复，不重算**。这是墙钟语义的关键：
           // 断线发生在 20:00、deadline 是 20:02、服务 20:10 才起来 ——

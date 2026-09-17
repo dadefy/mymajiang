@@ -350,6 +350,11 @@ export class MatchRoom {
     player.renounced = true;
     // 退出的人不在大厅，暂离标记一并清掉（presence 由 control 主导，这里只是不留脏数据）
     player.away = false;
+    // 主动退出不走「异常断线 120 秒」那条路：残留的保护期必须清掉，
+    // 否则先掉线、又在半开连接上补发 quit 的座位会带着一个旧 deadline，
+    // 窗口定时器到点会去转一个已经托管的座位（expireReconnectWindow 幂等返回 false，
+    // 但库里残留的旧时刻会让墙钟判定读到脏数据）。
+    delete player.reconnectDeadline;
     return true;
   }
 

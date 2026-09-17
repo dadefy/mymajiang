@@ -588,6 +588,21 @@ describe("座位控制权与暂离的持久化", () => {
     expect(room.players.get("B")).toMatchObject({ control: "trustee", renounced: true });
   });
 
+  it("migration 012 之前的老行恢复为 renounced=false（列默认值语义）", async () => {
+    // 测试 17：老库的行没有 renounced 值 —— migration 加列 DEFAULT false 之后，
+    // 恢复出来必须归一成 false，绝不能 undefined 混进终局判定。
+    const users = [account("A", 600, "room-1")];
+    const { store } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 1 }],
+      players: [
+        // 这一行故意不带 renounced 字段（等价于 migration 前的老行）
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "human", away: false, control_changed_at: null },
+      ],
+    });
+
+    expect(store.rooms.get("room-1")!.players.get("A")!.renounced).toBe(false);
+  });
+
   it("重启后从数据库恢复托管座位 —— 不能一律当 human", async () => {
     // 这是这一整块改动的核心：重启后如果托管座位被恢复成 human，而它又没人连接，
     // 整局就会卡在等人工操作上。所以 load() 必须读 control 而不是默认 human。
