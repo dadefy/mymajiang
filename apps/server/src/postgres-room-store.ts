@@ -74,12 +74,43 @@ const UPSERT_ROOM_PLAYER_SQL = `INSERT INTO match_room_players (
 
 const DELETE_ROOM_PLAYER_SQL = `DELETE FROM match_room_players WHERE room_id = $1 AND user_id = $2`;
 
+/**
+ * 每小局结算后把**大局累计**写回玩家行。
+ *
+ * 只更新 `raw_delta` 一列 —— 这是刻意用窄 UPDATE 而不是复用 `UPSERT_ROOM_PLAYER_SQL`：
+ * 那条 upsert 会一次性覆盖 12 列，其中包含 `account_delta`（整场结算才该写）、
+ * `opening_balance`、`seat`、`control`、`away`、`reconnect_deadline`。
+ * 拿它来"顺手更新累计"会把尚未到结算时刻的 `account_delta` 写成 NULL，
+ * 也会改写控制权字段 —— 范围太大，污染语义不同的字段。
+ *
+ * ⚠️ 写的是**绝对值**，不是 `raw_delta = raw_delta + delta`：
+ * 域层 `recordCompletedRound()` 已经累加过一次，持久化层再做一次增量累加会双倍计分。
+ */
+const UPDATE_ROOM_PLAYER_RAW_DELTA_SQL = `UPDATE match_room_players
+  SET raw_delta = $3
+  WHERE room_id = $1 AND user_id = $2`;
+
 // A finished round is immutable, so a repeated write must not overwrite it.
 const INSERT_ROUND_SQL = `INSERT INTO match_rounds (
     round_id, room_id, round_number, finish_reason, winner_seats, next_dealer_seat,
     deltas, events, finished_at
   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
   ON CONFLICT DO NOTHING`;
+
+/**
+ * 各房间"已结算小场的积分之和"（只读，用于对账）。
+ *
+ * `match_room_players.raw_delta` 是**大局累计**，`match_rounds.deltas` 是**每小局**的分数；
+ * 对一个还在进行中的房间，前者应当等于后者的按人求和。
+ * 两者不一致 ⇒ 累计在某一环丢了（历史上就是因为只在内存累加、从不落库）。
+ *
+ * 这条查询只用来**告警**，不用来修复 —— 自动改写历史数据比丢分更危险。
+ */
+const ROUND_DELTA_TOTALS_SQL = `SELECT m.room_id,
+       (d.value ->> 'playerId') AS player_id,
+       SUM((d.value ->> 'delta')::bigint) AS total
+  FROM match_rounds m, jsonb_array_elements(m.deltas) AS d(value)
+ GROUP BY 1, 2`;
 
 const DISSOLVE_UNUSABLE_SQL = `UPDATE match_rooms
   SET status = 'dissolved', finalized_at = NOW(), final_reason = 'dissolved'
@@ -251,9 +282,15 @@ export class PostgresMatchRoom extends MatchRoom {
 
   override recordCompletedRound(round: RecordedRound): RoomResult | undefined {
     const roundNumber = this.completedRounds + 1;
+    // `super` 先把这一局的 delta 累加进 `rawDeltas`（内存），下面写的是累加**之后**的绝对值。
     const result = super.recordCompletedRound(round);
     const statements: SqlStatement[] = [
       { sql: INSERT_ROUND_SQL, parameters: roundParameters(this, roundNumber, round, this.clock()) },
+      // ⚠️ 大局累计必须和这一小局的记录**在同一个事务里**提交：要么都成功，要么都回滚。
+      // 少了这几条，`match_room_players.raw_delta` 会一直停在开局时的 0，
+      // 服务重启后 `load()` 从那个 0 恢复 ⇒ 此前所有小场的账永久丢失。
+      // （真实故障：房间 999832 前 6 局的 -57 / +50 / -14 / +21 全丢，最终只结算了第 8 局的 ±1。）
+      ...this.rawDeltaStatements(),
     ];
     // `finalize` already recorded the finished room, including the round counter.
     if (!result) {
@@ -261,6 +298,18 @@ export class PostgresMatchRoom extends MatchRoom {
     }
     this.queue.enqueueTransaction(statements);
     return result;
+  }
+
+  /**
+   * 四位玩家的**当前累计**（绝对值，不是增量）。
+   *
+   * 与 `INSERT_ROUND_SQL` 同事务：不允许出现"记了这一局但累计没跟上"的半成功状态。
+   */
+  private rawDeltaStatements(): SqlStatement[] {
+    return [...this.players.values()].map((player) => ({
+      sql: UPDATE_ROOM_PLAYER_RAW_DELTA_SQL,
+      parameters: [this.roomId, player.account.userId, this.rawDeltas.get(player.account.userId) ?? 0],
+    }));
   }
 
   override requestDissolve(userId: string): boolean {
@@ -289,6 +338,20 @@ export class PostgresMatchRoom extends MatchRoom {
   protected override finalize(reason: "completed" | "dissolved"): RoomResult {
     const result = super.finalize(reason);
     const finalizedAt = this.clock();
+    // 防御性校验：打了若干小场之后，四位玩家的大局累计**全为 0** 是极不正常的信号
+    // —— 真实故障 999832 就是这样：前 6 局的 -57/+50/-14/+21 在重启时丢失，
+    //   最终账户只结算了第 8 局的 ±1，而零和校验根本抓不到（归零之后和仍然是 0）。
+    //
+    // 这里**只告警、不拦截**：同步阶段拿不到 `match_rounds` 做真正的对账，
+    // 仅凭"全 0"就拒绝入账会把可能合法的结算也卡死（八局荒庄理论上存在）。
+    // 真正的逐人对账在 `load()` 里做（那时能查库，且房间还没结算）。
+    if (this.completedRounds > 1 && result.rawDeltas.every((entry) => entry.delta === 0)) {
+      process.stderr.write(
+        `[room-store] 可疑的整场结算：room=${this.roomNo} 已完成 ${this.completedRounds} 小场，`
+        + " 但四位玩家的大局累计全为 0 —— 累计积分很可能在持久化环节丢失，"
+        + " 即将写入的账户结算可能不完整（只告警，不拦截）\n",
+      );
+    }
     this.queue.enqueueTransaction([
       { sql: UPSERT_ROOM_SQL, parameters: roomParameters(this, finalizedAt) },
       ...this.settlementStatements(result, finalizedAt),
@@ -367,7 +430,7 @@ export class PostgresRoomStore {
     const createLedgerId = options.createLedgerId ?? randomUUID;
     const rooms = new Map<string, MatchRoom>();
 
-    const [roomRows, playerRows] = await Promise.all([
+    const [roomRows, playerRows, totalsRows] = await Promise.all([
       database.pool.query<RoomRow>(
         `SELECT room_id, room_no, status, owner_id, completed_rounds FROM match_rooms
           WHERE status IN ('waiting', 'playing') ORDER BY created_at ASC, room_id ASC`,
@@ -379,7 +442,17 @@ export class PostgresRoomStore {
            JOIN match_rooms r ON r.room_id = p.room_id
           WHERE r.status IN ('waiting', 'playing') ORDER BY p.joined_at ASC, p.user_id ASC`,
       ),
+      // 只读对账用；查不到（例如存储层 mock）时下面会跳过校验，不影响启动。
+      database.pool.query<{ room_id: string; player_id: string; total: string | number }>(
+        ROUND_DELTA_TOTALS_SQL,
+      ),
     ]);
+
+    // "roomId|userId" -> 已结算小场的积分之和
+    const settledTotals = new Map<string, number>();
+    for (const row of totalsRows.rows ?? []) {
+      settledTotals.set(`${row.room_id}|${String(row.player_id).trim()}`, Number(row.total));
+    }
 
     const store = new PostgresRoomStore(queue, createLedgerId, rooms);
 
@@ -423,7 +496,18 @@ export class PostgresRoomStore {
         for (const player of seated) {
           const userId = player.user_id.trim();
           room.openingBalances.set(userId, storedInteger(player.opening_balance, roomId, "opening_balance"));
-          room.rawDeltas.set(userId, storedInteger(player.raw_delta, roomId, "raw_delta"));
+          const rawDelta = storedInteger(player.raw_delta, roomId, "raw_delta");
+          room.rawDeltas.set(userId, rawDelta);
+          // 只读一致性校验：大局累计应当等于已结算各小场之和。
+          // 不一致 ⇒ 累计在某一环丢了（历史上正是"只在内存累加、从不落库"）。
+          // **只告警，不自动修复** —— 擅自改写历史数据比丢分更危险。
+          const settled = settledTotals.get(`${roomId}|${userId}`);
+          if (settled !== undefined && settled !== rawDelta) {
+            process.stderr.write(
+              `[room-store] 大局累计与已结算小场不一致：room=${row.room_no} user=${userId}`
+              + ` raw_delta=${rawDelta} 已结算之和=${settled}（只告警，不自动改写）\n`,
+            );
+          }
         }
       }
 

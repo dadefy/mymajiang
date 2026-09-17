@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryAccountStore, presenceOf, type RecordedRound, type UserAccount } from "@mianyang-mahjong/domain";
 import type { PostgresDatabase } from "./database.js";
 import { PostgresRoomStore } from "./postgres-room-store.js";
@@ -10,7 +10,7 @@ interface RecordedQuery {
   parameters: unknown[];
 }
 
-function fakeDatabase(options: { rooms?: unknown[]; players?: unknown[]; failOn?: string } = {}) {
+function fakeDatabase(options: { rooms?: unknown[]; players?: unknown[]; roundTotals?: unknown[]; failOn?: string } = {}) {
   const timeline: RecordedQuery[] = [];
 
   const client = {
@@ -27,6 +27,7 @@ function fakeDatabase(options: { rooms?: unknown[]; players?: unknown[]; failOn?
       timeline.push({ channel: "pool", sql, parameters });
       if (sql.includes("FROM match_rooms")) return { rows: options.rooms ?? [], rowCount: 1 };
       if (sql.includes("FROM match_room_players")) return { rows: options.players ?? [], rowCount: 1 };
+      if (sql.includes("jsonb_array_elements")) return { rows: options.roundTotals ?? [], rowCount: 1 };
       return { rows: [], rowCount: 1 };
     },
     async connect() {
@@ -230,14 +231,23 @@ describe("PostgresMatchRoom", () => {
     room.recordCompletedRound(round(100));
     await store.flush();
 
-    // The round and the room's round counter travel together.
+    // 小局记录 + 房间局数 + **四位玩家的累计**，全部在同一个事务里。
+    // 累计那条不能少：少了它，服务重启后 rawDeltas 会从恒为 0 的旧值恢复，之前的账就丢了。
     expect(writes(timeline, since)).toEqual([
       "BEGIN",
       "insert:match_rounds",
+      "update:match_room_players",
+      "update:match_room_players",
+      "update:match_room_players",
+      "update:match_room_players",
       "insert:match_rooms",
       "COMMIT",
       "BEGIN",
       "insert:match_rounds",
+      "update:match_room_players",
+      "update:match_room_players",
+      "update:match_room_players",
+      "update:match_room_players",
       "insert:match_rooms",
       "COMMIT",
     ]);
@@ -628,5 +638,202 @@ describe("座位控制权与暂离的持久化", () => {
     });
 
     await expect(PostgresRoomStore.load(database, accountStore(users))).rejects.toThrow("unknown control value");
+  });
+});
+
+describe("大局累计的持久化与恢复", () => {
+  /** 四人各异的局，方便断言累计是按人的。入参必须零和。 */
+  function fourWayRound(a: number, b: number, c: number, d: number): RecordedRound {
+    return {
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: a },
+        { playerId: "B", delta: b },
+        { playerId: "C", delta: c },
+        { playerId: "D", delta: d },
+      ],
+      wins: [],
+      winnerSeats: [],
+      nextDealerSeat: 0,
+      events: [{ eventId: `event-${ledgerSequence++}`, type: "win", payer: "A", payee: "B", points: 1, note: "点炮" }],
+    };
+  }
+
+  /** 取累计 UPDATE 的 (userId, rawDelta) —— 写的必须是**绝对值**，不是增量。 */
+  function rawDeltaWrites(timeline: RecordedQuery[], since: number): Array<[string, number]> {
+    return statements(timeline, "update:match_room_players", since).map(
+      (row) => [row[1] as string, row[2] as number],
+    );
+  }
+
+  it("每小局结算立即落库累计（绝对值，不是增量）", async () => {
+    const { store, room, timeline } = await startedRoom(fourUsers());
+
+    // 第 1 局：A +10, B -5, C -3, D -2（零和）
+    room.recordCompletedRound(fourWayRound(10, -5, -3, -2));
+    await store.flush();
+    expect(rawDeltaWrites(timeline, 0)).toEqual([
+      ["A", 10], ["B", -5], ["C", -3], ["D", -2],
+    ]);
+
+    // 第 2 局：累计 +8 / +1 / -5 / -4 —— 落库的是**累计**，不是本局增量
+    const since = timeline.length;
+    room.recordCompletedRound(fourWayRound(-2, 6, -2, -2));
+    await store.flush();
+    expect(rawDeltaWrites(timeline, since)).toEqual([
+      ["A", 8], ["B", 1], ["C", -5], ["D", -4],
+    ]);
+  });
+
+  it("重启后从 raw_delta 恢复累计（不归零），继续结算在旧账上累加", async () => {
+    // 模拟"前 2 局结算后服务重启"：库里 raw_delta = +8 / +1 / -5 / -4
+    const users = fourUsers();
+    const { store, timeline } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 2 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: false, opening_balance: "600", raw_delta: "8", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: false, opening_balance: "500", raw_delta: "1", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "C", seat: 2, joined_at: new Date(2), ready: false, opening_balance: "500", raw_delta: "-5", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "D", seat: 3, joined_at: new Date(3), ready: false, opening_balance: "500", raw_delta: "-4", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+      ],
+    });
+    const room = store.rooms.get("room-1")!;
+
+    // 1) 恢复出来的必须是库里那份累计，不能是 0
+    expect([...room.rawDeltas.entries()]).toEqual([
+      ["A", 8], ["B", 1], ["C", -5], ["D", -4],
+    ]);
+
+    // 2) 重启后继续第 3 局：在旧账上累加，**不能覆盖**
+    await store.flush();
+    const since = timeline.length;
+    room.recordCompletedRound(fourWayRound(4, -2, -1, -1));
+    await store.flush();
+    expect(rawDeltaWrites(timeline, since)).toEqual([
+      ["A", 12], ["B", -1], ["C", -6], ["D", -5],
+    ]);
+  });
+
+  it("0 分荒庄：累计保持上一局的值，不归零", async () => {
+    const { store, room, timeline } = await startedRoom(fourUsers());
+    room.recordCompletedRound(fourWayRound(10, -5, -3, -2));
+    await store.flush();
+    const since = timeline.length;
+
+    room.recordCompletedRound(fourWayRound(0, 0, 0, 0));
+    await store.flush();
+    expect(rawDeltaWrites(timeline, since)).toEqual([
+      ["A", 10], ["B", -5], ["C", -3], ["D", -2],
+    ]);
+  });
+
+  it("托管座位（TRUSTEE）与人工座位走同一个结算入口，同样落库累计", async () => {
+    // 控制权只决定"谁在操作这一座"；结算入口是同一条
+    // broadcastState → recordCompletedRound，与 control 无关。
+    const users = fourUsers();
+    const { store, timeline } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 0 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: false, opening_balance: "600", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: false, opening_balance: "500", raw_delta: "0", control: "trustee", away: false, control_changed_at: new Date(9), reconnect_deadline: null },
+        { room_id: "room-1", user_id: "C", seat: 2, joined_at: new Date(2), ready: false, opening_balance: "500", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "D", seat: 3, joined_at: new Date(3), ready: false, opening_balance: "500", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+      ],
+    });
+    const room = store.rooms.get("room-1")!;
+    await store.flush();
+    const since = timeline.length;
+
+    room.recordCompletedRound(fourWayRound(10, -5, -3, -2));
+    await store.flush();
+    // B 是托管座位，账一样记了 —— 托管不丢分
+    expect(rawDeltaWrites(timeline, since)).toEqual([
+      ["A", 10], ["B", -5], ["C", -3], ["D", -2],
+    ]);
+  });
+
+  it("整场结算基于**完整**8 局累计（重启前后的账都算），account_delta 不被中途污染", async () => {
+    // 模拟：前 2 局在重启前（库里 raw_delta=+8/+1/-5/-4），重启后继续打满 8 局
+    const users = fourUsers();
+    const { store, timeline } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 2 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: false, opening_balance: "600", raw_delta: "8", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: false, opening_balance: "500", raw_delta: "1", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "C", seat: 2, joined_at: new Date(2), ready: false, opening_balance: "500", raw_delta: "-5", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "D", seat: 3, joined_at: new Date(3), ready: false, opening_balance: "500", raw_delta: "-4", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+      ],
+    });
+    const room = store.rooms.get("room-1")!;
+    await store.flush();
+    const since = timeline.length;
+
+    // 第 3~8 局，每局 +4 / -2 / -1 / -1
+    for (let index = 0; index < 6; index += 1) room.recordCompletedRound(fourWayRound(4, -2, -1, -1));
+    await store.flush();
+
+    // 最终累计：8+24=32、1-12=-11、-5-6=-11、-4-6=-10
+    const expected = [["A", 32], ["B", -11], ["C", -11], ["D", -10]];
+    const finalUpserts = statements(timeline, "insert:match_room_players", since);
+    expect(finalUpserts).toHaveLength(4);
+    for (const [userId, delta] of expected) {
+      const row = finalUpserts.find((entry) => entry[1] === userId)!;
+      // raw_delta 是完整累计（不是只有重启后那 6 局）
+      expect(row![6]).toBe(delta);
+      // account_delta 有真实入账（opening 500/600 都够扣，不会被 cap 清零）
+      expect(row![7]).toBe(delta);
+    }
+    // 每个非零入账都有一条流水
+    expect(statements(timeline, "insert:point_ledger", since)).toHaveLength(4);
+  });
+
+  it("load 对账：raw_delta 与已结算小场之和不一致时告警，但不自动改写", async () => {
+    const users = fourUsers();
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const { store } = await loadedStore(users, {
+        rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 2 }],
+        players: [
+          { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: false, opening_balance: "600", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+          { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: false, opening_balance: "500", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+          { room_id: "room-1", user_id: "C", seat: 2, joined_at: new Date(2), ready: false, opening_balance: "500", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+          { room_id: "room-1", user_id: "D", seat: 3, joined_at: new Date(3), ready: false, opening_balance: "500", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        ],
+        // 库里已结算的小场之和：A +8 / B +1 / C -5 / D -4
+        roundTotals: [
+          { room_id: "room-1", player_id: "A", total: 8 },
+          { room_id: "room-1", player_id: "B", total: 1 },
+          { room_id: "room-1", player_id: "C", total: -5 },
+          { room_id: "room-1", player_id: "D", total: -4 },
+        ],
+      });
+
+      const room = store.rooms.get("room-1")!;
+      // 恢复值仍是 raw_delta（0），**没有被偷偷改成对账值**
+      expect([...room.rawDeltas.entries()]).toEqual([
+        ["A", 0], ["B", 0], ["C", 0], ["D", 0],
+      ]);
+      // 但不一致被明确说了出来
+      const output = warn.mock.calls.map((call) => String(call[0])).join("");
+      expect(output).toContain("大局累计与已结算小场不一致");
+      expect(output).toContain("raw_delta=0");
+      expect(output).toContain("已结算之和=8");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("事务原子性：累计写失败 ⇒ 整个小局事务回滚，不能'记了小局但没记累计'", async () => {
+    // fakeDatabase 的 failOn 会让 UPDATE 匹配时抛错 —— 相当于累计那条写失败
+    const { store, room, timeline } = await startedRoom(fourUsers(), { failOn: "UPDATE match_room_players" });
+    const since = timeline.length;
+
+    room.recordCompletedRound(fourWayRound(10, -5, -3, -2));
+    await expect(store.flush()).rejects.toThrow("database offline");
+
+    // 事务回滚：这一局**整个**没落盘（BEGIN...ROLLBACK，没有 COMMIT）
+    const flow = writes(timeline, since);
+    expect(flow).toContain("ROLLBACK");
+    expect(flow).not.toContain("COMMIT");
   });
 });
