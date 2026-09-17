@@ -665,3 +665,441 @@ describe("WebSocket 群聊推送", () => {
 function suitOf(tile: Tile): Suit {
   return (["wan", "tong", "tiao"] as const)[Math.floor(tile / 9)]!;
 }
+
+/**
+ * 一直读到出现满足条件的帧（超时抛错），中间的帧直接丢掉。
+ *
+ * 必须用这一种「同一个 waiter 反复读」的写法，不能用「短超时轮询 + 捕获」：
+ * `TestClient.next` 超时后那个 waiter 不会被摘掉，下一次到达的帧会被喂给一个已经 reject 的
+ * promise —— 帧被吞掉，后面的断言就会看到"少了几帧"这种莫名其妙的现象。
+ */
+async function readUntil(
+  client: TestClient,
+  predicate: (message: any) => boolean,
+  timeoutMs = 20_000,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("timeout waiting for a matching frame");
+    const message = await client.next(remaining);
+    if (predicate(message)) return message;
+  }
+}
+
+/**
+ * 等一个条件成立（轮询）。用于"断线"这类**不产生任何帧**的状态变化：
+ * 客户端 destroy 掉 socket 之后，服务端要过一个事件循环才看得到 close，
+ * 而 disconnect 本身不广播任何东西，没有帧可以等。
+ */
+async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (condition()) return;
+    if (Date.now() > deadline) throw new Error("condition never became true");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe("退出托管与重新接管", () => {
+  let nextPort = 4300;
+
+  /**
+   * 四人开局并推进到「行牌」阶段。
+   *
+   * `roundsPlayed` 用来把开局点抬到「第 N+1 局」：`MatchRoom.completedRounds` 是公开字段，
+   * `startMatch` 用 `completedRounds + 1` 当本局局号，所以设 1 就等于"这一局是第 2 局"。
+   * 这样"第 2 局退出、第 4 局回来"不用真的先打一局半。
+   */
+  async function playingMatch(options: {
+    playTimeoutMs?: number;
+    claimTimeoutMs?: number;
+    interRoundPauseMs?: number;
+    reconnectWindowMs?: number;
+    roundsPlayed?: number;
+  } = {}) {
+    const { dependencies, tokens } = fixture();
+    const port = (nextPort += 1);
+    const wss = await createWebSocketServer(dependencies, port, {
+      playTimeoutMs: options.playTimeoutMs ?? 15_000,
+      claimTimeoutMs: options.claimTimeoutMs ?? 8_000,
+      interRoundPauseMs: options.interRoundPauseMs ?? 3_000,
+      ...(options.reconnectWindowMs === undefined ? {} : { reconnectWindowMs: options.reconnectWindowMs }),
+    });
+    wssInstances.push(wss);
+
+    const names = ["甲", "乙", "丙", "丁"];
+    const userIds = names.map((name) => createBetaUser(dependencies, name));
+    const room = makeRoom(dependencies, userIds);
+    if (options.roundsPlayed !== undefined) room.completedRounds = options.roundsPlayed;
+
+    const clients: TestClient[] = [];
+    for (const id of userIds) {
+      const client = new TestClient();
+      await client.connect(port);
+      client.send({ type: "auth", token: await tokens.issueUserToken(id), roomId: room.roomId });
+      await readUntil(client, (message) => message.type === "room");
+      clients.push(client);
+    }
+
+    clients[0]!.send({ type: "start" });
+    for (const client of clients) {
+      await readUntil(client, (message) => message.type === "game" && message.state.phase === "swapping");
+    }
+    for (const client of clients) client.send({ type: "auto-swap" });
+    for (const client of clients) {
+      await readUntil(client, (message) => message.type === "game" && message.state.phase === "missing");
+    }
+    for (const client of clients) client.send({ type: "auto-missing" });
+    const states: any[] = [];
+    for (const client of clients) {
+      states.push((await readUntil(client, (message) => message.type === "game" && message.state.phase === "playing")).state);
+    }
+
+    return { dependencies, tokens, room, clients, userIds, states, port };
+  }
+
+  it("主动退出：立刻转托管，座位/手牌/积分一个都不少", async () => {
+    const { room, clients, userIds } = await playingMatch();
+    const before = room.players.get(userIds[1]!);
+    const beforePlayers = room.players.size;
+    const beforeSeat = before!.seat;
+    const beforePoints = before!.account.points;
+
+    clients[1]!.send({ type: "quit" });
+
+    // 控制权立刻落到服务器手上 —— 不等 120 秒（那是异常断线的口径）
+    await readUntil(clients[1]!, (message) => message.type === "game" && message.state.control === "trustee");
+    expect(room.players.get(userIds[1]!)!.control).toBe("trustee");
+
+    // 牌、座次、积分、大局归属全部保留
+    expect(room.players.size).toBe(beforePlayers);
+    expect(room.players.get(userIds[1]!)!.seat).toBe(beforeSeat);
+    expect(room.players.get(userIds[1]!)!.account.points).toBe(beforePoints);
+    expect(room.players.get(userIds[1]!)!.account.activeMatchId).toBe(room.roomId);
+    expect(room.status).toBe("playing");
+
+    // 另外三家看得见「这一座在托管」—— 否则会一直等"他怎么还不出牌"
+    const seen = await readUntil(
+      clients[0]!,
+      (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === beforeSeat && player.presence === "trustee"),
+    );
+    expect(seen.state.players.find((player: any) => player.seat === beforeSeat).presence).toBe("trustee");
+  });
+
+  it("托管座位：服务端不给可用操作，且发来的动作一律被拒", async () => {
+    const { clients, userIds, room } = await playingMatch();
+    clients[2]!.send({ type: "quit" });
+    // 消费到"这一座已经托管"那一帧为止；它后面紧跟着的就是这一座的 actions 帧。
+    await readUntil(clients[2]!, (message) => message.type === "game" && message.state.control === "trustee");
+
+    // 1) 可用操作是空的 —— 两个客户端据此把牌桌置灰，
+    //    不会出现"按钮亮着，点了才报错"。
+    const actionsFrame = await clients[2]!.next();
+    expect(actionsFrame).toEqual({ type: "actions", actions: [] });
+
+    // 2) 硬闯：直接发一个出牌帧，必须被控制权闸门挡住（前端置灰不算权威）
+    const hand = (await readUntil(clients[2]!, (message) => message.type === "game")).state.hand as Tile[];
+    clients[2]!.send({ type: "discard", tile: hand[0]! });
+    const error = await readUntil(clients[2]!, (message) => message.type === "error");
+    expect(error.message).toBe("SEAT_UNDER_TRUSTEE");
+    // 座位还在、人还在、牌局还在
+    expect(room.players.get(userIds[2]!)!.seat).toBe(2);
+    expect(room.players.has(userIds[2]!)).toBe(true);
+    expect(room.status).toBe("playing");
+  });
+
+  it("重新接管：控制权回到人工，之后动作不再被控制权闸门挡住", async () => {
+    const { clients, states, room, userIds } = await playingMatch({ playTimeoutMs: 30_000, claimTimeoutMs: 30_000 });
+    // 让**当前该走的那一家**退出：托管的 delay 是 0，所以只有轮到他时状态才会前进
+    const acting = states[0]!.currentPlayerSeat as number;
+
+    clients[acting]!.send({ type: "quit" });
+    await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.control === "trustee");
+    const drifted = await readUntil(
+      clients[acting]!,
+      (message) => message.type === "game" && message.state.discards.length > 0,
+    );
+    expect(drifted.state.control).toBe("trustee");
+
+    clients[acting]!.send({ type: "request_takeover" });
+    const taken = await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.control === "human");
+    expect(taken.state.control).toBe("human");
+    expect(room.players.get(userIds[acting]!)!.control).toBe("human");
+
+    // 幂等：再点一次不报错，也不改变什么
+    clients[acting]!.send({ type: "request_takeover" });
+    const again = await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.control === "human");
+    expect(again.state.control).toBe("human");
+
+    /*
+     * 真正的验收：接管之后人工动作要**进到引擎**，而不是被控制权闸门拦在门外。
+     *
+     * 这一手可能因为"还没轮到你"被引擎拒绝 —— 那不重要，重要的是拒绝的理由
+     * 不能是 `SEAT_UNDER_TRUSTEE`。两种情况（这一步成功 / 因为时机被引擎拒）都说明闸门放行了，
+     * 而"被闸门拦住"那一条在「托管座位」那个用例里已经单独验过。
+     */
+    const hand = (await readUntil(clients[acting]!, (message) => message.type === "game")).state.hand as Tile[];
+    clients[acting]!.send({ type: "discard", tile: hand[0]! });
+    const rejection = await readUntil(clients[acting]!, (message) => message.type === "error", 1200).catch(() => null);
+    expect(rejection?.message ?? "").not.toBe("SEAT_UNDER_TRUSTEE");
+  });
+
+  it("从大厅回到牌桌：暂离标记被清掉，控制权不受影响", async () => {
+    const { clients, room, userIds, port, tokens } = await playingMatch({ playTimeoutMs: 60_000, claimTimeoutMs: 60_000 });
+    // 「返回大厅」走的是 REST 标记（见 POST /v1/rooms/:roomId/seat/presence），
+    // 这里直接打在房间上，验的是**回到牌桌**那一半：握手时要把 away 清掉。
+    room.markAway(userIds[3]!, true);
+    expect(room.players.get(userIds[3]!)!.away).toBe(true);
+
+    const returning = new TestClient();
+    await returning.connect(port);
+    returning.send({ type: "auth", token: await tokens.issueUserToken(userIds[3]!), roomId: room.roomId });
+    const entered = await readUntil(returning, (message) => message.type === "game");
+    expect(entered.state.away).toBe(false);
+    // 暂离从来不动控制权：回来就能直接接着打，不需要「重新接管」
+    expect(entered.state.control).toBe("human");
+    expect(room.players.get(userIds[3]!)!.away).toBe(false);
+    returning.close();
+    clients[3]!.close();
+  });
+
+  it("接管不重建、不回滚：同一小场里手牌与弃牌与接管前完全一致", async () => {
+    // 需求四：以服务器当前实时状态为准，不能回到退出时的旧状态，也不能重开这一局。
+    const { clients, states } = await playingMatch({ playTimeoutMs: 60_000, claimTimeoutMs: 60_000 });
+    // 让**当前该走的那一家**退出：托管是"立刻出牌"，所以只有轮到他时状态才会前进，
+    // 由此能观察到"服务器替这一座打过牌了"，再验证接管接上的是打完之后的状态。
+    const acting = states[0]!.currentPlayerSeat as number;
+    clients[acting]!.send({ type: "quit" });
+    await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.control === "trustee");
+
+    const drifted = await readUntil(
+      clients[acting]!,
+      (message) => message.type === "game" && message.state.discards.length > 0,
+    );
+
+    clients[acting]!.send({ type: "request_takeover" });
+    const after = await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.control === "human");
+
+    expect(after.state.roundNumber).toBe(drifted.state.roundNumber);
+    expect(after.state.hand).toEqual(drifted.state.hand);
+    expect(after.state.discards).toEqual(drifted.state.discards);
+    expect(after.state.tilesLeft).toBe(drifted.state.tilesLeft);
+    expect(after.state.currentPlayerSeat).toBe(drifted.state.currentPlayerSeat);
+  });
+
+  it("托管刚出过一手就接管：不会再多出一张牌（一个座位只有一个控制来源）", async () => {
+    // 这一条盯的是"已经排进事件循环队列的自动定时器"：
+    // 它开火时如果发现控制权世代变了就必须放弃，否则会替一个已经回到人工的座位再打一手。
+    const { clients, room, userIds } = await playingMatch({ playTimeoutMs: 60_000, claimTimeoutMs: 60_000 });
+    clients[1]!.send({ type: "quit" });
+    await readUntil(clients[1]!, (message) => message.type === "game" && message.state.control === "trustee");
+
+    clients[1]!.send({ type: "request_takeover" });
+    const taken = await readUntil(clients[1]!, (message) => message.type === "game" && message.state.control === "human");
+    const handAfter = taken.state.hand.length;
+    const discardsAfter = taken.state.discards.length;
+
+    // 人工控制下的超时是 60 秒，所以这 400 毫秒里服务器**不该**再替这一座动任何一手。
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    clients[1]!.send({ type: "request_takeover" }); // 只是要一帧最新的，不改状态
+    const later = await readUntil(clients[1]!, (message) => message.type === "game" && message.state.roundNumber === taken.state.roundNumber);
+    expect(later.state.hand.length).toBe(handAfter);
+    expect(later.state.discards.length).toBe(discardsAfter);
+    expect(room.players.get(userIds[1]!)!.control).toBe("human");
+  });
+
+  it("异常断线满 120 秒自动转托管；之后回来仍能进入并接管", async () => {
+    // 新口径：120 秒是「人工控制权保留多久」，**不是**「禁止重新进入」。
+    const { clients, room, userIds, port, tokens } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+      reconnectWindowMs: 150,
+    });
+
+    clients[2]!.close();
+    // 断线这一步不广播任何帧，所以要等条件成立而不是等帧
+    await waitFor(() => room.players.get(userIds[2]!)!.reconnectDeadline !== undefined);
+    expect(room.players.get(userIds[2]!)!.control).toBe("human");
+
+    // 到点：这一座交给服务器（并广播给另外三家）
+    await readUntil(
+      clients[0]!,
+      (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === 2 && player.presence === "trustee"),
+      5000,
+    );
+    expect(room.players.get(userIds[2]!)!.control).toBe("trustee");
+
+    // 人回来了：**允许进入**（不再抛 RECONNECT_WINDOW_EXPIRED），但进来≠接管
+    const returning = new TestClient();
+    await returning.connect(port);
+    returning.send({ type: "auth", token: await tokens.issueUserToken(userIds[2]!), roomId: room.roomId });
+    const entered = await readUntil(returning, (message) => message.type === "game");
+    expect(entered.state.control).toBe("trustee");
+    expect(entered.state.seat).toBe(2);
+
+    returning.send({ type: "request_takeover" });
+    const taken = await readUntil(returning, (message) => message.type === "game" && message.state.control === "human");
+    expect(taken.state.control).toBe("human");
+    expect(room.players.get(userIds[2]!)!.control).toBe("human");
+    returning.close();
+  });
+
+  it("第 2 局退出、第 4 局才回来接管：拿到的是第 4 局的当前状态", async () => {
+    const { clients, room, userIds } = await playingMatch({
+      playTimeoutMs: 20,
+      claimTimeoutMs: 20,
+      interRoundPauseMs: 0,
+      roundsPlayed: 1, // 本局 = 第 2 局
+    });
+    const firstRound = (await readUntil(clients[1]!, (message) => message.type === "game")).state.roundNumber;
+    expect(firstRound).toBe(2);
+
+    clients[1]!.send({ type: "quit" });
+    await readUntil(clients[1]!, (message) => message.type === "game" && message.state.control === "trustee");
+
+    // 一路托管到第 4 局
+    await readUntil(clients[1]!, (message) => message.type === "game" && message.state.roundNumber >= 4);
+
+    clients[1]!.send({ type: "request_takeover" });
+    const taken = await readUntil(clients[1]!, (message) => message.type === "game" && message.state.control === "human");
+    expect(taken.state.roundNumber).toBeGreaterThanOrEqual(4);
+    expect(taken.state.roundNumber).not.toBe(2);
+    expect(room.players.get(userIds[1]!)!.seat).toBe(1);
+  });
+
+  it("大局打完之后不能再接管（第 8 局结束）", async () => {
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 20,
+      claimTimeoutMs: 20,
+      interRoundPauseMs: 0,
+      roundsPlayed: 7, // 这一局是第 8 局，打完就整场结束
+    });
+
+    clients[1]!.send({ type: "quit" });
+    await readUntil(clients[1]!, (message) => message.type === "game" && message.state.control === "trustee");
+    await readUntil(clients[1]!, (message) => message.type === "match-finished", 30_000);
+
+    expect(room.status).toBe("finished");
+    // 已结束的大局：接管请求被拒，而且托管/暂离关系已经作废
+    for (const player of room.players.values()) expect(player.control).toBe("human");
+
+    clients[1]!.send({ type: "request_takeover" });
+    const error = await readUntil(clients[1]!, (message) => message.type === "error");
+    expect(error.message).toBe("Match has not started");
+  });
+
+  it("暂离与回桌：另外三家实时看到「暂离」出现与消失", async () => {
+    // 「返回大厅 → 显示暂离 → 回来 → 暂离消失」另外三家都必须实时看到。
+    // 暂离走的是 REST，而房间里的状态变化只能由实时层广播 —— 中间那座桥就是 seatEvents。
+    const { dependencies, tokens, clients, room, userIds, port } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+
+    // 1) 返回大厅。REST 路由写完状态就会发这一条，这里直接模拟路由层那一发；
+    //    路由自身"真的会发"由 app.test.ts 断言。
+    expect(room.markAway(userIds[1]!, true)).toBe(true);
+    dependencies.seatEvents.publish({ roomId: room.roomId, userId: userIds[1]! });
+
+    for (const index of [0, 2, 3]) {
+      const frame = await readUntil(clients[index]!, (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === 1 && player.presence === "away"));
+      const seat1 = frame.state.players.find((player: any) => player.seat === 1);
+      expect(seat1.presence).toBe("away");
+      // 暂离只是标签：座位、牌、控制权一样没动，他随时回来就能接着打
+      expect(seat1.handSize).toBeGreaterThan(0);
+      expect(room.players.get(userIds[1]!)!.control).toBe("human");
+    }
+
+    // 2) 回到牌桌：重新握手就够，暂离标记由服务端清掉
+    const back = new TestClient();
+    await back.connect(port);
+    back.send({ type: "auth", token: await tokens.issueUserToken(userIds[1]!), roomId: room.roomId });
+    expect((await readUntil(back, (message) => message.type === "game")).state.away).toBe(false);
+
+    // 另外三家也要看到「暂离」消失（这一发正是本轮补上的那种广播）
+    for (const index of [0, 2, 3]) {
+      await readUntil(clients[index]!, (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === 1 && player.presence === "online"), 30_000);
+    }
+    expect(room.players.get(userIds[1]!)!.away).toBe(false);
+    expect(room.players.get(userIds[1]!)!.control).toBe("human");
+    back.close();
+  });
+
+  it("暂离中主动退出按「托管」处理；重开页面不自动取消托管；接管后另外三家看到托管消失", async () => {
+    const { tokens, clients, room, userIds, port } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+
+    // 先暂离、再主动退出 —— 最容易写错的一条路径：
+    // 必须按「退出」处理（control = trustee、暂离标记一并清掉），不能退化成普通暂离。
+    expect(room.markAway(userIds[2]!, true)).toBe(true);
+    clients[2]!.send({ type: "quit" });
+    const quitted = await readUntil(
+      clients[2]!,
+      (message) => message.type === "game" && message.state.control === "trustee",
+    );
+    expect(quitted.state.away).toBe(false);
+    expect(quitted.state.players.find((player: any) => player.seat === 2).presence).toBe("trustee");
+
+    // 另外三家看到的是「托管中」，不是「暂离」
+    for (const index of [0, 1, 3]) {
+      await readUntil(clients[index]!, (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === 2 && player.presence === "trustee"));
+    }
+
+    // 托管中重新打开网页：只清暂离，**不自动取消托管**
+    const reopened = new TestClient();
+    await reopened.connect(port);
+    reopened.send({ type: "auth", token: await tokens.issueUserToken(userIds[2]!), roomId: room.roomId });
+    expect((await readUntil(reopened, (message) => message.type === "game")).state.control).toBe("trustee");
+
+    // 点「重新接管」：另外三家实时看到「托管中」消失
+    reopened.send({ type: "request_takeover" });
+    expect((await readUntil(
+      reopened,
+      (message) => message.type === "game" && message.state.control === "human",
+    )).state.control).toBe("human");
+    for (const index of [0, 1, 3]) {
+      await readUntil(clients[index]!, (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === 2 && player.presence === "online"), 30_000);
+    }
+    expect(room.players.get(userIds[2]!)!.control).toBe("human");
+    expect(room.players.get(userIds[2]!)!.away).toBe(false);
+    reopened.close();
+  });
+
+  it("没有定时器盯着也行：别人动一下，过期座位照样按墙钟交给服务器", async () => {
+    // 定时器是调度手段，不是真相来源。这条走的是"没人给它排过定时器"的路径 ——
+    // 也就是服务重启后从库里恢复出那个过期时刻的真实形态。
+    const { clients, room, userIds } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+
+    // 手工摆出"从库里读出来的旧时刻"：**没走 onClose**，所以没有任何内存定时器盯着它。
+    const stranded = room.players.get(userIds[2]!)!;
+    stranded.connected = false;
+    stranded.reconnectDeadline = new Date(Date.now() - 1_000);
+
+    // 另一家随便动一下 ⇒ 每一次操作前都会按墙钟重判一次
+    clients[0]!.send({ type: "request_takeover" });
+
+    for (const index of [0, 1, 3]) {
+      await readUntil(clients[index]!, (message) => message.type === "game"
+        && message.state.players.some((player: any) => player.seat === 2 && player.presence === "trustee"));
+    }
+    expect(stranded.control).toBe("trustee");
+    // 转托管之后不留旧时刻
+    expect(stranded.reconnectDeadline).toBeUndefined();
+    // 而发起动作的这一家本身不受影响
+    expect(room.players.get(userIds[0]!)!.control).toBe("human");
+  });
+});
+

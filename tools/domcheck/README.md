@@ -35,6 +35,7 @@ pnpm build          # 客户端产物 apps/client/dist，下面多数脚本要�
 | `check-board-geometry.mjs` | `PAGE`（默认本机 3000） | 本地 dist | ✓ 4 把 | **牌块的几何尺寸**（宽高比、副露方向、溢出）—— 这个要真浏览器，见下 |
 | `check-admin-console.mjs` | `PAGE`（默认本机 3012 `/admin`） | 服务端页面 | — | **管理台**：登录 → 签发 1 把密钥 → 明文当场显示；打印页面发出的每个请求及其状态码（红了能直接看出哪一步 401）。凭据从 `apps/server/.env` 读 |
 | `check-lobby-flow.mjs` | `PAGE`（默认本机 3012 `/debug`） | 服务端页面 | ✓ 4 把 | **大厅整条路**：密钥登录 → 大厅 → 建群 → 群聊（文字 + 图片）→ 建房 → 分享名片到群 → 别人在群里点名片进房 → 另两人用房号进房 → 四人到齐房主开局（**且全程没有准备键**）；顺带验群主转让与指定管理员。四个标签页 = 四个玩家，跑一次约 2~3 分钟 |
+| `check-takeover-flow.mjs` | 不连服务端 | 本地 dist | — | **牌桌菜单 / 退出二次确认 / 托管浮层 / 在场标识**：菜单必须是「继续游戏 / 返回大厅 / 退出游戏」三项且**不再有「返回房间」**、各按钮触发各自的动作；二次确认只有「取消 / 确认退出」两个出口且取消不会误退；托管浮层报「当前第 N/8 局」（用服务端下发的总小场数）、给「重新接管」、**不用整屏遮罩**（牌面要看得见）；在场徽标必须把「暂离」「托管中」「掉线」显示成**三个不同的词**（暂离 != 托管中，混用会让人以为"去大厅"等于"把座位交出去了"），且 `online` 不挂徽标、三种状态各带自己的类名 |
 
 最实用的一个是最先写的那个：`check-countdown.mjs` 直接调渲染函数，
 能把「渲染层没写对」与「数据没传到」当场分开 —— 省掉一整轮来回猜。
@@ -88,6 +89,7 @@ node tools/domcheck/check-countdown.mjs
 node tools/domcheck/check-meld-dom.mjs
 node tools/domcheck/check-two-click.mjs
 node tools/domcheck/check-match-points.mjs
+node tools/domcheck/check-takeover-flow.mjs
 ```
 
 要 4 把密钥的先建号（`seed-testers` 走的是管理接口，需要在 `apps/server` 下有 `.env`）：

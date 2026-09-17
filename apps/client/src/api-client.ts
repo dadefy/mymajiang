@@ -208,6 +208,24 @@ export class ApiClient {
   }
 
   /**
+   * 暂离 / 回到牌桌（presence = AWAY / ONLINE）。
+   *
+   * 「返回大厅」必须在**关掉实时通道之前**发这个请求：socket 一断，服务端就分不清
+   * "主动去了大厅"和"网络掉了"，而这两者对其他玩家显示的东西不一样。
+   * 它不动控制权 —— 回大厅的人随时回来就能直接操作，不需要「重新接管」。
+   */
+  setSeatPresence(
+    roomId: string,
+    away: boolean,
+  ): Promise<ApiResult<{ userId: string; control: string; away: boolean; presence: string }>> {
+    return this.call({
+      method: "POST",
+      path: `/v1/rooms/${encodeURIComponent(roomId)}/seat/presence`,
+      body: { away },
+    });
+  }
+
+  /**
    * REST 的开局：**只把房间状态改成 `playing`**，不会让实时层建局。
    *
    * 所以客户端不用它 —— 开局走实时通道的 `{type:"start"}`（见 `ClientFlow.startMatch`）。

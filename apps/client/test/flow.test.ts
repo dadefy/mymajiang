@@ -219,6 +219,103 @@ describe("ClientFlow", () => {
     expect(() => flow.claim("fly")).toThrow("Unsupported claim action");
   });
 
+  it("退出游戏与重新接管都走实时通道", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubRoom(http, "room-1");
+    await flow.createRoom();
+    const socket = sockets.last();
+    socket.sent.length = 0;
+
+    flow.quitGame();
+    expect(socket.sent).toEqual([{ type: "quit" }]);
+
+    socket.sent.length = 0;
+    flow.requestTakeover();
+    expect(socket.sent).toEqual([{ type: "request_takeover" }]);
+  });
+
+  it("托管状态只认服务端下发的控制权，不靠本地记", async () => {
+    // 需求八：能不能重新接管由服务端判定。客户端这边只是把 `match.control` 渲染出来 ——
+    // F5、断网重连、切前后台之后手上那帧可能是旧的，所以权威值随**每一帧**下发。
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubRoom(http, "room-1");
+    await flow.createRoom();
+    const socket = sockets.last();
+    const base = {
+      roomId: "room-1",
+      seat: 1,
+      roundNumber: 3,
+      totalRounds: 8,
+      phase: "playing" as const,
+      currentPlayerSeat: 0,
+      tilesLeft: 50,
+      hand: [],
+      melds: [],
+      missingSuit: null,
+      discards: [],
+      won: false,
+      players: [],
+    };
+
+    socket.serverSends({ type: "game", state: { ...base, control: "trustee", away: false } });
+    expect(flow.current).toMatchObject({ name: "room", match: { control: "trustee", roundNumber: 3 } });
+
+    socket.serverSends({ type: "game", state: { ...base, control: "human", away: false } });
+    expect(flow.current).toMatchObject({ name: "room", match: { control: "human" } });
+
+    // 老服务端不带这两个字段时按"人工、未暂离"处理，不会把牌桌锁死
+    socket.serverSends({ type: "game", state: { ...base } });
+    expect(flow.current).toMatchObject({ name: "room", match: { roomId: "room-1" } });
+    expect((flow.current as { match: { control?: string } }).match.control).toBeUndefined();
+  });
+
+  it("返回大厅：先标记暂离，再断开实时通道", async () => {
+    // 顺序很关键 —— socket 一断，服务端就分不清"主动去大厅"和"网络掉了"，
+    // 而这两者要显示的东西不一样（away = 还在，随时回来；disconnected = 掉线，之后会转托管）。
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubRoom(http, "room-1");
+    await flow.createRoom();
+    const socket = sockets.last();
+    http.onJson("POST", "/v1/rooms/room-1/seat/presence", 200, {
+      userId: SESSION.userId,
+      control: "human",
+      away: true,
+      presence: "away",
+    });
+
+    await flow.backHome();
+
+    const presence = http.requests.find((request) => request.path === "/v1/rooms/room-1/seat/presence");
+    expect(presence).toMatchObject({ method: "POST", body: { away: true } });
+    expect(socket.closed).toBe(true);
+    expect(flow.current).toMatchObject({ name: "home" });
+  });
+
+  it("托管中的座位被服务端拒绝时，提示告诉人先点重新接管", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubRoom(http, "room-1");
+    await flow.createRoom();
+
+    sockets.last().serverSends({ type: "error", message: "SEAT_UNDER_TRUSTEE" });
+
+    expect(flow.current).toMatchObject({
+      name: "room",
+      notice: "你的座位正在托管中，请先点「重新接管」",
+    });
+  });
+
   it("断线提示与恢复", async () => {
     vi.useFakeTimers();
     const { flow, http, sockets } = flowWith();

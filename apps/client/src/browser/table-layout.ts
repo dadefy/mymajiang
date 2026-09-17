@@ -84,6 +84,22 @@ export function installTableLayout(): void {
     #board .seat.right .profile-badges{left:auto;right:calc(100% + 4px)}
     .profile-badges span{display:block;min-width:26px;font-size:11px;padding:5px 3px;border-radius:4px;white-space:nowrap}
     .dealer-badge{background:#d8ad47;color:#302204;font-weight:bold}.missing-badge{background:#173e35;color:#e0ece0;border:1px solid #74927b}
+    /* 不在场徽标：在线的人不挂徽标，牌桌上要一眼看出的是异常的那几个。 */
+    .presence-badge{font-weight:bold}
+    .presence-badge.trustee{background:#d8ad47;color:#302204}
+    .presence-badge.away{background:#2c4a5e;color:#dceaf4;border:1px solid #6f93a8}
+    .presence-badge.disconnected{background:#5a2a2a;color:#f6dede;border:1px solid #a86a6a}
+    /* 牌桌菜单 / 二次确认 / 托管浮层，三者共用一个遮罩。 */
+    .overlay-mask{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#04120ecc;border-radius:18px;z-index:20}
+    .overlay-card{min-width:min(420px,80%);max-width:80%;padding:18px 20px;border-radius:14px;background:#10281f;border:1px solid #74927b;color:#eaf3ec;display:flex;flex-direction:column;gap:10px;text-align:left}
+    .overlay-card h2{margin:0;font-size:clamp(16px,1.8vw,22px)}
+    .overlay-card p{margin:0;font-size:clamp(12px,1.3vw,15px);line-height:1.6;color:#c5d7cd}
+    .overlay-card .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+    .overlay-card .actions button{flex:1 1 120px}
+    /* 托管浮层压在牌桌正中一小块，牌面仍然看得见 —— 看得见牌局正是这个状态要传达的信息。 */
+    .trustee-banner{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:15;display:flex;flex-direction:column;gap:10px;align-items:center;padding:18px 26px;border-radius:14px;background:#10281fe8;border:1px solid #d8ad47;color:#f4ead0;text-align:center}
+    .trustee-banner strong{font-size:clamp(16px,2vw,24px)}
+    .trustee-banner span{font-size:clamp(12px,1.4vw,16px);color:#e2d3a8}
     #board .seat>.seat-card>.seat-head{display:none}
     @media(max-width:780px){main{padding:4px}#board{border-width:6px}#bar{font-size:12px}.key-row input.text{min-width:0}.key-row{flex-wrap:nowrap}}
   `;

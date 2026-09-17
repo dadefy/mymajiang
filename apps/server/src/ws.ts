@@ -47,6 +47,14 @@ export interface WsServerOptions {
 export class WebSocketServer extends EventEmitter {
   private readonly standalone: Server | null;
   private readonly connections = new Set<WebSocketConnection>();
+  /**
+   * 由实时层挂上的"立即把所有进行中牌局的快照写盘"。
+   *
+   * 存在的唯一理由：牌局快照平时按 2 秒节流合并写，而进程收到 SIGTERM 时会立刻退出，
+   * 那个悬挂的延迟定时器**永远不会到点**。没有这个钩子，一次正常重启就会丢掉最后约 2 秒的操作。
+   * 它补的是"最后一次"，**不替代**运行期间的正常持久化。
+   */
+  flushRoundStates?: () => void;
 
   constructor(private readonly options: WsServerOptions, mode: "standalone" | "attached" = "standalone") {
     super();

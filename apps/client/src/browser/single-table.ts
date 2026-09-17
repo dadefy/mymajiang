@@ -30,7 +30,15 @@ export class SingleTable {
     const board = element("section"); board.id = "board";
     const match = screen.match;
     if (!match) return board;
-    const actions = screen.roundFinished ? [] : screen.actions;
+    /**
+     * 托管中：牌桌**只读**。
+     *
+     * 服务端已经在控制权闸门上拒掉托管座位的动作（那才是权威），这里置灰是为了
+     * 别让人点了没反应 —— 同时也顺手把"托管与人工同时出牌"的可能从 UI 侧掐掉。
+     * 牌面照常显示：看得见牌局是"托管中"这个状态本身要传达的信息。
+     */
+    const trustee = match.control === "trustee";
+    const actions = screen.roundFinished || trustee ? [] : screen.actions;
     this.swap.sync(match, actions, screen.notice);
     this.discard.sync(match, actions, screen.notice);
     const grid = element("div", { className: "discard-grid" });
@@ -47,6 +55,7 @@ export class SingleTable {
         matchDelta: settled?.matchDelta ?? player.matchDelta,
         dealer: match.dealerSeat === player.seat,
         missingSuit: player.missingSuit,
+        ...(player.presence ? { presence: player.presence } : {}),
       }));
       const hand = element("div", { className: "hand" });
       hand.setAttribute("aria-label", mine ? "我的手牌" : `${nicknameOf(screen.snapshot, player.seat)}的手牌，${player.handSize}张`);
@@ -61,25 +70,30 @@ export class SingleTable {
             }
             repaint();
           }, `tile${chosen ? " chosen" : ""}`);
-          node.disabled = match.phase === "swapping" ? !this.swap.enabled : !this.discard.canSelect(match, tile);
+          node.disabled = trustee || (match.phase === "swapping" ? !this.swap.enabled : !this.discard.canSelect(match, tile));
           hand.append(node);
         });
         const ops = element("div", { className: "ops row" });
-        if (match.phase === "swapping" && this.swap.enabled) {
-          const submit = button(`换这三张（${this.swap.length}/3）`, () => {
-            const tiles = this.swap.tiles(sortedHand(match.hand));
-            this.swap.submit(() => flow.swap(tiles)); repaint();
-          }, "primary");
-          submit.disabled = !this.swap.valid(sortedHand(match.hand));
-          ops.append(submit, button("自动换三张", () => { this.swap.submit(() => flow.autoSwap()); repaint(); }));
+        // 托管中一个操作按钮都不给：这一座现在由服务器操作，人工动作会被服务端拒绝。
+        if (trustee) {
+          ops.append(element("span", { className: "hint", text: "托管中 · 由服务器代打" }));
+        } else {
+          if (match.phase === "swapping" && this.swap.enabled) {
+            const submit = button(`换这三张（${this.swap.length}/3）`, () => {
+              const tiles = this.swap.tiles(sortedHand(match.hand));
+              this.swap.submit(() => flow.swap(tiles)); repaint();
+            }, "primary");
+            submit.disabled = !this.swap.valid(sortedHand(match.hand));
+            ops.append(submit, button("自动换三张", () => { this.swap.submit(() => flow.autoSwap()); repaint(); }));
+          }
+          if (match.phase === "missing" && actions.includes("choose-missing")) {
+            for (const suit of SUITS) ops.append(button(`定缺${SUIT_LABEL[suit]}`, () => flow.chooseMissing(suit)));
+          }
+          for (const spec of actionButtons(actions, match.phase)) {
+            ops.append(button(spec.label, () => runAction(flow, spec.kind), spec.primary ? "primary" : ""));
+          }
         }
-        if (match.phase === "missing" && actions.includes("choose-missing")) {
-          for (const suit of SUITS) ops.append(button(`定缺${SUIT_LABEL[suit]}`, () => flow.chooseMissing(suit)));
-        }
-        for (const spec of actionButtons(actions, match.phase)) {
-          ops.append(button(spec.label, () => runAction(flow, spec.kind), spec.primary ? "primary" : ""));
-        }
-        if (ops.childElementCount) card.append(ops);
+        card.append(ops);
       } else {
         for (let i = 0; i < player.handSize; i++) {
           const back = button("", () => {}, "tile card-back"); back.disabled = true;
@@ -95,7 +109,8 @@ export class SingleTable {
     }
     const center = element("div", { className: "center" }); center.id = "center";
     const phase = {swapping:"换三张",missing:"定缺",playing:"行牌",claiming:"等待碰杠胡",finished:"本小场结束"}[match.phase];
-    const status = screen.roundFinished ? "本小场结束" : match.phase === "playing"
+    const status = trustee ? "托管中 · 服务器代打"
+      : screen.roundFinished ? "本小场结束" : match.phase === "playing"
       ? (match.currentPlayerSeat === match.seat ? "轮到你出牌 · 点同一张牌两次确认" : `等待${nicknameOf(screen.snapshot, match.currentPlayerSeat ?? 0)}出牌`)
       : phase;
     center.append(element("div", { className: "banner", text: `${roundLabel(match.roundNumber, match.totalRounds)} · ${status}` }), grid);

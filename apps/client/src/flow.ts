@@ -190,9 +190,15 @@ const DOMAIN_ERROR_TEXT: Record<string, string> = {
   "Not authenticated": "登录状态已失效，请重新登录",
   "ACCOUNT_NOT_ACTIVE": "账号已被停用",
   "ACCOUNT_WRITE_PENDING": "积分正在保存，请稍后重试",
-  // 断线重连有时间窗（见 packages/domain 的 reconnect）：窗口内回来能接着打，
-  // 超时就回不去了。这条原先会原样显示英文码给用户。
-  "RECONNECT_WINDOW_EXPIRED": "离开太久，那一局已经回不去了",
+  // 断线重连有时间窗（见 packages/domain 的 disconnect）：窗口内回来能接着打；
+  // 超时后座位转成托管，**人仍然能进来**（所以这条现在只在极少数路径上还会出现）
+  // ——超时不再等于"回不去了"。保留这句是为了老服务端与防御性分支。
+  "RECONNECT_WINDOW_EXPIRED": "离开太久，这一座已交给服务器代打；回到牌桌后点「重新接管」就能自己打",
+  // 托管中的座位不发动作（服务端的控制权闸门）。正常界面下点不到，
+  // 但代理缓存了旧页面、或者用户手快点了两下时可能撞上，给一句能照做的提示。
+  "SEAT_UNDER_TRUSTEE": "你的座位正在托管中，请先点「重新接管」",
+  "MATCH_NOT_ACTIVE": "这一局已经结束了",
+  "SEAT_NOT_OWNED": "这个座位不属于当前账号",
 };
 
 function translateDomainError(message: string): string | undefined {
@@ -564,6 +570,28 @@ export class ClientFlow {
     this.socket?.send({ type: "added-kong" });
   }
 
+  /**
+   * 退出游戏：把这一座交给服务器托管。
+   *
+   * 服务端立刻接管（不等 120 秒），玩家、座位、手牌、积分、大局归属**全都不变**。
+   * 要回来时是点「重新接管」，不是自动恢复 —— 所以这个动作是"放弃人工操作"，
+   * 而不是"离开这局"。
+   */
+  quitGame(): void {
+    this.socket?.send({ type: "quit" });
+  }
+
+  /**
+   * 重新接管：请求把控制权拿回人工。
+   *
+   * 客户端只是**提出请求**：是否允许完全由服务端判定（token、是不是这间房的玩家、
+   * 座位归属、大局是否仍在进行、当前是否真的在托管）。
+   * 结果通过随后的 `game` 帧回来 —— `match.control` 变成 `human` 才说明成功了。
+   */
+  requestTakeover(): void {
+    this.socket?.send({ type: "request_takeover" });
+  }
+
   // ---------- 群聊 ----------
 
   /**
@@ -595,6 +623,14 @@ export class ClientFlow {
   /** 回主页：退订并断开群聊通道，然后重拉主页列表（群的「最近消息」已经变了）。 */
   async backHome(): Promise<void> {
     if (this.screen.name === "chat") this.socket?.unsubscribeGroup(this.screen.groupId);
+    // 「返回大厅」= 暂离，必须在**断开实时通道之前**告诉服务端：
+    // socket 一断，服务端就分不清"主动去大厅"和"网络掉了"，而这两者要显示的东西不一样
+    // （away = 还在，随时回来；disconnected = 掉线，120 秒后服务器接管）。
+    // 它不改变控制权：回大厅的人回来就能直接操作，不需要「重新接管」。
+    // 请求失败也不拦着人回大厅 —— 那只是标签不准，牌局本身不受影响。
+    if (this.screen.name === "room" && this.roomId) {
+      await this.api.setSeatPresence(this.roomId, true);
+    }
     this.closeSocket();
     this.earlierCursor = undefined;
     // 带着进行中的对局回主页：从群聊退回主页时，那个入口不该消失。

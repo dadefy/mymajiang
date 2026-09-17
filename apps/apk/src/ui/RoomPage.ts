@@ -38,6 +38,11 @@ export class RoomPage {
   readonly view: Laya.Box;
   private readonly statusLabel: Laya.Label;
   private readonly exitButton: Laya.Box;
+  /** 牌桌菜单入口。只在牌局进行中出现 —— 那时候"退出房间"不是一个合法动作。 */
+  private readonly menuButton: Laya.Box;
+  /** 托管中压在牌桌正中的那一块：报「正在托管中 · 第 N/8 局」并给「重新接管」。 */
+  private readonly trusteePanel: Laya.Box;
+  private readonly trusteeRoundLabel: Laya.Label;
   private readonly noticeLabel: Laya.Label;
   private readonly playerHeading: Laya.Label;
   private readonly playerList: Laya.VBox;
@@ -92,7 +97,13 @@ export class RoomPage {
     const header = box(this.view, 0, 0, 750, 100, THEME.panelBg);
     this.statusLabel = label(header, "", 30, { bold: true });
     this.statusLabel.pos(30, 34);
+    // 两种退出在同一个位置上互斥出现：
+    //   等人/未开局 → 「退出」= 真的离开房间（waiting 期合法，服务端会放行）
+    //   牌局进行中  → 「菜单」= 继续游戏 / 返回大厅 / 退出游戏
+    //                  （这一阶段服务端拒绝"离开房间"，必须走托管那条路）
     this.exitButton = textButton(header, "退出", 610, 20, 110, 60, THEME.panelBg2, () => void this.flow.leaveRoom());
+    this.menuButton = textButton(header, "菜单", 610, 20, 110, 60, THEME.panelBg2, () => this.openTableMenu());
+    this.menuButton.visible = false;
 
     this.noticeLabel = label(this.view, "", 24, { width: 690, align: "center", color: THEME.warn, wordWrap: true });
     this.noticeLabel.pos(30, 112);
@@ -136,6 +147,15 @@ export class RoomPage {
       this.resultOverlay.visible = false;
     });
     this.resultOverlay.visible = false;
+
+    // 托管浮层：压在后牌桌正中，**不全屏遮挡** —— 牌面看得见正是这个状态要传达的信息
+    // （另外三家在替你打）。这里只让人点不到牌，并给出唯一的出路：重新接管。
+    this.trusteePanel = box(this.view, 75, 560, 600, 250, THEME.panelBg2);
+    label(this.trusteePanel, "你的牌局正在托管中", 34, { width: 600, align: "center", bold: true, color: THEME.accent }).pos(0, 36);
+    this.trusteeRoundLabel = label(this.trusteePanel, "", 26, { width: 600, align: "center", color: THEME.warn });
+    this.trusteeRoundLabel.pos(0, 96);
+    textButton(this.trusteePanel, "重新接管", 175, 156, 250, 76, THEME.accentDark, () => this.flow.requestTakeover());
+    this.trusteePanel.visible = false;
   }
 
   show(screen: Screen): void {
@@ -169,6 +189,54 @@ export class RoomPage {
     this.stopPolling();
   }
 
+  /**
+   * 牌桌菜单：继续游戏 / 返回大厅 / 退出游戏。
+   *
+   * 三个动作的语义完全不同，所以文案里把差别写清楚 ——
+   * 「返回大厅」只是暂时离开牌桌（控制权还在玩家手上，回来直接接着打）；
+   * 「退出游戏」是把座位交给服务器托管（要回来得点「重新接管」）。
+   */
+  private openTableMenu(): void {
+    const overlay = box(this.view, 0, 0, 750, 1334, "#0b1120e6");
+    overlay.zOrder = 100;
+    label(overlay, "牌桌菜单", 36, { width: 620, color: THEME.text, bold: true, align: "center" }).pos(65, 360);
+    textButton(overlay, "继续游戏", 175, 450, 400, 88, THEME.accentDark, () => overlay.destroy(true));
+    textButton(overlay, "返回大厅", 175, 560, 400, 88, THEME.panelBg2, () => {
+      overlay.destroy(true);
+      void this.flow.backHome();
+    });
+    textButton(overlay, "退出游戏", 175, 670, 400, 88, THEME.panelBg2, () => {
+      overlay.destroy(true);
+      this.confirmQuitGame();
+    });
+    label(overlay, "返回大厅：暂时离开牌桌，你仍属于这一局，随时可以回来接着打。", 22, { width: 620, color: THEME.textDim, wordWrap: true }).pos(65, 800);
+    label(overlay, "退出游戏：由服务器接管你的座位并自动代打，牌、座次与积分都保留。", 22, { width: 620, color: THEME.textDim, wordWrap: true }).pos(65, 890);
+  }
+
+  /**
+   * 退出前的二次确认。
+   *
+   * 这个动作不可逆地交出了操作权（要拿回来得点「重新接管」），所以必须让人明确点一次，
+   * 而不是在一次误触里就离开牌桌。
+   */
+  private confirmQuitGame(): void {
+    const overlay = box(this.view, 0, 0, 750, 1334, "#0b1120f2");
+    overlay.zOrder = 110;
+    label(overlay, "确定退出当前游戏吗？", 36, { width: 620, color: THEME.accent, bold: true, align: "center" }).pos(65, 440);
+    label(overlay, "退出后系统将自动托管你的座位，\n本次大局结束前你可以回来重新接管。", 26, {
+      width: 620,
+      color: THEME.text,
+      align: "center",
+      wordWrap: true,
+    }).pos(65, 520);
+    textButton(overlay, "取消", 100, 680, 250, 88, THEME.panelBg2, () => overlay.destroy(true));
+    textButton(overlay, "确认退出", 400, 680, 250, 88, THEME.accentDark, () => {
+      overlay.destroy(true);
+      // 服务端接管后会把控制权随下一帧下发，界面据此切成「托管中 + 重新接管」。
+      this.flow.quitGame();
+    });
+  }
+
   private renderAll(notice?: string): void {
     this.noticeLabel.visible = notice !== undefined;
     this.noticeLabel.text = notice ?? "";
@@ -178,6 +246,14 @@ export class RoomPage {
     this.statusLabel.text = `${number} · ${this.match ? STATUS_NAMES.playing : this.snapshot ? STATUS_NAMES[this.snapshot.status] : "连接中"}`;
     const inProgress = this.match !== null || this.snapshot?.status === "playing";
     this.exitButton.visible = !inProgress;
+    this.menuButton.visible = inProgress;
+
+    // 控制权由服务端下发（每帧都带），客户端只读。`trustee` = 这一座现在服务器在打。
+    const trustee = this.match?.control === "trustee";
+    this.trusteePanel.visible = trustee;
+    if (trustee && this.match) {
+      this.trusteeRoundLabel.text = `当前第 ${this.match.roundNumber} / ${this.match.totalRounds ?? 8} 局`;
+    }
 
     this.playerHeading.visible = false;
     this.playerList.parent.visible = false;
@@ -262,7 +338,12 @@ export class RoomPage {
           return `${meld.kind === "pong" ? "碰" : "杠"}${tileName(meld.tile)}`;
         })
         .join(" ");
-      const text = `${playerName(this.snapshot, player.seat)} · ${player.handSize}张${player.won ? " · 已胡" : ""}${melds ? ` · ${melds}` : ""}`;
+      // 在场状态要让另外三家看得见：托管中的座位是**服务器在打**，
+      // 不标出来的话别人会一直等"他怎么还不出牌"。
+      const presence = player.presence === "trustee" ? " · 托管中"
+        : player.presence === "away" ? " · 暂离"
+        : player.presence === "disconnected" ? " · 掉线" : "";
+      const text = `${playerName(this.snapshot, player.seat)} · ${player.handSize}张${player.won ? " · 已胡" : ""}${presence}${melds ? ` · ${melds}` : ""}`;
       const row = box(this.matchArea, 30 + index * 235, 82, 220, 78, player.won ? THEME.accentDark : THEME.panelBg2);
       label(row, text, 20, { width: 200, align: "center", wordWrap: true }).pos(10, 13);
     });
@@ -271,9 +352,12 @@ export class RoomPage {
   private renderHand(hand: Tile[], match: MatchState): void {
     const discardable = discardableIndexes(hand, match.missingSuit);
     const canDiscard = actionAvailable(this.actions, "discard") && match.phase === "playing";
+    // 托管中：牌照常显示（看得见牌局），但一张都不能点 —— 这一座现在由服务器操作。
+    // 服务端那边也会拒（`SEAT_UNDER_TRUSTEE`），这里只是别让人点了没反应。
+    const trustee = match.control === "trustee";
     hand.forEach((tile, index) => {
       const selected = this.selectedIndexes.has(index);
-      const enabled = (match.phase === "swapping" && actionAvailable(this.actions, "swap")) || (canDiscard && discardable.has(index));
+      const enabled = !trustee && ((match.phase === "swapping" && actionAvailable(this.actions, "swap")) || (canDiscard && discardable.has(index)));
       const card = box(this.matchArea, 27 + index * 49, selected ? 620 : 634, 45, 69, selected ? THEME.accentDark : "#f3ead7");
       card.alpha = enabled ? 1 : 0.48;
       const image = new Laya.Image();
@@ -288,6 +372,13 @@ export class RoomPage {
 
   private renderControls(hand: Tile[], match: MatchState): void {
     const controls = box(this.matchArea, 30, 735, 690, 220, THEME.panelBg);
+    // 托管中：一个操作按钮都不给。服务端同样会拒绝（见 ws-server 的控制权闸门），
+    // 这里说明一下"为什么点不动"，否则看起来像卡住了。
+    if (match.control === "trustee") {
+      label(controls, "托管中 · 由服务器代打", 28, { width: 650, align: "center", color: THEME.accent }).pos(20, 60);
+      label(controls, "想自己打就点牌桌中间的「重新接管」", 22, { width: 650, align: "center", color: THEME.textDim }).pos(20, 120);
+      return;
+    }
     if (match.phase === "swapping" && actionAvailable(this.actions, "swap")) {
       const valid = swapSelectionIsValid(hand, this.selectedIndexes);
       label(controls, valid ? "已选同花色三张牌" : `请选择同一花色的三张牌（${this.selectedIndexes.size}/3）`, 22, {

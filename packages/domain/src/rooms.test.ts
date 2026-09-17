@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MatchRoom, reserveAccountWrite, type RecordedRound, type UserAccount } from "./index.js";
+import { MatchRoom, presenceOf, reserveAccountWrite, type RecordedRound, type UserAccount } from "./index.js";
 
 function account(userId: string, points = 500): UserAccount {
   return {
@@ -12,10 +12,13 @@ function account(userId: string, points = 500): UserAccount {
   };
 }
 
-function readyRoom(points = [600, 500, 500, 500]): { room: MatchRoom; users: UserAccount[] } {
+function readyRoom(
+  points = [600, 500, 500, 500],
+  clock?: () => Date,
+): { room: MatchRoom; users: UserAccount[] } {
   const users = [account("A", points[0]), account("B", points[1]), account("C", points[2]), account("D", points[3])];
   let joinedAt = 0;
-  const room = new MatchRoom("room-1", "123456", users[0]!, () => new Date(joinedAt++));
+  const room = new MatchRoom("room-1", "123456", users[0]!, clock ?? (() => new Date(joinedAt++)));
   room.join(users[1]!);
   room.join(users[2]!);
   room.join(users[3]!);
@@ -164,13 +167,186 @@ describe("match room", () => {
 
     room.disconnect("B");
     now += 120_000;
-    room.reconnect("B");
-    expect(room.players.get("B")).toMatchObject({ connected: true });
+    expect(room.reconnect("B")).toBe(false);
+    expect(room.players.get("B")).toMatchObject({ connected: true, control: "human" });
+  });
+
+  it("窗口过期后把控制权交给服务器，但人依然能进来", () => {
+    // 这是 2026-09-17 改过的语义：120 秒**不再是禁止重新进入的期限**。
+    // 旧行为是抛 RECONNECT_WINDOW_EXPIRED，结果是"掉线超过 2 分钟的人再也回不到
+    // 自己的座位，而座位会被继续代打到第 8 局" —— 与"座位保留到本场结束"直接冲突。
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const users = [account("A"), account("B"), account("C"), account("D")];
+    const room = new MatchRoom("room-expire", "123456", users[0]!, () => new Date(now));
+    for (const user of users.slice(1)) room.join(user);
+    for (const user of users) room.setReady(user.userId, true);
+    room.start("A");
 
     room.disconnect("B");
     now += 120_001;
-    expect(() => room.reconnect("B")).toThrow("RECONNECT_WINDOW_EXPIRED");
-    expect(room.players.get("B")).toMatchObject({ connected: false });
+
+    // 到期：控制权转给服务器（实时层负责落库与广播）
+    expect(room.expireReconnectWindow("B")).toBe(true);
+    expect(room.players.get("B")).toMatchObject({ control: "trustee", connected: false });
+    // 幂等：再调一次没有变化
+    expect(room.expireReconnectWindow("B")).toBe(false);
+
+    // 第 4 局才回来也进得来：不再抛错，且**进来不等于接管**
+    expect(room.reconnect("B")).toBe(false);
+    expect(room.players.get("B")).toMatchObject({ connected: true, control: "trustee" });
+
+    // 点「重新接管」才拿回人工控制权
+    expect(room.resumeControl("B")).toBe(true);
+    expect(room.players.get("B")).toMatchObject({ control: "human" });
+    // 幂等：重复点不报错、返回 false
+    expect(room.resumeControl("B")).toBe(false);
+  });
+
+  it("主动退出立刻托管，不删座位、不动手牌、不动积分", () => {
+    const { room, users } = readyRoom();
+    room.start("A");
+    const before = {
+      players: room.players.size,
+      seats: [...room.players.values()].map((player) => player.seat),
+      points: users.map((user) => user.points),
+      activeMatchIds: users.map((user) => user.activeMatchId),
+      opening: [...room.openingBalances.entries()],
+    };
+
+    expect(room.quitToTrustee("B")).toBe(true);
+
+    expect(room.players.get("B")).toMatchObject({ control: "trustee" });
+    expect(room.players.size).toBe(before.players);
+    expect([...room.players.values()].map((player) => player.seat)).toEqual(before.seats);
+    expect(users.map((user) => user.points)).toEqual(before.points);
+    expect(users.map((user) => user.activeMatchId)).toEqual(before.activeMatchIds);
+    expect([...room.openingBalances.entries()]).toEqual(before.opening);
+    // 幂等
+    expect(room.quitToTrustee("B")).toBe(false);
+  });
+
+  it("托管座位断了连接也不开 120 秒窗口（操作权本来就不在玩家手上）", () => {
+    const { room } = readyRoom();
+    room.start("A");
+    room.quitToTrustee("B");
+    room.disconnect("B");
+    const player = room.players.get("B")!;
+    expect(player.reconnectDeadline).toBeUndefined();
+    expect(player.disconnectedAt).toBeUndefined();
+  });
+
+  it("暂离不等于断线：暂离免疫 120 秒窗口，不会被识别成托管", () => {
+    // 需求三的禁止项：「返回大厅 → 被识别成托管」必须不成立。
+    // 暂离的人**明确表示过**自己还在这一局，所以这一座永远不排保留期，
+    // 只能由本人点「退出游戏」转托管。
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { room } = readyRoom([600, 500, 500, 500], () => new Date(now));
+    room.start("A");
+
+    expect(room.markAway("B", true)).toBe(true);
+    room.disconnect("B");
+    const player = room.players.get("B")!;
+    expect(player.away).toBe(true);
+    // 暂离只是标签：控制权仍在玩家手上，回来不需要"重新接管"。
+    expect(player.control).toBe("human");
+    expect(presenceOf(player)).toBe("away");
+    // **关键**：暂离不留 120 秒保留期
+    expect(player.reconnectDeadline).toBeUndefined();
+    expect(player.disconnectedAt).toBeUndefined();
+
+    // 时间过去很久（远超 120 秒）也不会自动转托管
+    now += 600_000;
+    expect(room.expireReconnectWindow("B")).toBe(false);
+    expect(player.control).toBe("human");
+    expect(presenceOf(player)).toBe("away");
+
+    // 回来：直接恢复人工操作，暂离标识消失
+    expect(room.reconnect("B")).toBe(false);
+    room.markAway("B", false);
+    expect(presenceOf(room.players.get("B")!)).toBe("online");
+    expect(room.players.get("B")).toMatchObject({ control: "human" });
+  });
+
+  it("markAway 幂等：重复标记同一状态返回 false（调用方据此决定要不要广播）", () => {
+    const { room } = readyRoom();
+    room.start("A");
+
+    expect(room.markAway("B", true)).toBe(true);
+    expect(room.markAway("B", true)).toBe(false);
+    expect(room.markAway("B", false)).toBe(true);
+    expect(room.markAway("B", false)).toBe(false);
+  });
+
+  it("整房按墙钟结算：只转真正过期的那一座，且幂等", () => {
+    // 判据是**绝对时刻**，所以"停机期间"照样流逝：这里用推进时钟来模拟。
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { room } = readyRoom([600, 500, 500, 500], () => new Date(now));
+    room.start("A");
+
+    room.disconnect("B"); // 保护期到 00:02:00
+    room.quitToTrustee("C"); // 主动退出：没有保护期
+    room.markAway("D", true);
+    room.disconnect("D"); // 暂离：不排保护期
+
+    // 还没到点 ⇒ 谁都不转
+    expect(room.expireOverdueControl()).toEqual([]);
+    expect(room.players.get("B")).toMatchObject({ control: "human" });
+
+    // 到点了 ⇒ 只有 B
+    now += 120_001;
+    expect(room.expireOverdueControl()).toEqual(["B"]);
+    expect(room.players.get("B")).toMatchObject({ control: "trustee" });
+    expect(room.players.get("B")!.reconnectDeadline).toBeUndefined();
+    // 已经托管的 C、暂离中的 D 都不受影响
+    expect(room.players.get("C")).toMatchObject({ control: "trustee" });
+    expect(room.players.get("D")).toMatchObject({ control: "human", away: true });
+
+    // 幂等：再判一次什么都不发生（timer / auth / load 多入口不会重复动作）
+    expect(room.expireOverdueControl()).toEqual([]);
+  });
+
+  it("在场状态是三个维度推出来的，不是单独存的字段", () => {
+    const { room } = readyRoom();
+    room.start("A");
+    const player = room.players.get("B")!;
+
+    expect(presenceOf(player)).toBe("online");
+    player.connected = false;
+    expect(presenceOf(player)).toBe("disconnected");
+    player.away = true;
+    expect(presenceOf(player)).toBe("away");
+    // 托管优先于暂离与断线：座位上服务器在打，别人该看到的就是"托管"
+    player.control = "trustee";
+    expect(presenceOf(player)).toBe("trustee");
+  });
+
+  it("大局结算时把托管与暂离关系一并作废", () => {
+    // 需求七：第 8 小局结束、大局结算之后，不能再"重新接管"一个已结束的大局。
+    // 房间对象还在内存里，不清就会带着 trustee 残留。
+    const { room } = readyRoom();
+    room.start("A");
+    room.quitToTrustee("B");
+    room.markAway("C", true);
+    const round: RecordedRound = {
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: -100 },
+        { playerId: "B", delta: 100 },
+      ],
+      winnerSeats: [1],
+      nextDealerSeat: 1,
+    };
+    for (let index = 0; index < 7; index += 1) room.recordCompletedRound(round);
+    expect(room.recordCompletedRound(round)?.reason).toBe("completed");
+
+    for (const player of room.players.values()) {
+      expect(player.control).toBe("human");
+      expect(player.away).toBe(false);
+      expect(player.controlChangedAt).toBeUndefined();
+    }
+    // 已结束的房间不接受接管（幂等返回 false，不抛错）
+    expect(room.resumeControl("B")).toBe(false);
+    expect(() => room.quitToTrustee("B")).toThrow("not playing");
   });
 });
 

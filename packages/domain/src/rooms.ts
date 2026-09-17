@@ -12,6 +12,44 @@ import { canEnterMatch } from "./points.js";
 
 export type RoomStatus = "waiting" | "playing" | "finished" | "dissolved";
 
+/**
+ * 座位控制权：**谁在操作这个座位**。
+ *
+ * 任一时刻只有一个来源，这是「托管与人工不会同时出牌」的根本保证：
+ *   * `human`   —— 玩家自己操作；
+ *   * `trustee` —— 服务器按 `MahjongGame.autoAct()` 的确定性策略代打。
+ *
+ * 玩家点「退出游戏」：human → trustee（立刻，不用等 120 秒）。
+ * 玩家点「重新接管」并通过服务端校验：trustee → human。
+ *
+ * 这个字段是**业务状态**，必须持久化 —— 服务重启后要能继续托管，
+ * 否则没人连接的座位会停在等人工操作上，把整局卡死。
+ */
+export type SeatControl = "human" | "trustee";
+
+/**
+ * 座位在场状态。
+ *
+ * ⚠️ 这是**推导值，不单独存**（`presenceOf`）。三个维度各管各的：
+ *   * `connected`（实时连接）—— 内存，重启后 socket 本来就不存在；
+ *   * `away`（暂离）        —— 持久化，返回大厅时为 true；
+ *   * `control`（控制权）   —— 持久化，决定服务器代不代打。
+ *
+ * 合成一个 status 字段会出现"既是 away 又是 trustee"这种没法表达的组合，所以不合成。
+ */
+export type SeatPresence = "online" | "away" | "disconnected" | "trustee";
+
+/**
+ * 由三个维度推出在场状态。优先级有意如此：
+ * 托管 > 暂离 > 断线 —— 座位被服务器接管时，"人在不在"已经不是重点，
+ * 别人该看到的就是「这个座位在托管」，而不是「他去大厅了」。
+ */
+export function presenceOf(player: RoomPlayer): SeatPresence {
+  if (player.control === "trustee") return "trustee";
+  if (player.away) return "away";
+  return player.connected ? "online" : "disconnected";
+}
+
 export interface RoomPlayer {
   account: UserAccount;
   joinedAt: Date;
@@ -21,6 +59,12 @@ export interface RoomPlayer {
   seat?: number;
   disconnectedAt?: Date;
   reconnectDeadline?: Date;
+  /** 控制权（持久化）。见 {@link SeatControl}。 */
+  control: SeatControl;
+  /** 暂离：返回了大厅但仍在房间里（持久化）。只影响展示，不影响牌局归属。 */
+  away: boolean;
+  /** 控制权最近一次变更的时刻，供排查与界面展示用。 */
+  controlChangedAt?: Date;
 }
 
 /**
@@ -95,6 +139,8 @@ export class MatchRoom {
       joinedAt: this.now(),
       ready: false,
       connected: true,
+      control: "human",
+      away: false,
     });
   }
 
@@ -108,6 +154,8 @@ export class MatchRoom {
       joinedAt: this.now(),
       ready: false,
       connected: true,
+      control: "human",
+      away: false,
     });
   }
 
@@ -135,26 +183,186 @@ export class MatchRoom {
     else this.disconnect(userId);
   }
 
+  /**
+   * 连接断开。
+   *
+   * 120 秒保留期的含义（2026-09-17 重新定义）：**这是"人工控制权还给你留着"的期限，
+   * 不是"禁止重新进入"的期限**。到期后座位转成托管（见 {@link expireReconnectWindow}
+   * 与 {@link reconnect}），但人依然能回到这局，回来后点「重新接管」即可。
+   *
+   * **两种断开都不排保留期**：
+   *
+   *   1. 座位已经是托管 —— 操作权本来就不在玩家手上，没有"保留人工控制权"这回事。
+   *   2. **暂离（返回大厅）** —— 暂离与"异常断线"是两件不同的事，**不能被混为一谈**：
+   *      * 暂离的人**明确表示过**自己还在这一局（他只是离开了牌桌界面）；
+   *      * 异常断线的人只是连接没了，我们不知道他还会不会回来。
+   *
+   *      给暂离排保留期，等于 120 秒后把他变成"托管中" —— 那正是明令禁止的
+   *      「返回大厅 → 被识别成托管」。所以暂离期间这一座始终是**人工控制**，
+   *      轮到它时走的是**普通的 15 秒倒计时 + 超时自动操作**（不会卡住牌局），
+   *      而玩家随时回来就能直接接着打，不需要「重新接管」。
+   *
+   * ⚠️ `reconnectDeadline` 是**绝对时刻，且会持久化**（migration 011）。
+   *    这一点是"墙钟语义"的全部意义：服务重启后它还在库里，所以停机期间照样在流逝，
+   *    **重启不会白送一个新的 120 秒**。内存定时器只是"到点了提醒我去看一眼"的
+   *    调度手段，它不是真相来源 —— 真相是库里这个时刻。
+   */
   disconnect(userId: string, reconnectWindowMs = 120_000): void {
     const player = this.requirePlayer(userId);
-    const disconnectedAt = this.now();
     player.connected = false;
+    if (player.control === "trustee" || player.away) {
+      delete player.disconnectedAt;
+      delete player.reconnectDeadline;
+      return;
+    }
+    const disconnectedAt = this.now();
     player.disconnectedAt = disconnectedAt;
     player.reconnectDeadline = new Date(disconnectedAt.getTime() + reconnectWindowMs);
   }
 
-  reconnect(userId: string): void {
+  /**
+   * 回到房间／重新打开页面。
+   *
+   * ⚠️ 与旧版的差别：**不再抛 `RECONNECT_WINDOW_EXPIRED`**。
+   *
+   * 旧语义是"掉线超过 2 分钟就再也进不来"——那与"座位保留到本场结束"直接冲突：
+   * 座位会继续被代打到第 8 局，而人永远回不到自己的位子上。
+   * 新语义是"超过 2 分钟就把控制权交给服务器，但人随时能回来，回来后再点『重新接管』"。
+   *
+   * 因此这里在窗口已过时**就地转为托管**，并返回"控制权变了吗"让调用方落库与广播；
+   * 正常情况下窗口到期由实时层的定时器先触发，这一段是兜底（服务刚重启、定时器还没排上等）。
+   *
+   * @returns 控制权是否因此次进入而改变（true = 已转托管，调用方需要持久化）
+   */
+  reconnect(userId: string): boolean {
     const player = this.requirePlayer(userId);
+    let controlChanged = false;
     if (
       this.status === "playing" &&
+      player.control === "human" &&
       player.reconnectDeadline &&
       this.now().getTime() > player.reconnectDeadline.getTime()
     ) {
-      throw new Error("RECONNECT_WINDOW_EXPIRED");
+      this.setControl(player, "trustee");
+      controlChanged = true;
     }
     player.connected = true;
     delete player.disconnectedAt;
     delete player.reconnectDeadline;
+    return controlChanged;
+  }
+
+  /**
+   * 120 秒窗口到期：把人工控制权交还给服务器。
+   *
+   * 实时层在窗口到期时调用（抛错/返回 false 都只是"无事可做"，幂等）。
+   *
+   * @returns 是否真的发生了 human → trustee（true = 调用方要落库并广播）
+   */
+  expireReconnectWindow(userId: string): boolean {
+    const player = this.players.get(userId);
+    if (!player || this.status !== "playing") return false;
+    if (player.control !== "human") return false;
+    if (!player.reconnectDeadline || player.reconnectDeadline.getTime() > this.now().getTime()) return false;
+    this.setControl(player, "trustee");
+    return true;
+  }
+
+  /**
+   * 整房结算：把所有**保护期已过**的座位一次性交给服务器。
+   *
+   * 判据是数据库里的绝对时刻（{@link RoomPlayer.reconnectDeadline}），不是内存定时器：
+   * 定时器到点只是"提醒我去看一眼"，服务一重启它就不存在了，而库里那个时刻还在。
+   * 所以每一次"这一局被加载 / 有人进来 / 有人操作"都按墙钟重新判一次 ——
+   * 这样 20:00 断线、20:00:30 停机、20:10 恢复时，判出来的答案是"20:02 已过期"，
+   * 而不是"重启了，重新给 120 秒"。
+   *
+   * **幂等**：已经托管的、没有 deadline 的、还没到点的，一律跳过。
+   * 于是 timer / reconnect / room load 三个入口**同时**发现过期也只有一个会真正转换，
+   * 其余拿到空数组 ⇒ **不会重复产生游戏动作**（比如同一座被代打两次）。
+   *
+   * @returns 这次真正被转成托管的用户 id（调用方据此落库 + 广播 + 作废在途定时器）
+   */
+  expireOverdueControl(): string[] {
+    if (this.status !== "playing") return [];
+    const now = this.now().getTime();
+    const changed: string[] = [];
+    for (const [userId, player] of this.players) {
+      if (player.control !== "human") continue;
+      if (player.reconnectDeadline === undefined) continue;
+      if (player.reconnectDeadline.getTime() > now) continue;
+      this.setControl(player, "trustee");
+      changed.push(userId);
+    }
+    return changed;
+  }
+
+  /**
+   * 主动退出：把座位交给服务器托管。
+   *
+   * **不删玩家、不删座位、不动手牌、不动积分、不改大局归属** —— 只是控制权交出去。
+   * 立刻生效，不需要等 120 秒（那是异常断线的口径）。
+   *
+   * @returns 是否真的发生了 human → trustee（已是托管时为 false，幂等）
+   */
+  quitToTrustee(userId: string): boolean {
+    const player = this.requirePlayer(userId);
+    if (this.status !== "playing") throw new Error("Room is not playing");
+    if (player.control === "trustee") return false;
+    this.setControl(player, "trustee");
+    // 退出的人不在大厅，暂离标记一并清掉（presence 由 control 主导，这里只是不留脏数据）
+    player.away = false;
+    return true;
+  }
+
+  /**
+   * 重新接管：把控制权拿回人工。
+   *
+   * **幂等** —— 已经是人工时返回 false 而不是抛错：玩家重复点、或断网重发，都不该看到报错。
+   * 是否**允许**接管由实时层校验（token、座位归属、大局仍 active），域层只负责状态转换。
+   *
+   * @returns 是否真的发生了 trustee → human
+   */
+  resumeControl(userId: string): boolean {
+    const player = this.requirePlayer(userId);
+    if (this.status !== "playing") return false;
+    if (player.control === "human") return false;
+    this.setControl(player, "human");
+    player.away = false;
+    return true;
+  }
+
+  /**
+   * 暂离（返回大厅）/ 回到牌桌。
+   *
+   * **只影响在场状态的显示，不影响控制权与座位归属** —— 暂离的人随时回来就能直接接着打。
+   *
+   * @returns 是否真的发生了变化（调用方据此决定要不要落库、要不要广播给另外三家）
+   */
+  markAway(userId: string, away: boolean): boolean {
+    const player = this.requirePlayer(userId);
+    if (player.away === away) return false;
+    player.away = away;
+    if (away) {
+      // 暂离的人**明确表示过**自己还在这一局，这一座就不该走"异常断线 120 秒"那条路。
+      // 清掉可能已经开始的保留期（例如先掉线进了窗口、又从另一台设备回了大厅）；
+      // 已经排好的定时器到点会去问 {@link expireReconnectWindow}，那里因为没有
+      // `reconnectDeadline` 会直接返回 false，所以这个定时器**不会**把座位变成托管。
+      delete player.disconnectedAt;
+      delete player.reconnectDeadline;
+    }
+    return true;
+  }
+
+  private setControl(player: RoomPlayer, control: SeatControl): void {
+    if (player.control === control) return;
+    player.control = control;
+    player.controlChangedAt = this.now();
+    if (control === "trustee") {
+      // 交给服务器之后，"保留人工控制权"的窗口就不存在了
+      delete player.disconnectedAt;
+      delete player.reconnectDeadline;
+    }
   }
 
   start(requesterId: string): void {
@@ -231,6 +439,13 @@ export class MatchRoom {
       player.account.points += delta;
       if (player.account.points < 0) throw new Error("Account points cannot become negative");
       delete player.account.activeMatchId;
+      // 大局结束 ⇒ 托管与暂离关系一并作废（需求七：不能让已结束的大局还能"重新接管"）。
+      // 房间对象还留在内存里，不复位的话会带着 trustee 残留到下一次读取。
+      player.control = "human";
+      player.away = false;
+      delete player.controlChangedAt;
+      delete player.disconnectedAt;
+      delete player.reconnectDeadline;
     }
 
     this.status = reason === "completed" ? "finished" : "dissolved";

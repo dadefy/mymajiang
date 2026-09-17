@@ -1,6 +1,18 @@
 import { element } from "./dom.js";
-import type { Suit } from "../protocol.js";
+import type { SeatPresence, Suit } from "../protocol.js";
 import { SUIT_LABEL } from "./tile-label.js";
+
+/**
+ * 不在场状态显示成什么。
+ *
+ * `online` **不出徽标** —— 四个人都正常的时候挂四个"在线"只是噪声，
+ * 牌桌上要一眼看出的是**异常**的那几个。
+ */
+const PRESENCE_LABEL: Record<Exclude<SeatPresence, "online">, string> = {
+  trustee: "托管中",
+  away: "暂离",
+  disconnected: "掉线",
+};
 
 /**
  * 头像下面的那个数字是**整局（8 小场）累计**净输赢 —— 不是本小场，也不是账号余额。
@@ -20,6 +32,11 @@ export function playerProfile(options: {
   matchDelta: number | undefined;
   dealer: boolean;
   missingSuit: Suit | null;
+  /**
+   * 在场状态（服务端下发）。`trustee` 就是「这个座位服务器在代打」——
+   * 另外三家必须看得见，否则会以为对方在思考而不停地等。
+   */
+  presence?: SeatPresence;
 }): HTMLElement {
   const profile = element("div", { className: "player-profile" });
   const avatar = element("div", { className: "player-avatar", text: options.nickname.slice(0, 1) || "人" });
@@ -43,6 +60,9 @@ export function playerProfile(options: {
   const badges = element("div", { className: "profile-badges" });
   if (options.dealer) badges.append(element("span", { className: "dealer-badge", text: "庄" }));
   badges.append(element("span", { className: "missing-badge", text: options.missingSuit ? `缺${SUIT_LABEL[options.missingSuit]}` : "未定缺" }));
+  if (options.presence && options.presence !== "online") {
+    badges.append(element("span", { className: `presence-badge ${options.presence}`, text: PRESENCE_LABEL[options.presence] }));
+  }
   profile.append(avatar, score, element("div", { className: "profile-name", text: options.nickname }), badges);
   return profile;
 }

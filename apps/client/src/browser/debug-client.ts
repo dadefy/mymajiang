@@ -1,5 +1,6 @@
 import { lobby, chat, avatar, shareDialog } from "./lobby.js";
 import { SingleTable } from "./single-table.js";
+import { quitConfirmOverlay, tableMenuOverlay, trusteeOverlay } from "./table-menu.js";
 
 import { roundScorePop } from "./round-result.js";
 import { matchResultPanel } from "./match-result.js";
@@ -40,6 +41,15 @@ function panel(title: string, ...children: HTMLElement[]): HTMLElement {
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const bar = document.querySelector<HTMLDivElement>("#bar")!;
 
+/**
+ * 牌桌菜单与二次确认是否展开。
+ *
+ * 渲染是"每次重画整棵树"，没有组件局部状态，所以这两个开关放在模块级。
+ * 两者互斥：打开退出确认时菜单先收起来，免得两层遮罩叠着。
+ */
+let tableMenuOpen = false;
+let quitConfirmOpen = false;
+
 const table = new SingleTable();
 document.title = "绵阳麻将 · 大厅";
 
@@ -62,6 +72,11 @@ function syncRoomPolling(inRoom: boolean): void {
 
 function render(screen: Screen): void {
   table.dispose();
+  // 离开牌桌页就把菜单/确认收起来：它们是牌桌上的浮层，留着会让下次进来时莫名其妙弹着。
+  if (screen.name !== "room") {
+    tableMenuOpen = false;
+    quitConfirmOpen = false;
+  }
   if (screen.name === "chat") { renderBar(screen); syncRoomPolling(false); const node = chat(screen, flow); if (app.firstChild !== node) app.replaceChildren(node); return; }
   app.replaceChildren();
   // 每次重画都先解绑：渲染层自己再登记（否则会指向已经卸载的那份 DOM）。
@@ -86,13 +101,26 @@ function renderBar(screen: Screen): void {
     );
   } else if (screen.name === "room") {
     // 给人看、给人念的是 6 位房间号；内部 roomId 在房间页里另有一处（调试用）。
-    bar.append(
-      element("span", { text: `房间号 ${screen.roomNo ?? "读取中…"}` }),
-      element("span", { className: "spacer" }),
-      button("分享名片", () => shareDialog(flow)),
-      button("返回大厅", () => void flow.backHome()),
-      button("退出房间", () => void flow.leaveRoom()),
-    );
+    bar.append(element("span", { text: `房间号 ${screen.roomNo ?? "读取中…"}` }), element("span", { className: "spacer" }));
+    if (screen.match) {
+      // 牌局进行中：离开牌桌的动作收进「菜单」，避免误触。
+      // 「退出房间」在这一阶段本来就被服务端拒绝（规则不允许中途走人），所以不摆出来。
+      bar.append(
+        button("分享名片", () => shareDialog(flow)),
+        button("菜单", () => {
+          tableMenuOpen = !tableMenuOpen;
+          quitConfirmOpen = false;
+          render(flow.current);
+        }, tableMenuOpen ? "primary" : ""),
+      );
+    } else {
+      // 还没开局：这时候"退出房间"是合法的，返回大厅也只是等人期间的往返。
+      bar.append(
+        button("分享名片", () => shareDialog(flow)),
+        button("返回大厅", () => void flow.backHome()),
+        button("退出房间", () => void flow.leaveRoom()),
+      );
+    }
   } else {
     bar.append(element("span", { text: "绵阳血战麻将 · 单人牌桌" }));
   }
@@ -164,7 +192,36 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
   }
 
   if (screen.match) {
-    app.append(table.render(screen, flow, () => render(flow.current)));
+    const board = table.render(screen, flow, () => render(flow.current));
+    app.append(board);
+    // 三个遮罩都挂进牌桌（`#board` 是定位容器），这样它们正好盖在牌桌上而不是页面别处。
+    // 托管浮层在最下层、菜单/确认在其上 —— 托管中也能打开菜单（那时唯一的出路是重新接管）。
+    if (screen.match.control === "trustee") {
+      board.append(trusteeOverlay({
+        roundNumber: screen.match.roundNumber,
+        // 共几小场由服务端下发，这里不硬编一个 8
+        totalRounds: screen.match.totalRounds ?? 8,
+        onTakeover: () => flow.requestTakeover(),
+      }));
+    }
+    if (tableMenuOpen) {
+      board.append(tableMenuOverlay({
+        onResume: () => { tableMenuOpen = false; render(flow.current); },
+        onBackToLobby: () => { tableMenuOpen = false; void flow.backHome(); },
+        onQuit: () => { tableMenuOpen = false; quitConfirmOpen = true; render(flow.current); },
+      }));
+    }
+    if (quitConfirmOpen) {
+      board.append(quitConfirmOverlay({
+        onCancel: () => { quitConfirmOpen = false; render(flow.current); },
+        onConfirm: () => {
+          quitConfirmOpen = false;
+          // 服务端接管后会把控制权随下一帧下发，界面据此切成「托管中 + 重新接管」。
+          flow.quitGame();
+          render(flow.current);
+        },
+      }));
+    }
     if (screen.notice) app.append(element("p", { className: "hint", text: screen.notice }));
   }
   // 那一屏数字只在**局间**显示（服务端给的停留时长内）。新一小场已经开始时退化成摘要行：

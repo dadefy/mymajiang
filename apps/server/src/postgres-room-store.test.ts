@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryAccountStore, type RecordedRound, type UserAccount } from "@mianyang-mahjong/domain";
+import { InMemoryAccountStore, presenceOf, type RecordedRound, type UserAccount } from "@mianyang-mahjong/domain";
 import type { PostgresDatabase } from "./database.js";
 import { PostgresRoomStore } from "./postgres-room-store.js";
 import { PostgresWriteQueue } from "./postgres-write-queue.js";
@@ -143,9 +143,12 @@ async function loadedStore(users: readonly UserAccount[], options: { rooms?: unk
 }
 
 /** A room with four seated, ready players and the match already started. */
-async function startedRoom(users: readonly UserAccount[], options: { failOn?: string } = {}) {
+async function startedRoom(
+  users: readonly UserAccount[],
+  options: { failOn?: string; clock?: () => Date } = {},
+) {
   const loaded = await loadedStore(users, options);
-  const room = loaded.store.createRoom("room-1", "123456", users[0]!);
+  const room = loaded.store.createRoom("room-1", "123456", users[0]!, options.clock);
   for (const user of users.slice(1)) room.join(user);
   for (const user of users) room.setReady(user.userId, true);
   room.start("A");
@@ -181,6 +184,12 @@ describe("PostgresMatchRoom", () => {
       false,
       null,
       null,
+      null,
+      // 座位控制权与暂离（migration 010）：新座位一律 human / 未暂离。
+      "human",
+      false,
+      null,
+      // 保护期截止时刻（migration 011）：正常在座的人没有保护期。
       null,
     ]);
   });
@@ -334,8 +343,8 @@ describe("PostgresRoomStore.load", () => {
     const { store, timeline } = await loadedStore(users, {
       rooms: [{ room_id: "room-1", room_no: "123456", status: "waiting", owner_id: "A", completed_rounds: 0 }],
       players: [
-        { room_id: "room-1", user_id: "A", seat: null, joined_at: new Date(0), ready: true, opening_balance: null, raw_delta: null },
-        { room_id: "room-1", user_id: "B", seat: null, joined_at: new Date(1), ready: true, opening_balance: null, raw_delta: null },
+        { room_id: "room-1", user_id: "A", seat: null, joined_at: new Date(0), ready: true, opening_balance: null, raw_delta: null, control: "human", away: false, control_changed_at: null },
+        { room_id: "room-1", user_id: "B", seat: null, joined_at: new Date(1), ready: true, opening_balance: null, raw_delta: null, control: "human", away: false, control_changed_at: null },
       ],
     });
 
@@ -357,8 +366,8 @@ describe("PostgresRoomStore.load", () => {
     const { store, timeline } = await loadedStore(users, {
       rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 3 }],
       players: [
-        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "-300" },
-        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: true, opening_balance: "500", raw_delta: "300" },
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "-300", control: "human", away: false, control_changed_at: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: true, opening_balance: "500", raw_delta: "300", control: "human", away: false, control_changed_at: null },
       ],
     });
 
@@ -393,10 +402,231 @@ describe("PostgresRoomStore.load", () => {
     const { database } = fakeDatabase({
       rooms: [{ room_id: "room-1", room_no: "123456", status: "waiting", owner_id: "A", completed_rounds: 0 }],
       players: [
-        { room_id: "room-1", user_id: "GHOST", seat: null, joined_at: new Date(0), ready: false, opening_balance: null, raw_delta: null },
+        { room_id: "room-1", user_id: "GHOST", seat: null, joined_at: new Date(0), ready: false, opening_balance: null, raw_delta: null, control: "human", away: false, control_changed_at: null },
       ],
     });
 
     await expect(PostgresRoomStore.load(database, accountStore([account("A", 600)]))).rejects.toThrow("unknown user");
+  });
+});
+
+describe("座位控制权与暂离的持久化", () => {
+  /** 参数顺序与 `UPSERT_ROOM_PLAYER_SQL` 一一对应。 */
+  const CONTROL = 8;
+  const AWAY = 9;
+  const CONTROL_CHANGED_AT = 10;
+  /** 保护期的**绝对**截止时刻（migration 011）。NULL = 没有保护期。 */
+  const RECONNECT_DEADLINE = 11;
+
+  it("主动退出立刻把 control=trustee 写进数据库", async () => {
+    const users = fourUsers();
+    const { room, mark, timeline, store } = await startedRoom(users);
+    const since = mark();
+
+    expect(room.quitToTrustee("B")).toBe(true);
+    await store.flush();
+
+    expect(writes(timeline, since)).toEqual(["insert:match_room_players"]);
+    const [row] = statements(timeline, "insert:match_room_players", since);
+    expect(row![CONTROL]).toBe("trustee");
+    expect(row![AWAY]).toBe(false);
+    expect(row![CONTROL_CHANGED_AT]).toBeInstanceOf(Date);
+  });
+
+  it("重复点退出只写一次，不往队列里塞无意义的写", async () => {
+    const users = fourUsers();
+    const { room, mark, timeline, store } = await startedRoom(users);
+    room.quitToTrustee("B");
+    await store.flush();
+    const since = mark();
+
+    expect(room.quitToTrustee("B")).toBe(false);
+    await store.flush();
+
+    expect(writes(timeline, since)).toEqual([]);
+  });
+
+  it("重新接管把 control=human 写回数据库", async () => {
+    const users = fourUsers();
+    const { room, mark, timeline, store } = await startedRoom(users);
+    room.quitToTrustee("B");
+    await store.flush();
+    const since = mark();
+
+    expect(room.resumeControl("B")).toBe(true);
+    await store.flush();
+
+    const [row] = statements(timeline, "insert:match_room_players", since);
+    expect(row![CONTROL]).toBe("human");
+  });
+
+  it("暂离与回到牌桌都落库，且只在真的变化时写", async () => {
+    const users = fourUsers();
+    const { room, mark, timeline, store } = await startedRoom(users);
+    const since = mark();
+
+    room.markAway("C", true);
+    room.markAway("C", true);
+    await store.flush();
+
+    const rows = statements(timeline, "insert:match_room_players", since);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]![AWAY]).toBe(true);
+    // 暂离**不碰**控制权：返回大厅的人随时回来就能直接操作。
+    expect(rows[0]![CONTROL]).toBe("human");
+
+    const back = mark();
+    room.markAway("C", false);
+    await store.flush();
+    expect(statements(timeline, "insert:match_room_players", back)[0]![AWAY]).toBe(false);
+  });
+
+  it("异常断线：保护期的绝对截止时刻写进库里，到期转托管再写一次", async () => {
+    // 墙钟语义的两个落点都要落到库上：
+    //   1) 断线那一刻写下**绝对时刻**（不是"还剩多少秒"）；
+    //   2) 到点转托管那一刻写下 trustee，并把那个时刻清掉。
+    const users = fourUsers();
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { store, timeline, room, mark } = await startedRoom(users, { clock: () => new Date(now) });
+
+    const since = mark();
+    room.disconnect("B");
+    await store.flush();
+
+    const [withDeadline] = statements(timeline, "insert:match_room_players", since);
+    expect(withDeadline![CONTROL]).toBe("human");
+    // 关键：写的是 00:02:00 这个**时刻本身**，服务重启后读出来还是它。
+    expect(withDeadline![RECONNECT_DEADLINE]).toEqual(new Date(now + 120_000));
+
+    const expiredAt = mark();
+    now += 120_001;
+    expect(room.expireReconnectWindow("B")).toBe(true);
+    await store.flush();
+
+    const rows = statements(timeline, "insert:match_room_players", expiredAt);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]![CONTROL]).toBe("trustee");
+    // 转托管之后不该残留一个旧时刻
+    expect(rows[0]![RECONNECT_DEADLINE]).toBeNull();
+  });
+
+  it("重连时才发现窗口已过，那一次转换同样落库", async () => {
+    // 兜底路径：窗口到期本该由实时层的定时器触发，但服务刚重启、定时器还没排上时，
+    // 玩家先进来了 —— 转换发生在 reconnect() 里，也必须写进数据库。
+    const users = fourUsers();
+    let now = Date.parse("2026-09-15T00:00:00.000Z");
+    const { store, timeline, room, mark } = await startedRoom(users, { clock: () => new Date(now) });
+
+    room.disconnect("B");
+    now += 120_001;
+    // 先把"断线写下 deadline"那一次排掉，下面断言的才是 reconnect 那一次。
+    await store.flush();
+    const since = mark();
+
+    expect(room.reconnect("B")).toBe(true);
+    await store.flush();
+
+    const rows = statements(timeline, "insert:match_room_players", since);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]![CONTROL]).toBe("trustee");
+    expect(rows[0]![RECONNECT_DEADLINE]).toBeNull();
+  });
+
+  it("重启后从数据库恢复托管座位 —— 不能一律当 human", async () => {
+    // 这是这一整块改动的核心：重启后如果托管座位被恢复成 human，而它又没人连接，
+    // 整局就会卡在等人工操作上。所以 load() 必须读 control 而不是默认 human。
+    const users = [account("A", 600, "room-1"), account("B", 500, "room-1")];
+    const { store } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 3 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "human", away: false, control_changed_at: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: true, opening_balance: "500", raw_delta: "0", control: "trustee", away: false, control_changed_at: new Date(2) },
+      ],
+    });
+
+    const room = store.rooms.get("room-1")!;
+    expect(room.players.get("A")).toMatchObject({ control: "human", away: false, connected: false });
+    expect(room.players.get("B")).toMatchObject({ control: "trustee", connected: false });
+    expect(room.players.get("B")!.controlChangedAt).toEqual(new Date(2));
+    // 暂停离随 control 一起恢复
+    expect(presenceOf(room.players.get("B")!)).toBe("trustee");
+  });
+
+  it("恢复出的暂离座位仍然是 away", async () => {
+    const users = [account("A", 600, "room-1")];
+    const { store } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 1 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "human", away: true, control_changed_at: null },
+      ],
+    });
+
+    const player = store.rooms.get("room-1")!.players.get("A")!;
+    expect(player.away).toBe(true);
+    expect(presenceOf(player)).toBe("away");
+  });
+
+  it("墙钟：恢复出的还是原来那个截止时刻 —— 重启不重送 120 秒", async () => {
+    // 用户给的例子：20:00 断线 → deadline = 20:02 → 20:10 才恢复 ⇒ 认定 20:02 已过期。
+    // 这里用"1 分钟前"构造同一件事（真实时钟），关键是**读出来的必须是库里那个旧时刻**，
+    // 不能变成"重启时刻 + 120 秒" —— 后者正是这一列要防的白送。
+    const users = [account("A", 600, "room-1"), account("B", 500, "room-1")];
+    const deadline = new Date(Date.now() - 60_000);
+    const { store, timeline, mark } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 2 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: null },
+        { room_id: "room-1", user_id: "B", seat: 1, joined_at: new Date(1), ready: true, opening_balance: "500", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: deadline },
+      ],
+    });
+
+    const room = store.rooms.get("room-1")!;
+    const player = room.players.get("B")!;
+    expect(player.reconnectDeadline).toEqual(deadline);
+    expect(player.control).toBe("human");
+
+    // load 期间排进队列的写还没执行，先排空，下面断言的才是"到期那一次"。
+    await store.flush();
+    const since = mark();
+    expect(room.expireOverdueControl()).toEqual(["B"]);
+    await store.flush();
+    expect(player.control).toBe("trustee");
+    expect(player.reconnectDeadline).toBeUndefined();
+    const written = statements(timeline, "insert:match_room_players", since);
+    expect(written.map((row) => [row![1], row![CONTROL]])).toEqual([["B", "trustee"]]);
+
+    // 幂等：再判一次什么都不发生 —— timer / load / auth 多入口同时发现过期
+    // 也只有一个会真正执行，不会重复产生游戏动作。
+    expect(room.expireOverdueControl()).toEqual([]);
+  });
+
+  it("墙钟的另一面：截止时刻还没到 ⇒ 仍在人工控制权保护期", async () => {
+    // 服务**短暂**重启（停机 < 120 秒）不该把人踢成托管 —— 判据是时刻，不是"重启过"。
+    const users = [account("A", 600, "room-1")];
+    const deadline = new Date(Date.now() + 60_000);
+    const { store } = await loadedStore(users, {
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 2 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "human", away: false, control_changed_at: null, reconnect_deadline: deadline },
+      ],
+    });
+
+    const room = store.rooms.get("room-1")!;
+    expect(room.expireOverdueControl()).toEqual([]);
+    expect(room.players.get("A")).toMatchObject({ control: "human" });
+    expect(room.players.get("A")!.reconnectDeadline).toEqual(deadline);
+  });
+
+  it("数据库里出现未知的 control 值时启动就报错，不静默猜成 human", async () => {
+    // 静默猜错的代价很具体：一个本该托管的座位被当成人工，没人操作却一直等下去。
+    const users = [account("A", 600, "room-1")];
+    const { database } = fakeDatabase({
+      rooms: [{ room_id: "room-1", room_no: "654321", status: "playing", owner_id: "A", completed_rounds: 1 }],
+      players: [
+        { room_id: "room-1", user_id: "A", seat: 0, joined_at: new Date(0), ready: true, opening_balance: "600", raw_delta: "0", control: "TRUSTEE", away: false, control_changed_at: null },
+      ],
+    });
+
+    await expect(PostgresRoomStore.load(database, accountStore(users))).rejects.toThrow("unknown control value");
   });
 });

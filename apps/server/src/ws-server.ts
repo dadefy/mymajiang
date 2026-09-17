@@ -8,11 +8,12 @@ import {
   type Suit,
   type Tile,
 } from "@mianyang-mahjong/rules";
-import type { MatchRoom, RoomResult } from "@mianyang-mahjong/domain";
+import { presenceOf, type MatchRoom, type RoomResult, type SeatControl } from "@mianyang-mahjong/domain";
 import type { AppDependencies } from "./app.js";
 import type { StoredRoundState } from "./game-state-store.js";
 import type { GroupEvent } from "./group-events.js";
 import { maskMelds } from "./meld-visibility.js";
+import type { SeatEvent } from "./seat-events.js";
 import { WebSocketConnection, WebSocketServer, type WsMessage } from "./ws.js";
 
 interface ActiveMatch {
@@ -27,6 +28,18 @@ interface ActiveMatch {
   lastSavedAt?: number;
   /** 快照节流：距上次落盘之后状态又变过，尚未写盘。 */
   stateDirty?: boolean;
+  /**
+   * 每个座位的**控制权世代**：控制权每变一次就 +1。
+   *
+   * 为什么必须有它：`setTimeout` 一旦到点，回调就已经排进事件循环队列，
+   * 这时候 `clearTimeout` 是**取消不掉**的。于是会出现这样一条真实路径 ——
+   * 托管定时器到点（回调入队）→ 玩家的 `request_takeover` 先被处理（控制权转人工、重排定时器）
+   * → 那个已经在队列里的回调接着执行 → 替一个已经回到人工的座位又出了一张牌。
+   *
+   * 定时器在挂表时捕获当时的世代，开火时对不上就放弃。这是"同一个座位任何时刻
+   * 只有一个控制来源"的兜底保证（光靠 `clearActionTimers` 是挡不住这条路径的）。
+   */
+  seatEpoch: Map<number, number>;
 }
 
 export interface RealtimeOptions {
@@ -43,6 +56,14 @@ export interface RealtimeOptions {
   interRoundPauseMs?: number;
   /** 快照落盘的最小间隔（毫秒）。同一时间窗内的多次行动合并成一次写；默认 2000。 */
   saveIntervalMs?: number;
+  /**
+   * 异常断线后「人工控制权还留着」的时长（毫秒），默认 120000。
+   *
+   * 到期后这一座自动转托管（并落库、广播），**但不是禁止进入** ——
+   * 玩家之后任何时候回来都能进这一局，只是进来要先把控制权点回来（「重新接管」）。
+   * 测试里设小值，省得每个跨断线用例白等两分钟。
+   */
+  reconnectWindowMs?: number;
 }
 
 /** 每个 active match 的 seat -> connection 映射。 */
@@ -93,6 +114,8 @@ function matchTotal(room: MatchRoom, game: MahjongGame, playerId: string): numbe
 /** 单个玩家的脱敏视图（含自己的手牌，不含他人手牌）。 */
 export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom, roundNumber: number, actionDeadlineAt?: number): object {
   const player = game.players[seat]!;
+  // `players` 用可选链：这个函数也被只关心牌面、不搭房间的调用方用着（见 round-settlement.test.ts）。
+  const mine = room.players?.get(player.id);
   return {
     roomId: room.roomId,
     roundNumber,
@@ -100,6 +123,16 @@ export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom,
     totalRounds: MIANYANG_XZ_1_0.rounds,
     actionDeadlineAt,
     seat,
+    /**
+     * 我这一座的**权威控制权**，每帧都带。
+     *
+     * 客户端据此决定显示牌桌还是"你的牌局正在托管中 + 重新接管"。
+     * 每帧都带而不是只在变化时推一次：F5、断网重连、切前后台之后客户端手上那帧可能是旧的，
+     * 权威值随帧下发，客户端就永远不需要"猜自己现在是人还是托管"。
+     */
+    control: mine?.control ?? "human",
+    /** 我是不是从大厅回来的（暂离标记）。 */
+    away: mine?.away ?? false,
     phase: game.phase,
     dealerSeat: game.dealerSeat,
     currentPlayerSeat: game.currentPlayerSeat,
@@ -109,21 +142,26 @@ export function playerSnapshot(game: MahjongGame, seat: number, room: MatchRoom,
     missingSuit: player.missingSuit,
     discards: [...player.discards],
     won: player.won,
-    players: game.players.map((other) => ({
-      seat: other.seat,
-      avatarUrl: room.players?.get(other.id)?.account.avatarUrl,
-      /** 本小场（这一局）的净输赢；换一小场归零，只给结算界面用。 */
-      roundDelta: roundNet(game, other.id),
-      /** 整局累计净输赢 —— 头像下面显示的就是它，跨 8 小场连续累加。 */
-      matchDelta: matchTotal(room, game, other.id),
-      handSize: other.won ? other.winningHand.length : other.handSize,
-      // 别人的暗杠是扣着的，牌值不下发（见 meld-visibility.ts）——
-      // 否则任何打开开发者工具的人都能读出对手暗杠的是哪张牌。
-      melds: maskMelds(other.melds, other.seat === seat),
-      discards: [...other.discards],
-      won: other.won,
-      missingSuit: other.missingSuit,
-    })),
+    players: game.players.map((other) => {
+      const roomPlayer = room.players?.get(other.id);
+      return {
+        seat: other.seat,
+        avatarUrl: roomPlayer?.account.avatarUrl,
+        /** 在场状态（online / away / disconnected / trustee），给头像上那行小字用。 */
+        presence: roomPlayer ? presenceOf(roomPlayer) : undefined,
+        /** 本小场（这一局）的净输赢；换一小场归零，只给结算界面用。 */
+        roundDelta: roundNet(game, other.id),
+        /** 整局累计净输赢 —— 头像下面显示的就是它，跨 8 小场连续累加。 */
+        matchDelta: matchTotal(room, game, other.id),
+        handSize: other.won ? other.winningHand.length : other.handSize,
+        // 别人的暗杠是扣着的，牌值不下发（见 meld-visibility.ts）——
+        // 否则任何打开开发者工具的人都能读出对手暗杠的是哪张牌。
+        melds: maskMelds(other.melds, other.seat === seat),
+        discards: [...other.discards],
+        won: other.won,
+        missingSuit: other.missingSuit,
+      };
+    }),
     ...(game.result ? { result: game.result } : {}),
   };
 }
@@ -251,8 +289,17 @@ function buildRealtimeServer(
   const interRoundPauseMs = options.interRoundPauseMs ?? 3_000;
   /** 每个进行中对局的"局间停留"定时器。至多一个 —— 它同时是 reentry 的保护。 */
   const interRoundTimers = new Map<ActiveMatch, ReturnType<typeof setTimeout>>();
+  /**
+   * 每个「异常断线、还在 120 秒保留期里」的座位一个定时器，到点把控制权交给服务器。
+   *
+   * 120 秒是**保留人工控制权**的期限，不是禁止进入的期限 —— 到期后玩家依然能回来，
+   * 只是回来时看到的先是「正在托管中 + 重新接管」。
+   */
+  const windowTimers = new Map<ActiveMatch, Map<number, ReturnType<typeof setTimeout>>>();
   /** 快照落盘的最小间隔；一个时间窗内的多次行动合并成一次写。 */
   const SAVE_INTERVAL_MS = options.saveIntervalMs ?? 2_000;
+  /** 断线后人工控制权保留多久，到期自动转托管。 */
+  const reconnectWindowMs = options.reconnectWindowMs ?? 120_000;
 
   // 群聊订阅：一个连接可以同时订阅多个群，一个群也可以有多个连接。
   const groupSubscribers = new Map<string, Set<WebSocketConnection>>();
@@ -331,12 +378,125 @@ function buildRealtimeServer(
     }
   }
 
+  /**
+   * 座位在场状态变了（目前只有 `POST /v1/rooms/:roomId/seat/presence` 会发）。
+   *
+   * 事件只带"谁在哪一间房变了"，权威状态回房间现读 —— 这里只负责让四家看到。
+   * 复用 `broadcastState` 而不是新造一个"轻量帧"，是因为它顺带会重排这一局的自动定时器：
+   * 从大厅回到牌桌的那一刻，这一座的节奏就从"断开的座位"恢复成正常的等待，
+   * 不需要额外写一遍定时器管理。多带一帧对局数据，不值得为省这点带宽引入第二条广播路径。
+   */
+  function broadcastSeatEvent(event: SeatEvent): void {
+    const active = activeMatches.get(event.roomId);
+    if (!active) return;
+    void broadcastState(active).catch(() => undefined);
+  }
+
   // 订阅跟着进程（或测试里的依赖图）一起存活：事件总线本身是按依赖创建的一次性对象。
   dependencies.groupEvents.subscribe(broadcastGroupEvent);
+  dependencies.seatEvents.subscribe(broadcastSeatEvent);
 
   function clearActionTimers(active: ActiveMatch): void {
     for (const timer of actionTimers.get(active)?.values() ?? []) clearTimeout(timer);
     actionTimers.delete(active);
+  }
+
+  /** 撤掉某个座位的"120 秒保留期"定时器（人回来了、或者已经转托管了都不需要它了）。 */
+  function clearWindowTimer(active: ActiveMatch, seat: number): void {
+    const timers = windowTimers.get(active);
+    const timer = timers?.get(seat);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    timers!.delete(seat);
+  }
+
+  /** 整场结束、房间消失时把这一局的所有保留期定时器一起撤掉。 */
+  function clearWindowTimers(active: ActiveMatch): void {
+    for (const timer of windowTimers.get(active)?.values() ?? []) clearTimeout(timer);
+    windowTimers.delete(active);
+  }
+
+  function seatEpochOf(active: ActiveMatch, seat: number): number {
+    return active.seatEpoch.get(seat) ?? 0;
+  }
+
+  /**
+   * 这一座现在归谁控制。
+   *
+   * 从**房间**读（持久化过的权威值），而不是从实时层的任何副本读 ——
+   * 服务重启后控制权只能来自数据库，这是"重启后继续托管"成立的唯一依据。
+   */
+  function controlOf(active: ActiveMatch, seat: number): SeatControl {
+    const userId = active.game.players[seat]?.id;
+    return (userId ? active.room.players.get(userId)?.control : undefined) ?? "human";
+  }
+
+  /**
+   * 控制权变了：作废在途的自动定时器，并把新状态发给所有人。
+   *
+   * ⚠️ 必须在**同一个同步块**里调用，且调用前不要有 `await`：
+   * `handleMessage` 是 async，`await verifyUserToken()` 之类会让出事件循环，
+   * 状态改到一半就被别的回调插进来，正是"托管与人工同时出牌"的温床。
+   */
+  async function announceControlChange(active: ActiveMatch, seat: number): Promise<void> {
+    // 世代 +1：任何已经排进事件循环队列的自动定时器回调开火时会发现自己过期，直接放弃。
+    active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
+    // `broadcastState` 会重排全部定时器（按新的控制权决定"立刻"还是"15 秒"），
+    // 并把带新 control / presence 的权威帧发给四家。
+    await broadcastState(active);
+  }
+
+  /**
+   * 按**墙钟**把保护期已过的座位交给服务器。
+   *
+   * 内存定时器（`scheduleWindowExpiry`）只是调度手段：它到点提醒我们看一眼，
+   * 服务一重启它就不存在了。真正的依据是数据库里的绝对时刻
+   * （`reconnect_deadline`，migration 011）—— 所以每次"这一局被加载 / 有人进来 /
+   * 有人操作"都重新判一次，答案在任何进程里都一样：
+   *
+   *   20:00 断线 → deadline = 20:02 → 20:10 才恢复 ⇒ 认定 20:02 已过期，
+   *   **不因为"刚重启过"再送一个 120 秒**。
+   *
+   * **幂等**：域层只返回这次真正被转换的人；没变化时拿到空数组 ⇒ 这里直接返回，
+   * **连广播都不发**（否则每次消息都重排一次定时器，等于变相刷新操作超时）。
+   * 因此 timer / auth / 操作三个入口同时发现过期也只有一个会真正执行，
+   * 不会重复产生游戏动作。
+   *
+   * @returns 是否真的发了广播（调用方据此省掉紧随其后的那一次重复广播）
+   */
+  async function settleExpiredSeats(active: ActiveMatch): Promise<boolean> {
+    const expired = active.room.expireOverdueControl();
+    if (expired.length === 0) return false;
+    for (const userId of expired) {
+      const seat = active.seatsByUser.get(userId);
+      if (seat === undefined) continue;
+      // 世代 +1：任何已经排进事件循环队列的自动定时器回调开火时会发现自己过期而放弃，
+      // 加上它才不会出现"同一座被代打两次"。
+      active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
+      clearWindowTimer(active, seat);
+    }
+    await broadcastState(active);
+    return true;
+  }
+
+  /** 给一个连接发"我这一座"的完整视角：对局帧 + 当前可用操作。 */
+  function sendPlayerState(
+    connection: WebSocketConnection,
+    active: ActiveMatch,
+    seat: number,
+  ): void {
+    const trustee = controlOf(active, seat) === "trustee";
+    connection.send({
+      type: "game",
+      state: playerSnapshot(active.game, seat, active.room, active.roundNumber, active.actionDeadlineAt),
+    });
+    // 托管中的座位，对"人工"而言不存在任何可用操作 —— 服务端的动作闸门本来就会拒绝它们
+    // （见 handleMessage 里的 SEAT_UNDER_TRUSTEE）。这里直接发空数组，
+    // 让两个客户端都不必各自再判一次控制权，也就不会出现"按钮亮着但点了报错"。
+    connection.send({
+      type: "actions",
+      actions: trustee ? [] : active.game.allowedActions(active.game.players[seat]!.id),
+    });
   }
 
   /** 撤掉局间停留的定时器（整场结束、房间被删时用，免得 5 秒后又去广播一个已消失的对局）。 */
@@ -364,8 +524,14 @@ function buildRealtimeServer(
     for (const player of game.players) {
       const actions = game.allowedActions(player.id);
       if (actions.length === 0) continue;
-      const delay = Math.max(0, active.actionDeadlineAt! - Date.now());
+      // 托管座位**立刻**出牌，不让另外三家白等 15 秒 —— 这是"8 小局不因一人退出而拖延"的关键。
+      // 人类座位维持原有超时（15 秒行牌 / 8 秒响应），现有体验一点不变。
+      const trustee = controlOf(active, player.seat) === "trustee";
+      const delay = trustee ? 0 : Math.max(0, active.actionDeadlineAt! - Date.now());
+      // 挂表时记下世代，开火时对不上就放弃（见 ActiveMatch.seatEpoch 的注释）。
+      const armedEpoch = seatEpochOf(active, player.seat);
       const timer = setTimeout(() => {
+        if (seatEpochOf(active, player.seat) !== armedEpoch) return;
         if (active.game !== game || game.allowedActions(player.id).length === 0) return;
         try {
           game.autoAct(player.id);
@@ -378,6 +544,37 @@ function buildRealtimeServer(
       timers.set(player.seat, timer);
     }
     actionTimers.set(active, timers);
+  }
+
+  /**
+   * 座位断线：排一个定时器，到点把这**一座**交给服务器。
+   *
+   * 只在域层真的排了保留期（`reconnectDeadline`）时才排 —— 已经托管或暂离的座位没有保留期。
+   * 到点先问域层"还该转吗"（人可能已经回来了、或者已经主动退出），
+   * 域层返回 true 才广播；因此这个定时器**重复触发也无害**。
+   *
+   * ⚠️ 它是**调度手段，不是真相来源**。真相是数据库里的绝对时刻
+   * （`reconnect_deadline`，migration 011）：服务一重启这个定时器就不存在了，
+   * 而那个时刻还在 —— 所以另有 `settleExpiredSeats()` 在"有人进来 / 有人操作"时按墙钟重判。
+   * 两条路径走的是同一个域层判断，因此不会打架、也不会重复动作。
+   */
+  function scheduleWindowExpiry(active: ActiveMatch, seat: number, userId: string): void {
+    clearWindowTimer(active, seat);
+    const deadline = active.room.players.get(userId)?.reconnectDeadline;
+    if (!deadline) return;
+    const timer = setTimeout(() => {
+      windowTimers.get(active)?.delete(seat);
+      if (!active.room.expireReconnectWindow(userId)) return;
+      active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
+      void broadcastState(active).catch(() => undefined);
+    }, Math.max(0, deadline.getTime() - Date.now()));
+    timer.unref();
+    let timers = windowTimers.get(active);
+    if (!timers) {
+      timers = new Map();
+      windowTimers.set(active, timers);
+    }
+    timers.set(seat, timer);
   }
 
   /**
@@ -465,6 +662,7 @@ function buildRealtimeServer(
         dependencies.gameStateStore?.clear(active.room.roomId);
         clearInterRoundTimer(active);
         cancelSaveTimer(active);
+        clearWindowTimers(active);
         activeMatches.delete(active.room.roomId);
         seatConnections.delete(active);
         return;
@@ -504,9 +702,7 @@ function buildRealtimeServer(
     }
     scheduleAutoActions(active);
     for (const [seat, connection] of seatMap ?? []) {
-      const player = game.players[seat]!;
-      connection.send({ type: "game", state: playerSnapshot(game, seat, active.room, active.roundNumber, active.actionDeadlineAt) });
-      connection.send({ type: "actions", actions: game.allowedActions(player.id) });
+      sendPlayerState(connection, active, seat);
     }
     saveRoundState(active);
   }
@@ -524,7 +720,7 @@ function buildRealtimeServer(
       randomInt(0, 2 ** 31),
       seated.map((player) => player.account.userId) as [string, string, string, string],
     );
-    const active: ActiveMatch = { room, game, seatsByUser, roundNumber: room.completedRounds + 1 };
+    const active: ActiveMatch = { room, game, seatsByUser, roundNumber: room.completedRounds + 1, seatEpoch: new Map() };
     activeMatches.set(room.roomId, active);
 
     const seatMap = new Map<number, WebSocketConnection>();
@@ -574,7 +770,7 @@ function buildRealtimeServer(
 
     const seatsByUser = new Map<string, number>();
     seated.forEach((player) => seatsByUser.set(player.account.userId, player.seat!));
-    const active: ActiveMatch = { room, game, seatsByUser, roundNumber: stored.roundNumber };
+    const active: ActiveMatch = { room, game, seatsByUser, roundNumber: stored.roundNumber, seatEpoch: new Map() };
     activeMatches.set(room.roomId, active);
 
     const seatMap = new Map<number, WebSocketConnection>();
@@ -612,13 +808,20 @@ function buildRealtimeServer(
 
       connection.userId = userId;
       connection.roomId = roomId;
+      const beforeReconnect = activeMatches.get(roomId);
+      const beforeSeat = beforeReconnect?.seatsByUser.get(userId);
       try {
-        room.reconnect(userId);
+        // 返回值 = 120 秒保留期已过，控制权就地交给了服务器（域层同步落库）。
+        if (room.reconnect(userId) && beforeReconnect && beforeSeat !== undefined) {
+          beforeReconnect.seatEpoch.set(beforeSeat, seatEpochOf(beforeReconnect, beforeSeat) + 1);
+        }
       } catch (error) {
         delete connection.userId;
         delete connection.roomId;
         return sendError(connection, error instanceof Error ? error.message : String(error));
       }
+      // 人回到牌桌了：清掉暂离标记（`presence` 立刻变回 online），保留期定时器也不再需要。
+      const returnedFromLobby = room.markAway(userId, false);
       roomConnections(roomId).set(userId, connection);
 
       if (room.status === "playing" && !activeMatches.has(roomId)) {
@@ -637,8 +840,14 @@ function buildRealtimeServer(
         const seatMap = seatConnections.get(active) ?? new Map();
         seatMap.set(seat, connection);
         seatConnections.set(active, seatMap);
-        connection.send({ type: "game", state: playerSnapshot(active.game, seat, room, active.roundNumber, active.actionDeadlineAt) });
-        connection.send({ type: "actions", actions: active.game.allowedActions(active.game.players[seat]!.id) });
+        clearWindowTimer(active, seat);
+        // 整房按墙钟结算。服务重启后没人排得上定时器，这里就是补上它的地方：
+        // 20:00 断线、deadline 20:02、20:10 才恢复 ⇒ 此刻就认定"已过期"，
+        // 不因为"刚重启过"再送一个 120 秒。返回的 true 表示它已经广播过一次。
+        const settled = await settleExpiredSeats(active);
+        sendPlayerState(connection, active, seat);
+        // 另外三家也要立刻看到「暂离」消失 —— 上面那一发只发给回来的本人。
+        if (returnedFromLobby && !settled) await broadcastState(active);
       } else {
         connection.send({ type: "room", status: room.status, playerCount: room.players.size });
       }
@@ -700,10 +909,70 @@ function buildRealtimeServer(
     if (!connection.userId || !connection.roomId) return sendError(connection, "Not authenticated");
     const active = activeMatches.get(connection.roomId);
     if (!active) return sendError(connection, "Match has not started");
+    // 每一次操作前都按墙钟重判一次保护期。没过期时这是零副作用（连广播都不发），
+    // 过期时这一座当场转托管，下面的控制权闸门随即拒绝它的动作 ——
+    // 于是"到点了还没回来"在任何一条路径上都不会漏判，也不会重复判。
+    await settleExpiredSeats(active);
     const game = active.game;
     const seat = active.seatsByUser.get(connection.userId);
     if (seat === undefined) return sendError(connection, "Not seated in this match");
     const player = game.players[seat]!;
+
+    /**
+     * 退出游戏：把这一座交给服务器托管。
+     *
+     * 与「返回大厅」的区别就在这里 —— 返回大厅只是暂离（presence = away，控制权还在玩家手上），
+     * 退出游戏是 control 直接转 TRUSTEE，**不等 120 秒**（那是异常断线的口径）。
+     * 不删玩家、不删座位、不动手牌与积分，大局归属也不变。
+     *
+     * 幂等：重复点（网络重发、手抖点两次）第二次返回 false，客户端照样收到当前状态。
+     */
+    if (message.type === "quit") {
+      if (active.room.status !== "playing") return sendError(connection, "MATCH_NOT_ACTIVE");
+      if (active.room.players.get(connection.userId)?.seat !== seat) {
+        return sendError(connection, "SEAT_NOT_OWNED");
+      }
+      if (active.room.quitToTrustee(connection.userId)) {
+        clearWindowTimer(active, seat);
+        await announceControlChange(active, seat);
+      }
+      sendPlayerState(connection, active, seat);
+      return;
+    }
+
+    /**
+     * 重新接管：control 从 TRUSTEE 拿回 HUMAN。
+     *
+     * **进入房间 ≠ 接管** —— 握手成功只把 `connected` 置真，控制权仍在服务器手上；
+     * 必须由玩家显式点「重新接管」才转换。所以这里是唯一能把座位交还人工的入口。
+     *
+     * 全部校验都由服务端自己做，客户端传什么都不作数：
+     * token（外层已验过）、是这间房的玩家、座位归属没被改过、大局仍在进行、当前确实是托管。
+     */
+    if (message.type === "request_takeover") {
+      if (active.room.status !== "playing") return sendError(connection, "MATCH_NOT_ACTIVE");
+      const roomPlayer = active.room.players.get(connection.userId);
+      if (!roomPlayer || roomPlayer.seat === undefined || roomPlayer.seat !== seat) {
+        return sendError(connection, "SEAT_NOT_OWNED");
+      }
+      if (active.room.resumeControl(connection.userId)) {
+        await announceControlChange(active, seat);
+      }
+      // 幂等回执：无论这次是否真的发生转换，都给请求者一份当前权威状态，
+      // 免得它停在"点过了但界面没变"。局间停留阶段 `broadcastState` 会提前返回，这一发更必要。
+      sendPlayerState(connection, active, seat);
+      return;
+    }
+
+    /**
+     * 控制权闸门：托管中的座位**只接受**「重新接管」，其余动作一律拒绝。
+     *
+     * 这是"同一个座位任何时刻只有一个控制来源"的业务侧保证 ——
+     * 光靠前端把牌桌置灰不够，关掉前端照样能发帧。
+     */
+    if (controlOf(active, seat) === "trustee") {
+      return sendError(connection, "SEAT_UNDER_TRUSTEE");
+    }
 
     try {
       switch (message.type) {
@@ -744,7 +1013,7 @@ function buildRealtimeServer(
     await broadcastState(active);
   }
 
-  return new WebSocketServer({
+  const server = new WebSocketServer({
     onMessage: handleMessage,
     onClose(connection) {
       unsubscribeAllGroups(connection);
@@ -752,12 +1021,29 @@ function buildRealtimeServer(
       const roomMap = roomConnections(connection.roomId);
       if (roomMap.get(connection.userId) !== connection) return;
       roomMap.delete(connection.userId);
-      dependencies.roomStore.get(connection.roomId)?.disconnect(connection.userId);
+      const room = dependencies.roomStore.get(connection.roomId);
+      room?.disconnect(connection.userId, reconnectWindowMs);
       const active = activeMatches.get(connection.roomId);
       if (active) {
         const seat = active.seatsByUser.get(connection.userId);
         if (seat !== undefined) seatConnections.get(active)?.delete(seat);
+        // 域层只有在"人工控制且没有暂离"时才排了保留期；有保留期就排个定时器，
+        // 到点把这一座交给服务器（120 秒是保留人工控制权的时间，不是禁止进入的时间）。
+        if (seat !== undefined && connection.userId) {
+          scheduleWindowExpiry(active, seat, connection.userId);
+        }
+        // 另外三家要看到这一座"人走了"：纯掉线显示「掉线」，暂离中的人断开仍显示「暂离」
+        // （`presenceOf` 里暂离优先于连接状态 —— 他明确说过自己还会回来）。
+        void broadcastState(active).catch(() => undefined);
       }
     },
   }, mode);
+
+  // 进程要走了：把每局还没到点的延迟落盘立刻写掉（节流的补偿，不是持久化的替代）。
+  server.flushRoundStates = () => {
+    for (const active of activeMatches.values()) {
+      if (active.stateDirty) flushRoundState(active);
+    }
+  };
+  return server;
 }

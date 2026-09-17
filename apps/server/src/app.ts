@@ -14,6 +14,7 @@ import {
   InvitationKeyService,
   MatchRoom,
   PointService,
+  presenceOf,
   type AccountStore,
   type AdminAccountStore,
   type ChatGroup,
@@ -30,6 +31,7 @@ import { commitPointMutation } from "./point-mutation.js";
 import type { AdminStore } from "./admin-store.js";
 import type { GameStateStore } from "./game-state-store.js";
 import { InMemoryGroupEventBus, type GroupEventBus, type GroupMessageView } from "./group-events.js";
+import { InMemorySeatEventBus, type SeatEventBus } from "./seat-events.js";
 import {
   IDEMPOTENCY_HEADER,
   IdempotencyStore,
@@ -67,6 +69,13 @@ export interface AppDependencies {
   friendService: FriendService;
   /** 把群聊变化推给实时层；路由层只管写成功之后广播一次。 */
   groupEvents: GroupEventBus;
+  /**
+   * 把座位的暂离变化推给实时层。
+   *
+   * 「暂离」是 REST 写进去的（必须先于关闭 socket），而另外三家要立刻在头像旁看到
+   * 「暂离」出现／消失 —— 所以和群聊同理，需要一条从路由层到实时层的通知。
+   */
+  seatEvents: SeatEventBus;
   database?: { ping(): Promise<void> };
   /** When present, owns balance/status writes so they commit with their ledger or audit row. */
   adminStore?: AdminStore;
@@ -755,8 +764,42 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
     const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
+    // 已经在房里的人再打一次是**空操作**，不是错误：开局后 `join()` 会抛
+    // 「Room has already started」，而"回到自己原来的房间"恰恰是最常见的重入路径。
+    // 谁在房里由服务端从内存/数据库判定，不看客户端。
+    if (room.players.has(user.userId)) {
+      return reply.status(200).send({ roomId: room.roomId, status: room.status, playerCount: room.players.size });
+    }
     room.join(user);
     return reply.status(201).send({ roomId: room.roomId, status: room.status, playerCount: room.players.size });
+  });
+
+  /**
+   * 暂离 / 回到牌桌（presence = AWAY / ONLINE）。
+   *
+   * 单独走 REST 是因为这个信号必须在**关掉实时通道之前**发出去：
+   * 返回大厅的客户端随后会断开 socket，只靠"连接断了"服务端分不清
+   * "主动去了大厅"和"网络掉了"，而这两者要给玩家看的东西不一样。
+   *
+   * 它**不碰控制权**：返回大厅的人随时回来就能直接操作，不需要「重新接管」。
+   */
+  app.post("/v1/rooms/:roomId/seat/presence", async (request, reply) => {
+    const params = z.object({ roomId: z.string().min(1) }).parse(request.params);
+    const body = z.object({ away: z.boolean() }).parse(request.body ?? {});
+    const user = await requireUser(request.headers, dependencies);
+    const room = requireRoom(dependencies.roomStore, params.roomId);
+    requireRoomPlayer(room, user.userId);
+    // 只有真的变了才通知 —— 幂等重发（客户端重试、两条路径都调了一次）不该让另外三家白收帧。
+    if (room.markAway(user.userId, body.away)) {
+      dependencies.seatEvents.publish({ roomId: room.roomId, userId: user.userId });
+    }
+    const player = room.players.get(user.userId)!;
+    return reply.status(200).send({
+      userId: user.userId,
+      control: player.control,
+      away: player.away,
+      presence: presenceOf(player),
+    });
   });
 
   app.post("/v1/rooms/:roomId/leave", async (request, reply) => {
@@ -1221,6 +1264,14 @@ function roomSnapshot(room: MatchRoom) {
         connected: player.connected,
         disconnectedAt: player.disconnectedAt ?? null,
         reconnectDeadline: player.reconnectDeadline ?? null,
+        /**
+         * 三个维度分开下发，不合成一个 status：
+         * control 决定"这一座归谁操作"，away 是暂离标签，connected 是实时连接。
+         * `presence` 是服务端按三者推出来的展示值，客户端不需要自己拼。
+         */
+        control: player.control,
+        away: player.away,
+        presence: presenceOf(player),
       })),
     result: room.result ?? null,
   };
@@ -1372,6 +1423,7 @@ export function createInMemoryDependencies(input: {
       ?? new GroupService(input.createGroupId, input.createGroupNo, input.createMessageId),
     friendService: input.friendService ?? new FriendService(input.createFriendRequestId),
     groupEvents: new InMemoryGroupEventBus(),
+    seatEvents: new InMemorySeatEventBus(),
     createRoomId: input.createRoomId,
     // 6 位随机房间号；测试注入确定序列才好断言（与 createGroupNo 同理）。
     createRoomNo: input.createRoomNo ?? (() => String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0")),

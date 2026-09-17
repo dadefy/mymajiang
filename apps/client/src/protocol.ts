@@ -67,6 +67,12 @@ export interface RoomPlayerView {
   connected: boolean;
   disconnectedAt: string | null;
   reconnectDeadline: string | null;
+  /** 控制权（持久化的业务状态）：human 人工 / trustee 服务器代打。 */
+  control?: SeatControl;
+  /** 暂离（返回大厅）。 */
+  away?: boolean;
+  /** 服务端推导的在场状态，客户端不自己拼。 */
+  presence?: SeatPresence;
 }
 
 export interface RoomSnapshot {
@@ -319,6 +325,17 @@ export interface VisibleMeld {
   concealed?: boolean;
 }
 
+/**
+ * 座位控制权：谁在操作这一座。
+ *
+ * 由服务端权威下发（每帧都带），客户端**只读**——不问本地缓存也不看 localStorage，
+ * 断网重连、F5、切前后台之后手上那帧可能是旧的，所以永远以服务端最近一帧为准。
+ */
+export type SeatControl = "human" | "trustee";
+
+/** 在场状态，服务端按 connected / away / control 推导后下发（见 domain 的 presenceOf）。 */
+export type SeatPresence = "online" | "away" | "disconnected" | "trustee";
+
 /** 一局进行中，服务端只发给本人的脱敏快照（见 ws-server.ts 的 playerSnapshot）。 */
 export interface MatchState {
   dealerSeat?: number;
@@ -330,6 +347,13 @@ export interface MatchState {
   /** 一整局共几小场（8）。服务端下发，省得两端各硬编码一个 8。 */
   totalRounds?: number;
   seat: number;
+  /**
+   * 我这一座的控制权。`trustee` 时牌桌要置灰，并显示「正在托管中 + 重新接管」。
+   * 缺省（老服务端）按 `human` 处理。
+   */
+  control?: SeatControl;
+  /** 我是不是从大厅回到牌桌的（暂离标记）。 */
+  away?: boolean;
   phase: "swapping" | "missing" | "playing" | "claiming" | "finished";
   currentPlayerSeat: number | null;
   tilesLeft: number;
@@ -350,6 +374,8 @@ export interface MatchState {
      */
     matchDelta?: number;
     avatarUrl?: string;
+    /** 在场状态：头像上标「托管中 / 去大厅了 / 掉线」用。 */
+    presence?: SeatPresence;
     melds: VisibleMeld[];
     discards: Tile[];
     won: boolean;
@@ -395,5 +421,19 @@ export type ClientFrame =
   | { type: "self-draw" }
   | { type: "concealed-kong" }
   | { type: "added-kong" }
+  /**
+   * 退出游戏：把这一座交给服务器托管（control → trustee）。
+   *
+   * 与「返回大厅」是两件事：返回大厅走 REST 标记 away，控制权不变；
+   * 这个帧是**放弃人工操作**，服务器立刻接管，直到玩家点「重新接管」。
+   */
+  | { type: "quit" }
+  /**
+   * 重新接管：把控制权从服务器拿回人工。
+   *
+   * 能不能接管**完全由服务端判定**（token、是不是这间房的玩家、座位归属、
+   * 大局是否仍在进行、当前是否真的在托管），客户端发这个帧只是"提出请求"。
+   */
+  | { type: "request_takeover" }
   | { type: "group-subscribe"; groupId: string }
   | { type: "group-unsubscribe"; groupId: string };

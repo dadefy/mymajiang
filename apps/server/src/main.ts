@@ -219,6 +219,10 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   wss.close();
+  // 牌局快照按 2 秒节流合并写，那个延迟定时器在进程退出后永远不会到点 ——
+  // 不在这里补一次，一次正常重启就会丢掉最后约 2 秒的操作（少一张弃牌之类）。
+  // 它只补"最后一次"，运行期间的正常落盘一个字都没动。
+  wss.flushRoundStates?.();
   await app.close();
   if (writeQueue) {
     // Do not drop a queued balance/ledger write just because the process is going away.

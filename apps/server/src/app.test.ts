@@ -2109,6 +2109,62 @@ describe("server API", () => {
     expect(left.statusCode).toBe(200);
     expect(left.json()).toEqual({ groupId, dissolved: true });
   });
+
+  it("暂离走 REST：改的是房间里的真实状态，并且只在真的变化时通知实时层", async () => {
+    // 「返回大厅」必须先于关闭 socket 送出去，所以这个信号走 REST；
+    // 而房间里的**权威状态**改在 `MatchRoom` 上（不是前端自说自话），
+    // 另外三家要看到则由 seatEvents 那条通知交给实时层广播。
+    const { app, dependencies } = fixture();
+    const players: Array<{ token: string }> = [];
+    for (const name of ["甲", "乙", "丙", "丁"]) {
+      players.push({ token: (await createBetaUser(app, dependencies, name)).token });
+    }
+    const { roomId } = await startFourPlayerRoom(app, players);
+    const room = dependencies.roomStore.get(roomId)!;
+    const target = room.players.get([...room.players.keys()][1]!)!;
+
+    const events: Array<{ roomId: string; userId: string }> = [];
+    dependencies.seatEvents.subscribe((event) => events.push(event));
+
+    const away = await app.inject({
+      method: "POST",
+      url: `/v1/rooms/${roomId}/seat/presence`,
+      headers: { authorization: `Bearer ${players[1]!.token}` },
+      payload: { away: true },
+    });
+    expect(away.statusCode).toBe(200);
+    expect(away.json()).toMatchObject({ away: true, presence: "away", control: "human" });
+    expect(target.away).toBe(true);
+    // 暂离**不动控制权**：回来直接接着打，不需要「重新接管」
+    expect(target.control).toBe("human");
+    expect(events).toEqual([{ roomId, userId: target.account.userId }]);
+
+    // 幂等重发（客户端重试、或两条路径都调了一次）：状态没变就不再让另外三家白收帧
+    await app.inject({
+      method: "POST",
+      url: `/v1/rooms/${roomId}/seat/presence`,
+      headers: { authorization: `Bearer ${players[1]!.token}` },
+      payload: { away: true },
+    });
+    expect(events).toHaveLength(1);
+
+    // 回到牌桌：暂离标记清掉，再通知一次让另外三家把「暂离」撤下。
+    // 这里没有实时连接，所以 `presence` 推出的是 disconnected —— 纯 REST 环境的事实，不是 bug。
+    const online = await app.inject({
+      method: "POST",
+      url: `/v1/rooms/${roomId}/seat/presence`,
+      headers: { authorization: `Bearer ${players[1]!.token}` },
+      payload: { away: false },
+    });
+    expect(online.statusCode).toBe(200);
+    const onlineBody = online.json() as { away: boolean; control: string; presence: string };
+    expect(onlineBody.away).toBe(false);
+    expect(onlineBody.control).toBe("human");
+    // 房间里的人默认 `connected = true`（只有 socket 关闭才翻成断开），
+    // 所以回桌之后 presence 就是 online —— 这才是玩家该看到的那一版。
+    expect(onlineBody.presence).toBe("online");
+    expect(events).toHaveLength(2);
+  });
 });
 
 
