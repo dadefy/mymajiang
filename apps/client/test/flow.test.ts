@@ -1050,3 +1050,89 @@ describe("ClientFlow", () => {
     expect(flow.current).toMatchObject({ name: "home", me: { points: 2040 } });
   });
 });
+
+
+describe("chat recovery", () => {
+  it("recovers multiple missed pages, offline recalls and group notices without duplicates", async () => {
+    vi.useFakeTimers();
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    let recovered = false;
+    http.on(request => request.path === "/v1/groups/g1", () => ({ status: 200, body: {
+      groupId: "g1", name: "牌友群", notice: recovered ? "新公告" : "旧公告", role: "owner", members: [],
+    } }));
+    http.on(request => request.path.startsWith("/v1/groups/g1/messages"), request => {
+      const cursor = new URL(request.path, "http://fake").searchParams.get("before");
+      const body = !recovered ? { messages: [groupMessage("m1")] }
+        : cursor === "page2" ? { messages: [groupMessage("m1", { content: "[消息已撤回]", recalledAt: "2026-09-16T04:01:00Z" }), groupMessage("m2")], nextCursor: "older" }
+        : { messages: [groupMessage("m3"), groupMessage("m4")], nextCursor: "page2" };
+      return { status: 200, body: { groupId: "g1", ...body } };
+    });
+    await flow.openChat("g1");
+    recovered = true;
+    sockets.last().serverCloses();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(flow.current).toMatchObject({ name: "chat", group: { notice: "新公告" }, hasEarlier: true, notice: undefined });
+    if (flow.current.name !== "chat") throw new Error("wrong screen");
+    expect(flow.current.messages.map(message => message.messageId)).toEqual(["m1", "m2", "m3", "m4"]);
+    expect(flow.current.messages[0]!.recalledAt).not.toBeNull();
+    await flow.backHome();
+    vi.useRealTimers();
+  });
+
+  it("preserves push events received during recovery and ignores responses after leaving", async () => {
+    vi.useFakeTimers();
+    const { flow, http, sockets } = await chatWith();
+    const hold = http.hold(request => request.path.startsWith("/v1/groups/g1/messages"));
+    sockets.last().serverCloses();
+    await vi.advanceTimersByTimeAsync(500);
+    sockets.last().serverSends({ type: "group-message-recalled", groupId: "g1",
+      message: groupMessage("m1", { content: "[消息已撤回]", recalledAt: "2026-09-16T04:01:00Z" }) });
+    sockets.last().serverSends({ type: "group-message", groupId: "g1", message: groupMessage("m2") });
+    hold.release();
+    await vi.advanceTimersByTimeAsync(0);
+    if (flow.current.name !== "chat") throw new Error("wrong screen");
+    expect(flow.current.messages.map(message => message.messageId)).toEqual(["m1", "m2"]);
+    expect(flow.current.messages[0]!.recalledAt).not.toBeNull();
+    await flow.backHome();
+    vi.useRealTimers();
+  });
+
+  it("does not repopulate a chat after the user leaves during recovery", async () => {
+    vi.useFakeTimers();
+    const { flow, http, sockets } = await chatWith();
+    const hold = http.hold(request => request.path.startsWith("/v1/groups/g1/messages"));
+    sockets.last().serverCloses();
+    await vi.advanceTimersByTimeAsync(500);
+    await flow.backHome();
+    hold.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flow.current.name).toBe("home");
+    vi.useRealTimers();
+  });
+});
+
+
+it("keeps existing chat messages when recovery fails", async () => {
+  vi.useFakeTimers();
+  const { flow, http, sockets } = flowWith();
+  http.onJson("POST", "/v1/auth/login", 200, SESSION);
+  stubHome(http);
+  await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+  let fail = false;
+  http.on(request => request.path.startsWith("/v1/groups/g1/messages"), () => fail
+    ? { status: 503, body: { code: "OFFLINE" } }
+    : { status: 200, body: { groupId: "g1", messages: [groupMessage("m1")] } });
+  stubChat(http, "g1");
+  await flow.openChat("g1");
+  fail = true;
+  sockets.last().serverCloses();
+  await vi.advanceTimersByTimeAsync(500);
+  if (flow.current.name !== "chat") throw new Error("wrong screen");
+  expect(flow.current.messages.map(message => message.messageId)).toEqual(["m1"]);
+  expect(flow.current.error).toBeTruthy();
+  await flow.backHome();
+  vi.useRealTimers();
+});

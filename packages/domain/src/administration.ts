@@ -1,4 +1,4 @@
-import type { AccountStatus, UserAccount } from "./accounts.js";
+import { assertAccountWritable, type AccountStatus, type UserAccount } from "./accounts.js";
 import type { AdminActor } from "./points.js";
 
 export type ManageableAccountStatus = Extract<AccountStatus, "active" | "temporarily_banned" | "permanently_banned">;
@@ -28,6 +28,7 @@ export class AccountAdministrationService {
     status: ManageableAccountStatus,
     reason: string,
   ): AdminAuditEntry {
+    assertAccountWritable(account);
     if (actor.role !== "super_admin") throw new Error("Only super administrators can change account status");
     if (account.activeMatchId) throw new Error("Account status cannot change during an active match");
     if (account.status !== "active" && account.status !== "temporarily_banned" && account.status !== "permanently_banned") {

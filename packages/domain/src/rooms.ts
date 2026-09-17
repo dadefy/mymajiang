@@ -166,8 +166,9 @@ export class MatchRoom {
     // Seats are fixed at start, densely from join order, so the table layout never shifts afterwards.
     const ordered = [...this.players.values()]
       .sort((left, right) => left.joinedAt.getTime() - right.joinedAt.getTime());
+    // Validate everyone before mutating any seat or balance.
+    for (const player of ordered) this.assertCanJoin(player.account);
     ordered.forEach((player, seat) => {
-      this.assertCanJoin(player.account);
       this.openingBalances.set(player.account.userId, player.account.points);
       this.rawDeltas.set(player.account.userId, 0);
       player.seat = seat;

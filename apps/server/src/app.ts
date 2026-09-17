@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   AccountService,
+  assertAccountWritable,
   AccountAdministrationService,
   AdminAuthService,
   FriendService,
@@ -25,6 +26,7 @@ import {
 } from "@mianyang-mahjong/domain";
 import { TokenService, authToken } from "./auth.js";
 import { adminConsoleHtml } from "./admin-console.js";
+import { commitPointMutation } from "./point-mutation.js";
 import type { AdminStore } from "./admin-store.js";
 import type { GameStateStore } from "./game-state-store.js";
 import { InMemoryGroupEventBus, type GroupEventBus, type GroupMessageView } from "./group-events.js";
@@ -343,6 +345,7 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const account = await requireUser(request.headers, dependencies);
     const body = z.object({ password: z.string().min(8).max(200) }).parse(request.body);
     enforceRateLimit(dependencies.rateLimiter, `password:${account.userId}`, dependencies.rateLimitRules.authByIp);
+    assertAccountWritable(account);
     account.passwordHash = userPasswords.hash(body.password);
     dependencies.accountStore.saveAccount(account);
     await dependencies.accountStore.flush?.();
@@ -563,8 +566,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       .parse(request.body);
     const account = dependencies.accountStore.findAccountById(params.userId);
     if (!account) throw new Error("User not found");
-    const ledger = dependencies.pointService.adjustByAdmin(account, admin, body.delta, body.reason);
-    commitAdminMutation(dependencies, account, (store) => store.commitPointAdjustment(account, ledger));
+    const ledger = await commitPointMutation(dependencies, account,
+      (service, draft) => service.adjustByAdmin(draft, admin, body.delta, body.reason));
     return reply.status(201).send(ledger);
   });
 
@@ -583,8 +586,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const body = z.object({ reason: z.string().trim().min(1).max(200) }).parse(request.body);
     const account = dependencies.accountStore.findAccountById(params.userId);
     if (!account) throw new Error("USER_NOT_FOUND");
-    const reversal = dependencies.pointService.reverseAdminAdjustment(account, admin, params.ledgerId, body.reason);
-    commitAdminMutation(dependencies, account, (store) => store.commitPointAdjustment(account, reversal));
+    const reversal = await commitPointMutation(dependencies, account,
+      (service, draft) => service.reverseAdminAdjustment(draft, admin, params.ledgerId, body.reason));
     return reply.status(201).send(reversal);
   });
 

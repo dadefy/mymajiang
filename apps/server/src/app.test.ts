@@ -157,7 +157,7 @@ describe("server API", () => {
 
   it("群搜索、群权限、邀请名片与四人免准备开局", async () => {
     const { app, dependencies } = fixture();
-    const users = [];
+    const users: Awaited<ReturnType<typeof createBetaUser>>[] = [];
     for (const name of ["群主", "管理员", "成员", "牌友"]) users.push(await createBetaUser(app, dependencies, name));
     const call = (index: number, method: "GET" | "POST", url: string, payload?: object) => app.inject({ method, url, headers: { "x-auth-token": users[index]!.token }, ...(payload ? { payload } : {}) });
     const group = (await call(0, "POST", "/v1/groups", { name: "晚间牌友" })).json();
@@ -995,7 +995,7 @@ describe("server API", () => {
     dependencies.adminStore = {
       ledgerEntries: [],
       auditEntries: [],
-      commitPointAdjustment: (commitAccount, entry) => {
+      commitPointAdjustment: async (commitAccount, entry) => {
         ledgerCommits.push({ userId: commitAccount.userId, delta: entry.delta, balanceAfter: entry.balanceAfter });
       },
       commitAccountStatusChange: (commitAccount, entry) => {
@@ -2043,5 +2043,73 @@ describe("server API", () => {
     });
     expect(left.statusCode).toBe(200);
     expect(left.json()).toEqual({ groupId, dissolved: true });
+  });
+});
+
+
+describe("durable point failures", () => {
+  it("does not publish a failed adjustment or reversal and retries only once", async () => {
+    const { app, dependencies, tokens } = fixture();
+    const user = await createBetaUser(app, dependencies, "故障测试");
+    const account = dependencies.accountStore.findAccountById(user.userId)!;
+    const before = account.points;
+    const ledgerCount = dependencies.pointService.ledger.length;
+    const admin = await tokens.issueAdminToken("developer", "super_admin");
+    let fail = true;
+    dependencies.adminStore = {
+      ledgerEntries: [], auditEntries: [], commitAccountStatusChange() {},
+      async commitPointAdjustment() { if (fail) throw new Error("database offline"); },
+      async flush() {},
+    };
+    const send = (path: string, payload: object) => {
+      idCounter += 1; // The fixture ID provider reads this counter.
+      return app.inject({ method: "POST", url: path, headers: { authorization: 'Bearer ' + admin }, payload });
+    };
+    const path = '/v1/admin/users/' + user.userId + '/points';
+    expect((await send(path, { delta: 100, reason: "test" })).statusCode).toBeGreaterThanOrEqual(400);
+    expect(account.points).toBe(before);
+    expect(dependencies.pointService.ledger).toHaveLength(ledgerCount);
+    fail = false;
+    const success = await send(path, { delta: 100, reason: "retry" });
+    expect(success.statusCode).toBe(201);
+    expect(account.points).toBe(before + 100);
+    expect(dependencies.pointService.ledger).toHaveLength(ledgerCount + 1);
+    fail = true;
+    const reverse = path + '/' + success.json().ledgerId + '/reverse';
+    expect((await send(reverse, { reason: "reverse" })).statusCode).toBeGreaterThanOrEqual(400);
+    expect(account.points).toBe(before + 100);
+    expect(dependencies.pointService.ledger).toHaveLength(ledgerCount + 1);
+    fail = false;
+    expect((await send(reverse, { reason: "retry reverse" })).statusCode).toBe(201);
+    expect(account.points).toBe(before);
+    await app.close();
+  });
+
+  it("keeps committed values visible during a pending write and rejects concurrent mutations", async () => {
+    const { app, dependencies, tokens } = fixture();
+    const user = await createBetaUser(app, dependencies, "并发测试");
+    const account = dependencies.accountStore.findAccountById(user.userId)!;
+    const before = account.points;
+    const admin = await tokens.issueAdminToken("developer", "super_admin");
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    dependencies.adminStore = {
+      ledgerEntries: [], auditEntries: [], commitAccountStatusChange() {}, async flush() {},
+      commitPointAdjustment() { started(); return new Promise<void>(resolve => { release = resolve; }); },
+    };
+    const request = { method: "POST" as const, url: '/v1/admin/users/' + user.userId + '/points',
+      headers: { authorization: 'Bearer ' + admin }, payload: { delta: 100, reason: "test" } };
+    const pending = app.inject(request).then(result => result);
+    await entered;
+    expect(account.points).toBe(before);
+    expect((await app.inject(request)).statusCode).toBe(409);
+    const room = await app.inject({ method: "POST", url: "/v1/rooms",
+      headers: { authorization: 'Bearer ' + user.token } });
+    expect(room.statusCode).toBe(409);
+    release();
+    expect((await pending).statusCode).toBe(201);
+    expect(account.points).toBe(before + 100);
+    await app.close();
   });
 });

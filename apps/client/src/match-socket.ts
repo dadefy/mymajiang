@@ -40,6 +40,7 @@ export class MatchSocket {
   private readonly subscribedGroups = new Set<string>();
   private roomId: string | undefined;
   private closed = false;
+  private generation = 0;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -56,13 +57,28 @@ export class MatchSocket {
 
   /** 连接并完成 auth 握手。`roomId` 省略时只订阅群聊，不绑房间。 */
   async connect(roomId?: string): Promise<void> {
+    const generation = ++this.generation;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.closed = false;
     this.roomId = roomId;
     // 重连时旧连接多半已经半死；先摘掉它的监听再关掉，避免两条通道同时收发。
     this.detachTransport?.();
     this.detachTransport = null;
     this.transport?.close();
-    this.transport = await this.options.factory.connect(this.options.url);
+    this.transport = null;
+    let transport: SocketTransport;
+    try {
+      transport = await this.options.factory.connect(this.options.url);
+    } catch (error) {
+      if (this.closed || generation !== this.generation) return;
+      throw error;
+    }
+    if (this.closed || generation !== this.generation) {
+      transport.close();
+      return;
+    }
+    this.transport = transport;
     const offMessage = this.transport.onMessage((payload) => this.dispatch(payload));
     const offClose = this.transport.onClose(() => {
       for (const listener of this.listeners) listener({ kind: "disconnected" });
@@ -84,6 +100,7 @@ export class MatchSocket {
 
   close(): void {
     this.closed = true;
+    this.generation += 1;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.detachTransport?.();
@@ -118,10 +135,13 @@ export class MatchSocket {
   }
 
   private scheduleReconnect(): void {
-    if (this.closed) return;
+    if (this.closed || this.reconnectTimer) return;
     const delay = BACKOFF_MS[Math.min(this.reconnectAttempt, BACKOFF_MS.length - 1)]!;
     this.reconnectAttempt += 1;
+    const generation = this.generation;
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || generation !== this.generation) return;
       this.connect(this.roomId).catch(() => this.scheduleReconnect());
     }, delay);
   }

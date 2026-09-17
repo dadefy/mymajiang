@@ -118,6 +118,7 @@ function round(loss: number): RecordedRound {
       { playerId: "A", delta: -loss },
       { playerId: "B", delta: loss },
     ],
+    wins: [],
     winnerSeats: [1],
     nextDealerSeat: 1,
     events: [{ eventId: "event-1", type: "win", payer: "A", payee: "B", points: loss, note: "点炮" }],

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MatchSocket } from "../src/match-socket.js";
-import { FakeSocketFactory } from "./fakes.js";
+import { FakeSocketFactory, FakeSocketTransport } from "./fakes.js";
 
 const factory = new FakeSocketFactory();
 
@@ -122,5 +122,56 @@ describe("MatchSocket", () => {
     await socket.connect();
     expect(factory.last().sent).toEqual([{ type: "auth", token: "jwt-1" }]);
     socket.close();
+  });
+});
+
+
+describe("pending socket cancellation", () => {
+  it("closes a late connection without authenticating or emitting connected", async () => {
+    let resolve!: (socket: FakeSocketTransport) => void;
+    const transport = new FakeSocketTransport();
+    const socket = new MatchSocket({ url: "fake", token: "fake", factory: {
+      connect: () => new Promise(r => { resolve = r; }),
+    } });
+    const events: string[] = [];
+    socket.on(event => events.push(event.kind));
+    const pending = socket.connect();
+    socket.close();
+    resolve(transport);
+    await pending;
+    expect(transport.closed).toBe(true);
+    expect(transport.sent).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it("keeps the latest connection when older connection attempts resolve last", async () => {
+    const resolves: Array<(socket: FakeSocketTransport) => void> = [];
+    const socket = new MatchSocket({ url: "fake", token: "fake", factory: {
+      connect: () => new Promise(r => { resolves.push(r); }),
+    } });
+    const old = new FakeSocketTransport(), current = new FakeSocketTransport();
+    const first = socket.connect("old"), second = socket.connect("new");
+    resolves[1]!(current); await second;
+    resolves[0]!(old); await first;
+    socket.send({ type: "start" });
+    expect(old.closed).toBe(true);
+    expect(old.sent).toEqual([]);
+    expect(current.sent).toEqual([{ type: "auth", token: "fake", roomId: "new" }, { type: "start" }]);
+    socket.close();
+  });
+
+  it("does not retry a rejected connection after close", async () => {
+    vi.useFakeTimers();
+    const first = new FakeSocketTransport();
+    let reject!: (error: Error) => void;
+    const connect = vi.fn().mockResolvedValueOnce(first).mockImplementationOnce(() => new Promise((_r, r) => { reject = r; }));
+    const socket = new MatchSocket({ url: "fake", token: "fake", factory: { connect } });
+    await socket.connect();
+    first.serverCloses();
+    await vi.advanceTimersByTimeAsync(500);
+    socket.close();
+    reject(new Error("offline"));
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(connect).toHaveBeenCalledTimes(2);
   });
 });

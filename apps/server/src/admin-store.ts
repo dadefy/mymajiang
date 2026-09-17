@@ -19,7 +19,7 @@ export interface AdminStore {
   readonly auditEntries: readonly AdminAuditEntry[];
 
   /** Atomically persists the account balance and the matching ledger entry. */
-  commitPointAdjustment(account: UserAccount, entry: PointLedgerEntry): void;
+  commitPointAdjustment(account: UserAccount, entry: PointLedgerEntry): Promise<void>;
 
   /** Atomically persists the account status and the matching audit entry. */
   commitAccountStatusChange(account: UserAccount, entry: AdminAuditEntry): void;

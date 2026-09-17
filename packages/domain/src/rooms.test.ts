@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MatchRoom, type RecordedRound, type UserAccount } from "./index.js";
+import { MatchRoom, reserveAccountWrite, type RecordedRound, type UserAccount } from "./index.js";
 
 function account(userId: string, points = 500): UserAccount {
   return {
@@ -172,4 +172,18 @@ describe("match room", () => {
     expect(() => room.reconnect("B")).toThrow("RECONNECT_WINDOW_EXPIRED");
     expect(room.players.get("B")).toMatchObject({ connected: false });
   });
+});
+
+
+it("does not partially start a room while a later player's points are being saved", () => {
+  const { room, users } = readyRoom();
+  const release = reserveAccountWrite(users[3]!);
+  expect(() => room.start("A")).toThrow("ACCOUNT_WRITE_PENDING");
+  expect(room.status).toBe("waiting");
+  expect(room.openingBalances.size).toBe(0);
+  expect(users.every(user => user.activeMatchId === undefined)).toBe(true);
+  expect([...room.players.values()].every(player => player.seat === undefined)).toBe(true);
+  release();
+  room.start("A");
+  expect(room.status).toBe("playing");
 });

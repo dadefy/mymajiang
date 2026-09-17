@@ -15,56 +15,54 @@ export interface SqlStatement {
  * and wraps its statements in BEGIN/COMMIT so a multi-row change can never be applied partially.
  */
 export class PostgresWriteQueue {
-  private pending: Promise<void> = Promise.resolve();
-  private failure: unknown;
+  private pending: Promise<{ error?: unknown }> = Promise.resolve({});
 
   constructor(private readonly database: PostgresDatabase) {}
 
+  /** Each operation has its own result; flush callers share an immutable batch result. */
+  private schedule(write: () => Promise<void>): Promise<void> {
+    const previous = this.pending;
+    const operation = previous.then(write);
+    this.pending = Promise.all([
+      previous,
+      operation.then(() => ({}), (error: unknown) => ({ error })),
+    ]).then(([before, result]) => "error" in before ? before : result);
+    return operation;
+  }
+
   /** Queues a single auto-committed statement. */
-  enqueue(sql: string, parameters: readonly unknown[] = []): void {
-    this.pending = this.pending
-      .then(async () => {
-        await this.database.pool.query(sql, [...parameters]);
-      })
-      .catch((error: unknown) => {
-        this.failure ??= error;
-      });
+  enqueue(sql: string, parameters: readonly unknown[] = []): Promise<void> {
+    return this.schedule(async () => {
+      await this.database.pool.query(sql, [...parameters]);
+    });
   }
 
   /** Queues statements that must commit or roll back together. */
-  enqueueTransaction(statements: readonly SqlStatement[]): void {
-    if (statements.length === 0) return;
-    this.pending = this.pending
-      .then(async () => {
-        const client = await this.database.pool.connect();
-        try {
-          await client.query("BEGIN");
-          for (const statement of statements) {
-            await client.query(statement.sql, [...statement.parameters]);
-          }
-          await client.query("COMMIT");
-        } catch (error) {
-          await rollback(client);
-          throw error;
-        } finally {
-          client.release();
+  enqueueTransaction(statements: readonly SqlStatement[]): Promise<void> {
+    if (statements.length === 0) return Promise.resolve();
+    return this.schedule(async () => {
+      const client = await this.database.pool.connect();
+      try {
+        await client.query("BEGIN");
+        for (const statement of statements) {
+          await client.query(statement.sql, [...statement.parameters]);
         }
-      })
-      .catch((error: unknown) => {
-        this.failure ??= error;
-      });
+        await client.query("COMMIT");
+      } catch (error) {
+        await rollback(client);
+        throw error;
+      } finally {
+        client.release();
+      }
+    });
   }
 
-  /**
-   * Waits for every queued write and rethrows the first failure exactly once, so a caller can
-   * refuse to send a success response when a write did not reach the database.
-   */
+  /** Every waiter on the same batch observes the same failure. */
   async flush(): Promise<void> {
-    await this.pending;
-    if (this.failure === undefined) return;
-    const error = this.failure;
-    this.failure = undefined;
-    throw error;
+    const batch = this.pending;
+    const result = await batch;
+    if (this.pending === batch) this.pending = Promise.resolve({});
+    if ("error" in result) throw result.error;
   }
 }
 

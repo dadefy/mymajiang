@@ -96,8 +96,8 @@ export class PostgresAdminStore implements AdminStore {
     );
   }
 
-  commitPointAdjustment(account: UserAccount, entry: PointLedgerEntry): void {
-    this.queue.enqueueTransaction([
+  commitPointAdjustment(account: UserAccount, entry: PointLedgerEntry): Promise<void> {
+    return this.queue.enqueueTransaction([
       { sql: UPSERT_ACCOUNT_SQL, parameters: accountParameters(account) },
       { sql: INSERT_POINT_LEDGER_SQL, parameters: ledgerParameters(entry) },
     ]);

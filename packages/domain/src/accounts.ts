@@ -18,6 +18,19 @@ export interface UserAccount {
   createdAt: Date;
 }
 
+// Transient reservation only; never persisted or sent to clients.
+const pendingAccountWrites = new WeakSet<UserAccount>();
+
+export function assertAccountWritable(account: UserAccount): void {
+  if (pendingAccountWrites.has(account)) throw new Error("ACCOUNT_WRITE_PENDING");
+}
+
+export function reserveAccountWrite(account: UserAccount): () => void {
+  assertAccountWritable(account);
+  pendingAccountWrites.add(account);
+  return () => { pendingAccountWrites.delete(account); };
+}
+
 export interface AccountStore {
   listAccounts(): UserAccount[];
   findAccountById(userId: string): UserAccount | undefined;
@@ -118,6 +131,7 @@ export class AccountService {
    * 删掉会破坏别人的战绩与账目。
    */
   deleteAccount(account: UserAccount): void {
+    assertAccountWritable(account);
     if (account.status === "deleted") throw new Error("Account is already deleted");
     // 与管理员改状态同一条约束：牌局进行中不动账号，否则那局会缺一个人。
     if (account.activeMatchId) throw new Error("Account cannot be deleted during an active match");

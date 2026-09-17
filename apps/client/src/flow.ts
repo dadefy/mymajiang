@@ -189,6 +189,7 @@ const DOMAIN_ERROR_TEXT: Record<string, string> = {
   // 连接与身份
   "Not authenticated": "登录状态已失效，请重新登录",
   "ACCOUNT_NOT_ACTIVE": "账号已被停用",
+  "ACCOUNT_WRITE_PENDING": "积分正在保存，请稍后重试",
   // 断线重连有时间窗（见 packages/domain 的 reconnect）：窗口内回来能接着打，
   // 超时就回不去了。这条原先会原样显示英文码给用户。
   "RECONNECT_WINDOW_EXPIRED": "离开太久，那一局已经回不去了",
@@ -233,6 +234,8 @@ function describeUploadFailure(error: ApiError): string {
 export class ClientFlow {
   private screen: Screen = { name: "key-entry", busy: false };
   private socket: MatchSocket | null = null;
+  private chatGeneration = 0;
+  private chatRefresh = 0;
   /** 登录后记住「我是谁」，离开房间回主页时不用再调接口。 */
   private me: { userId: string; nickname: string; points: number } | undefined;
   /**
@@ -274,8 +277,7 @@ export class ClientFlow {
 
   /** 退出登录：关掉实时通道、清掉令牌，回到密钥输入页。 */
   signOut(): void {
-    this.socket?.close();
-    this.socket = null;
+    this.closeSocket();
     this.roomId = null;
     this.earlierCursor = undefined;
     this.me = undefined;
@@ -572,6 +574,7 @@ export class ClientFlow {
    */
   async openChat(groupId: string): Promise<void> {
     const me = this.meOrFail();
+    const generation = ++this.chatGeneration;
     this.earlierCursor = undefined;
     this.set({
       name: "chat",
@@ -585,6 +588,7 @@ export class ClientFlow {
       uploading: false,
     });
     await this.attachChatSocket(groupId);
+    if (generation !== this.chatGeneration || this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
     await this.loadLatestPage(groupId);
   }
 
@@ -715,8 +719,10 @@ export class ClientFlow {
     if (this.screen.loadingEarlier || !this.screen.hasEarlier || !cursor) return;
     const groupId = this.screen.groupId;
     this.set({ ...this.screen, loadingEarlier: true, error: undefined });
+    const refresh = this.chatRefresh;
+    const generation = this.chatGeneration;
     const page = await this.api.groupMessages(groupId, CHAT_PAGE_SIZE, cursor);
-    if (this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
+    if (refresh !== this.chatRefresh || generation !== this.chatGeneration || this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
     if (!page.ok) {
       this.set({ ...this.screen, loadingEarlier: false, error: describe(page.error) });
       return;
@@ -733,7 +739,7 @@ export class ClientFlow {
   /** 重拉群详情与最新一页。失败时保留已有消息，只把错误显示出来。 */
   async refreshChat(): Promise<void> {
     if (this.screen.name !== "chat") return;
-    await this.loadLatestPage(this.screen.groupId);
+    await this.loadLatestPage(this.screen.groupId, true);
   }
 
   /** 群消息的内容走 REST；推送由 socket 事件带给渲染层。 */
@@ -806,6 +812,8 @@ export class ClientFlow {
   }
 
   private closeSocket(): void {
+    this.chatGeneration += 1;
+    this.chatRefresh += 1;
     this.socket?.close();
     this.socket = null;
   }
@@ -890,17 +898,20 @@ export class ClientFlow {
       }
       case "group-removed":
         if (event.groupId !== this.screen.groupId) return;
-        this.set({ ...this.screen, notice: "你已被移出该群" });
+        this.chatRefresh += 1;
+        this.set({ ...this.screen, loadingEarlier: false, notice: "你已被移出该群" });
         return;
       case "group-dissolved":
         if (event.groupId !== this.screen.groupId) return;
-        this.set({ ...this.screen, notice: "该群已解散" });
+        this.chatRefresh += 1;
+        this.set({ ...this.screen, loadingEarlier: false, notice: "该群已解散" });
         return;
       case "disconnected":
         this.set({ ...this.screen, notice: "连接已断开，正在重连…" });
         return;
       case "reconnected":
-        this.set({ ...this.screen, notice: undefined });
+        this.set({ ...this.screen, notice: "连接已恢复，正在同步消息…" });
+        void this.loadLatestPage(this.screen.groupId, true);
         return;
       case "error":
         this.set({ ...this.screen, notice: translateDomainError(event.message) ?? event.message });
@@ -911,24 +922,58 @@ export class ClientFlow {
   }
 
   /** 拉群详情与最新一页消息，填进 chat 页面。 */
-  private async loadLatestPage(groupId: string): Promise<void> {
-    const [detail, page] = await Promise.all([
-      this.api.group(groupId),
-      this.api.groupMessages(groupId, CHAT_PAGE_SIZE),
-    ]);
+  private async loadLatestPage(groupId: string, recover = false): Promise<void> {
     if (this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
-    this.earlierCursor = page.ok ? page.value.nextCursor : undefined;
-    const failure = detail.ok ? (page.ok ? null : page.error) : detail.error;
+    const generation = this.chatGeneration;
+    const refresh = ++this.chatRefresh;
+    const before = new Map(this.screen.messages.map(message => [message.messageId, message]));
+    const oldestId = recover ? this.screen.messages[0]?.messageId : undefined;
+    const previousGroup = this.screen.group;
+    const current = () => generation === this.chatGeneration && refresh === this.chatRefresh
+      && this.screen.name === "chat" && this.screen.groupId === groupId;
+    const [detail, first] = await Promise.all([
+      this.api.group(groupId), this.api.groupMessages(groupId, CHAT_PAGE_SIZE),
+    ]);
+    if (!current() || this.screen.name !== "chat") return;
+    if (!detail.ok || !first.ok) {
+      const failure = !detail.ok ? detail.error : !first.ok ? first.error : undefined;
+      this.set({ ...this.screen, loadingEarlier: false, notice: undefined,
+        error: failure ? describe(failure) : "消息同步失败，请重试" });
+      return;
+    }
+    let messages = first.value.messages;
+    let cursor = first.value.nextCursor;
+    const visited = new Set<string>();
+    // Read through the oldest visible message: reconnect gaps can exceed one page,
+    // and older visible messages may have been recalled while disconnected.
+    while (oldestId && !messages.some(message => message.messageId === oldestId) && cursor) {
+      if (visited.has(cursor)) break;
+      visited.add(cursor);
+      const page = await this.api.groupMessages(groupId, CHAT_PAGE_SIZE, cursor);
+      if (!current() || this.screen.name !== "chat") return;
+      if (!page.ok) {
+        this.set({ ...this.screen, loadingEarlier: false, notice: undefined, error: describe(page.error) });
+        return;
+      }
+      messages = [...page.value.messages, ...messages];
+      cursor = page.value.nextCursor;
+    }
+    if (!current() || this.screen.name !== "chat") return;
+    // Only events received AFTER the fetch began may override the server snapshot.
+    const arrived = this.screen.messages.filter(message => before.get(message.messageId) !== message);
+    this.earlierCursor = cursor;
     this.set({
       ...this.screen,
-      group: detail.ok ? detail.value : this.screen.group,
-      // 这一页是**出发时**的历史。路上可能已经有新消息到了 —— 刚进群立刻发出去的那条、
-      // 或别人的实时推送 —— 直接覆盖会把它们擦掉，用户看到的是「消息发出去又自己没了」。
-      // 所以按 `messageId` 合并：页里的顺序为准，页里没有的补在末尾。
-      messages: page.ok ? mergePageWithArrived(page.value.messages, this.screen.messages) : this.screen.messages,
-      hasEarlier: this.earlierCursor !== undefined,
+      group: {
+        ...detail.value,
+        ...(this.screen.group?.notice !== previousGroup?.notice ? { notice: this.screen.group!.notice } : {}),
+        ...(this.screen.group?.allMuted !== previousGroup?.allMuted ? { allMuted: this.screen.group!.allMuted } : {}),
+      },
+      messages: mergePageWithArrived(messages, arrived),
+      hasEarlier: cursor !== undefined,
       loadingEarlier: false,
-      ...(failure ? { error: describe(failure) } : {}),
+      error: undefined,
+      notice: undefined,
     });
   }
 
@@ -944,6 +989,7 @@ export class ClientFlow {
       // 不带 roomId：auth 的 roomId 可选，省略就是「只订阅群聊」。
       await socket.connect();
     }
+    if (socket !== this.socket || this.screen.name !== "chat" || this.screen.groupId !== groupId) return;
     socket.subscribeGroup(groupId);
   }
 

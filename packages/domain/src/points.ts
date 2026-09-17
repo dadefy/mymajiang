@@ -1,4 +1,4 @@
-import type { UserAccount } from "./accounts.js";
+import { assertAccountWritable, type UserAccount } from "./accounts.js";
 
 export type AdminRole = "super_admin" | "review_admin";
 
@@ -31,6 +31,7 @@ export class PointService {
   ) {}
 
   adjustByAdmin(account: UserAccount, actor: AdminActor, delta: number, reason: string): PointLedgerEntry {
+    assertAccountWritable(account);
     if (actor.role !== "super_admin") throw new Error("Only super administrators can adjust points");
     if (account.activeMatchId) throw new Error("Points cannot be adjusted during an active match");
     if (!Number.isSafeInteger(delta) || delta === 0) throw new Error("Point adjustment must be a non-zero integer");
@@ -60,6 +61,7 @@ export class PointService {
     ledgerId: string,
     reason: string,
   ): PointLedgerEntry {
+    assertAccountWritable(account);
     if (actor.role !== "super_admin") throw new Error("Only super administrators can reverse point adjustments");
     if (account.activeMatchId) throw new Error("Points cannot be adjusted during an active match");
     const original = this.ledger.find((entry) => entry.ledgerId === ledgerId && entry.userId === account.userId);
@@ -86,6 +88,13 @@ export class PointService {
     return reversal;
   }
 
+  /** Isolated staging service; shares only the ID/clock providers. */
+  fork(): PointService {
+    const service = new PointService(this.createLedgerId, this.now);
+    service.restore(this.ledger);
+    return service;
+  }
+
   entriesFor(userId: string): PointLedgerEntry[] {
     return this.ledger
       .filter((entry) => entry.userId === userId)
@@ -105,5 +114,6 @@ export class PointService {
 }
 
 export function canEnterMatch(account: UserAccount, minimumEntryPoints = 500): boolean {
+  assertAccountWritable(account);
   return account.status === "active" && !account.activeMatchId && account.points >= minimumEntryPoints;
 }
