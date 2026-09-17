@@ -348,6 +348,31 @@ describe("ClientFlow", () => {
     });
   });
 
+  it("刚进群就发的消息，不会被随后返回的历史页盖掉", async () => {
+    const { flow, http } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    stubChat(http, "g1", [groupMessage("m1")]);
+    http.onJson("POST", "/v1/groups/g1/messages", 201, groupMessage("m2", { content: "早发的那条" }));
+    // 把历史页扣在路上：这正是「点了会话、聊天区刚画出来」的那一刻，
+    // 用户完全来得及在它回来之前把一条消息发出去。
+    // 只扣 GET（POST 发消息走的是同一个路径）。
+    const history = http.hold((request) => request.method === "GET" && request.path === "/v1/groups/g1/messages");
+
+    const opened = flow.openChat("g1");
+    await flow.sendText("早发的那条");
+    history.release();
+    await opened;
+
+    const screen = flow.current;
+    expect(screen.name).toBe("chat");
+    if (screen.name !== "chat") return;
+    // 扣住那一刻的历史页里没有 m2，但它必须还在（自己的消息贴上去又被擦掉，
+    // 在用户眼里就是「发出去了、又自己消失了」）。
+    expect(screen.messages.map((message) => message.messageId)).toEqual(["m1", "m2"]);
+  });
+
   it("撤回后那条消息就地变成已撤回", async () => {
     const { flow, http } = flowWith();
     http.onJson("POST", "/v1/auth/login", 200, SESSION);

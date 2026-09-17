@@ -21,6 +21,17 @@ export class FakeHttpTransport implements HttpTransport {
     match: (request: HttpRequest) => boolean;
     respond: (request: HttpRequest) => FakeResponse;
   }> = [];
+  /**
+   * 被用例扣住的请求（模拟「响应还在路上」）。
+   *
+   * 假传输默认是「一调用就返回」，而真实网络上有几十到几百毫秒的往返 ——
+   * 「刚点进群就发消息」这类时序缺陷恰好只藏在那一小段里，不扣住就复现不出来。
+   */
+  private readonly holds: Array<{
+    match: (request: HttpRequest) => boolean;
+    waiting: Array<() => void>;
+    open: boolean;
+  }> = [];
 
   /** 先注册的先匹配。 */
   on(match: (request: HttpRequest) => boolean, respond: (request: HttpRequest) => FakeResponse): this {
@@ -35,6 +46,23 @@ export class FakeHttpTransport implements HttpTransport {
     );
   }
 
+  /**
+   * 扣住匹配的请求不回答，直到 `release()`；在那之前调用方一直挂在 await 上。
+   *
+   * 在 `release()` 之前到来的请求都会被扣住（同一份 hold 复用），
+   * 用例只需要「让它们的回答晚于某件事发生」。
+   */
+  hold(match: (request: HttpRequest) => boolean): { release: () => void } {
+    const hold = { match, waiting: [] as Array<() => void>, open: false };
+    this.holds.push(hold);
+    return {
+      release: () => {
+        hold.open = true;
+        for (const resume of hold.waiting.splice(0)) resume();
+      },
+    };
+  }
+
   lastRequest(): HttpRequest {
     const request = this.requests.at(-1);
     if (!request) throw new Error("No request has been made");
@@ -43,6 +71,10 @@ export class FakeHttpTransport implements HttpTransport {
 
   async request<T>(request: HttpRequest): Promise<HttpResponse<T>> {
     this.requests.push(request);
+    const hold = this.holds.find((candidate) => candidate.match(request));
+    if (hold && !hold.open) {
+      await new Promise<void>((resolve) => hold.waiting.push(resolve));
+    }
     const handler = this.handlers.find((candidate) => candidate.match(request));
     if (!handler) throw new Error(`No fake response for ${request.method} ${request.path}`);
     const response = handler.respond(request);

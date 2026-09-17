@@ -111,4 +111,16 @@ describe("MatchSocket", () => {
     const socket = socketWith();
     expect(() => socket.send({ type: "start" })).toThrow("not connected");
   });
+
+  it("还没连上就退订不抛错，也不会上线后补订阅", async () => {
+    const socket = socketWith();
+    // 「刚进群就点返回」走的就是这条路：`openChat` 里 socket 先挂上，而 `connect()` 还没 await 完，
+    // 这期间 `transport` 是 null。退订如果抛出去，`backHome()` 的 promise 会被拒绝，
+    // 后面的 `enterHome()` 永远执行不到 —— 返回键点了没反应，人被困在群聊里。
+    expect(() => socket.unsubscribeGroup("group-1")).not.toThrow();
+
+    await socket.connect();
+    expect(factory.last().sent).toEqual([{ type: "auth", token: "jwt-1" }]);
+    socket.close();
+  });
 });

@@ -208,6 +208,21 @@ async function waitFor(description, probe, timeoutMs = 15_000) {
   return false;
 }
 
+/**
+ * 点一个按钮直到页面真的变过去为止。
+ *
+ * 刚换完屏的那一小会儿，目标按钮可能还没画上（页面在等异步数据回来再渲染头部），
+ * 盲点一次会点空 —— 页面纹丝不动，一个请求都不发（线上延迟大时尤其明显）。
+ * 人不会在那个瞬间去点，但探针会，所以要带重试，不然线上跑必飘。
+ */
+async function clickUntil(tab, selector, text, condition, label) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await tab.click(selector, text);
+    if (await waitFor(label, condition, 5_000)) return true;
+  }
+  return false;
+}
+
 const keyInput = 'input[placeholder="MYMJ-XXXX-XXXX-XXXX-XXXX"]';
 
 async function login(tab, key) {
@@ -240,17 +255,19 @@ await page.dialogClick("创建");
 // 于是后面去点「‹ 大厅」时人还在大厅，点了个寂寞（第一次就是这么绿的变红的）。
 await waitFor("建群后进入群聊", () => page.count(".chat-shell").then((n) => n === 1), 20_000);
 notes.push("建群后直接进群聊");
-await page.click("button", "‹ 大厅");
-await waitFor("回到大厅", () => page.has("h1", "大厅"), 20_000);
+await clickUntil(page, "button", "‹ 大厅", () => page.has("h1", "大厅"), "回到大厅");
 const groupVisible = await waitFor("会话列表出现新群", () => page.has(".conversation", groupName));
 await expect("群里出现在大厅会话列表", groupVisible);
 if (!groupVisible) {
-  // 红的时候把现场摊开：弹窗上说什么、页面提示什么、列表里现在有什么。
+  // 红的时候把现场摊开：在哪个屏、弹窗上说什么、请求走到哪一步了。
   // 「界面为什么不变」这类问题，光看断言失败是猜不出原因的。
   const scene = await page.evaluate(`(() => ({
+    shell: document.querySelectorAll('.chat-shell').length,
+    lobby: document.querySelectorAll('.lobby').length,
     dialogs: window.__all('dialog').map((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim()).slice(0, 2),
     hints: window.__all('.hint').map((node) => (node.textContent || '').trim()).slice(0, 6),
     conversations: window.__all('.conversation').map((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim()),
+    calls: (window.__calls || []).slice(-8),
   }))()`);
   console.log("  现场：", JSON.stringify(scene, null, 2));
 }
@@ -269,23 +286,53 @@ if (!groupNo) {
 
 console.log("\n=== ③ 群聊：发文字 + 发图片 ===");
 await page.click(".conversation", groupName);
-await waitFor("群聊界面出现", () => page.count(".chat-shell").then((n) => n === 1));
+await expect("点开会话后进了群聊", await waitFor("群聊界面出现", () => page.count(".chat-shell").then((n) => n === 1)));
 const hello = `大家好，来一桌 ${Date.now() % 1000}`;
-await page.evaluate(`(() => {
+const sent = await page.evaluate(`(() => {
   const input = document.querySelector('input[placeholder="发送消息"]');
+  // 没有输入框时直接报出来 —— 抛 TypeError 的话，「哪个屏 / 有什么」都问不出来。
+  if (!input) return '没有输入框';
   input.value = ${JSON.stringify(hello)};
   input.dispatchEvent(new Event('input', { bubbles: true }));
-  window.__click('.chat-composer button', '发送');
-  return true;
+  return window.__click('.chat-composer button', '发送') ? '已点发送' : '没找到发送键';
 })()`);
-await expect("文字消息出现在聊天区", await waitFor("消息气泡出现", () => page.has(".chat-message", hello)));
+if (sent !== "已点发送") console.log(`  发文字没走成：${sent}`);
+const helloShown = await waitFor("消息气泡出现", () => page.has(".chat-message", hello));
+if (!helloShown) {
+  // 「发出去了但气泡没出来」有好几种原因：请求根本没发、发了报错、发了也回来了但被
+  // 后到的历史页盖掉。这三种现场完全不同，所以把气泡文字、状态条、请求流水一起摊开。
+  const scene = await page.evaluate(`(() => ({
+    bubbles: window.__all('.chat-message').map((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60)),
+    status: (document.querySelector('.chat-status')?.textContent || '').trim(),
+    inputValue: (document.querySelector('input[placeholder="发送消息"]')?.value ?? '(没有输入框)'),
+    imgs: window.__all('img.chat-image').length,
+    calls: (window.__calls || []).slice(-6),
+  }))()`);
+  console.log("  现场：", JSON.stringify(scene, null, 2));
+}
+await expect("文字消息出现在聊天区", helloShown);
 
-await page.evaluate(`(() => {
+const fileInputReady = await page.evaluate(`(() => {
+  // 同理：这个 input 不见了（没进群聊 / 聊天区被换掉）时要说人话，不要抛 TypeError。
   const input = document.querySelector('.chat-composer input[type=file]');
+  if (!input) return false;
   input.hidden = false;
   input.setAttribute('data-probe', 'yes');
   return true;
 })()`);
+if (!fileInputReady) {
+  const scene = await page.evaluate(`(() => ({
+    shell: window.__all('.chat-shell').length,
+    lobby: window.__all('.lobby').length,
+    composer: window.__all('.chat-composer').length,
+    status: (document.querySelector('.chat-status')?.textContent || '').trim(),
+    hints: window.__all('.hint, .error').map((node) => (node.textContent || '').trim()).slice(0, 6),
+  }))()`);
+  console.log("  现场：", JSON.stringify(scene, null, 2));
+  console.log("\n停在这里：图片上传的入口 input 找不到，继续跑只会是连锁崩。");
+  chrome.kill();
+  process.exit(1);
+}
 const { root } = await page.send("DOM.getDocument");
 const { nodeId } = await page.send("DOM.querySelector", { nodeId: root.nodeId, selector: ".chat-composer input[type=file]" });
 await page.send("DOM.setFileInputFiles", { files: [imagePath], nodeId });
@@ -306,8 +353,7 @@ if (!uploaded) {
 }
 
 console.log("\n=== ④ 建房：四方位座位 + 房主标识 ===");
-await page.click("button", "‹ 大厅");
-await waitFor("回到大厅", () => page.has("h1", "大厅"));
+await clickUntil(page, "button", "‹ 大厅", () => page.has("h1", "大厅"), "回到大厅");
 await page.click("button", "＋ 创建房间");
 await waitFor("房间出现", () => page.count(".waiting-table").then((n) => n === 1));
 await expect("房间按四个方向排座位", (await page.count(".waiting-seat")) === 4);
@@ -367,12 +413,17 @@ await expect("搜索结果里带群号与人数", await second.has(".group-resul
 await second.dialogClick("加入群聊");
 // 加完群同样**直接进群聊**（和建群一致），所以等聊天区出现，不要去大厅列表里找。
 await expect("加群后直接打开群聊", await waitFor("乙的聊天区打开", () => second.count(".chat-shell").then((n) => n === 1), 20_000));
-await expect("打开的就是刚加的那个群", await second.has(".chat-header", groupName));
+// 群信息要**异步**拉回来：打开聊天区的瞬间头部还是占位符，尤其线上延迟大的时候。
+// 不看它是不是「刚加的那个群」，看的是它有没有停在占位状态 —— 所以要等，不是当场读。
+await expect("打开的就是刚加的那个群", await waitFor("头部出现群名", () => second.has(".chat-header", groupName), 20_000));
 await expect("群里有可点的邀请名片", await waitFor("名片出现", () => second.count(".room-invite-card").then((n) => n >= 1)));
 await second.evaluate("(() => { window.__all('.room-invite-card')[0]?.click(); return true; })()");
 await expect("点名片直接进了房间", await waitFor("乙的房间出现", () => second.count(".waiting-table").then((n) => n === 1)));
 // 房主标识是给**所有人**看的（要能认出谁开的房），所以乙也该看到一个 ——
 // 但全房间只能有一个，而且不在乙自己的座位上。
+// 房间快照也是异步拉回来的：四个座位框先进来、人还没坐上时一个标识都没有，
+// 所以同样要等它出现，不是当场数。
+await waitFor("房主标识出现", () => second.count(".owner-badge").then((n) => n === 1), 20_000);
 const badges = await second.count(".owner-badge");
 await expect("乙那边也看得到且只有一个房主标识", badges === 1, `实际 ${badges} 个`);
 // 座位是**从自己开始**排的（第一个座位就是自己），所以自己的座位上不该有房主标识。
@@ -418,8 +469,7 @@ const transferred = await waitFor("乙变成群主", () => page.memberRows()
 await expect("群主能把群转让给别人（且全群只有一个群主）", transferred, JSON.stringify(await page.memberRows()));
 await page.evaluate("(() => { window.__all('dialog').forEach((node) => node.remove()); return true; })()");
 // 回到房间接着开那一局。
-await page.click("button", "‹ 大厅");
-await waitFor("甲回到大厅", () => page.has("h1", "大厅"), 20_000);
+await clickUntil(page, "button", "‹ 大厅", () => page.has("h1", "大厅"), "甲回到大厅");
 await waitFor("大厅里出现「返回房间」", () => page.has("button", `返回房间 ${roomNo}`), 20_000);
 await page.click("button", `返回房间 ${roomNo}`);
 const backInRoom = await waitFor("甲回到房间", () => page.count(".waiting-table").then((n) => n === 1), 20_000);
@@ -452,7 +502,21 @@ for (const [index, key] of [[2, KEYS[2]], [3, KEYS[3]]]) {
 }
 
 console.log("\n=== ⑧ 四人到齐 → 房主开局 ===");
-await expect("房主这边看到 4/4 人", await waitFor("人数更新到 4", () => page.has(".waiting-center", "4/4 人")));
+const full = await waitFor("人数更新到 4", () => page.has(".waiting-center", "4/4 人"));
+if (!full) {
+  // 房主这边靠 2.5s 一次的轮询拿房间快照（等待期不走实时通道），
+  // 所以「人数没变」要么是没在房间屏、要么是轮询停了、要么是快照拉回来还是旧的 —— 三种现场分开看。
+  const scene = await page.evaluate(`(() => ({
+    screen: (document.querySelector('#app')?.firstElementChild?.className || '(空)'),
+    center: (document.querySelector('.waiting-center')?.textContent || '(没有等待区)').replace(/\\s+/g, ' ').trim(),
+    seats: window.__all('.waiting-seat').length,
+    hints: window.__all('.hint').map((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim()).slice(0, 4),
+    dialog: (window.__dialog()?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
+    calls: (window.__calls || []).slice(-6),
+  }))()`);
+  console.log("  现场：", JSON.stringify(scene, null, 2));
+}
+await expect("房主这边看到 4/4 人", full);
 await expect("提示变成「等待房主开始」", await page.has(".hint", "四人已到齐，等待房主开始"));
 const startEnabled = await page.evaluate(`(() => {
   const button = window.__find('button', '开始游戏');

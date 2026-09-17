@@ -103,6 +103,12 @@ export class MatchSocket {
 
   unsubscribeGroup(groupId: string): void {
     this.subscribedGroups.delete(groupId);
+    // 通道还没连上时，服务端那边本来也没有这个订阅 —— 跳过发送即可。
+    // 「刚进群就点返回」正是这条路径：`openChat` 里 socket 是在 `await connect()`
+    // **之前**挂上的，这期间 `transport` 还是 null。让 rawSend 抛出去会把
+    // `backHome()` 的 promise 拒绝掉，后面的 `enterHome()` 永远执行不到 ——
+    // 返回键点了没反应，人就被困在群聊里了。
+    if (!this.transport) return;
     this.rawSend({ type: "group-unsubscribe", groupId });
   }
 

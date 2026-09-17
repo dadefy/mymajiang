@@ -922,7 +922,10 @@ export class ClientFlow {
     this.set({
       ...this.screen,
       group: detail.ok ? detail.value : this.screen.group,
-      messages: page.ok ? page.value.messages : this.screen.messages,
+      // 这一页是**出发时**的历史。路上可能已经有新消息到了 —— 刚进群立刻发出去的那条、
+      // 或别人的实时推送 —— 直接覆盖会把它们擦掉，用户看到的是「消息发出去又自己没了」。
+      // 所以按 `messageId` 合并：页里的顺序为准，页里没有的补在末尾。
+      messages: page.ok ? mergePageWithArrived(page.value.messages, this.screen.messages) : this.screen.messages,
       hasEarlier: this.earlierCursor !== undefined,
       loadingEarlier: false,
       ...(failure ? { error: describe(failure) } : {}),
@@ -1027,4 +1030,20 @@ function appendMessage(messages: GroupMessageView[], message: GroupMessageView):
 /** 按 `messageId` 就地替换（撤回后内容变成「已撤回」）。 */
 function replaceMessage(messages: GroupMessageView[], message: GroupMessageView): GroupMessageView[] {
   return messages.map((existing) => (existing.messageId === message.messageId ? message : existing));
+}
+
+/**
+ * 把「拉历史期间新到的消息」并进服务端那一页。
+ *
+ * 页里的顺序就是服务端的顺序，以它为准；页里没有的按到货顺序补在末尾 ——
+ * 刚发出去的那条一定是新的，落在末尾就是对的。
+ * 同一个 id 两处都有时以**新到的**那份为准：撤回状态只在这份里。
+ */
+function mergePageWithArrived(page: GroupMessageView[], arrived: GroupMessageView[]): GroupMessageView[] {
+  const latest = new Map(arrived.map((message) => [message.messageId, message]));
+  const inPage = new Set(page.map((message) => message.messageId));
+  return [
+    ...page.map((message) => latest.get(message.messageId) ?? message),
+    ...arrived.filter((message) => !inPage.has(message.messageId)),
+  ];
 }
