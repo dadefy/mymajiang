@@ -52,6 +52,28 @@ echo "仓库   $REPO"
 echo "目标   $TARGET:$REMOTE_DIR"
 echo "打包   $TARBALL"
 
+# 上传前的换行符自检 —— 这是**唯一**会把 CRLF 真正带到 Linux 上去的地方。
+# `.gitattributes` 要求 .sh / .service / .conf 与整个 tools/ubuntu-deploy 都是 LF，
+# 但那条属性是在文件已经检出之后才加的：git 比对时会先做归一化，于是认为工作副本
+# 「干净」，**不会**自动把 CRLF 改回来。结果就是本地怎么看都没事，传上去 `.sh` 才炸
+# （`$'\r': command not found`）。与其到那边才发现，不如在这里停下。
+bad=0
+for file in $(git -C "$REPO" ls-files -- '*.sh' '*.service' '*.conf' 'tools/ubuntu-deploy/**'); do
+  [ -f "$REPO/$file" ] || continue
+  if [ "$(tr -cd '\r' < "$REPO/$file" | wc -c)" -ne 0 ]; then
+    echo "  [✗] 含 CRLF：$file" >&2
+    bad=$((bad + 1))
+  fi
+done
+if [ "$bad" -ne 0 ]; then
+  echo "[✗] 上面 $bad 个文件是 CRLF，传到 Linux 上会执行不了，已中止上传。" >&2
+  echo "    修法（工作区干净时安全）：" >&2
+  echo "      git -C \"$REPO\" rm -r --cached -q . && git -C \"$REPO\" reset --hard" >&2
+  rm -f "$TARBALL"
+  exit 1
+fi
+echo "换行符自检通过（受 .gitattributes 约束的文件均为 LF）"
+
 echo "打包中..."
 tar -czf "$TARBALL" \
   --exclude=./node_modules --exclude=./.pnpm-store \
