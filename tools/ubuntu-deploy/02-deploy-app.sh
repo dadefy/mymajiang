@@ -148,7 +148,17 @@ echo "  node        ${NODE_BIN}"
 sed "s#@APP_DIR@#${APP_DIR}#g; s#@APP_USER@#${APP_USER}#g; s#@NODE_BIN@#${NODE_BIN}#g" \
   "$(dirname "$(readlink -f "$0")")/mymj.service" > /etc/systemd/system/mymj.service
 systemctl daemon-reload
-systemctl enable --now mymj
+# 先 enable（登记开机自启），再**显式 restart**。
+#
+# ⚠️ 这里**不能**用 `systemctl enable --now mymj`：服务已经在跑的时候，`--now` 只保证
+# 「处于运行状态」，**不会重启它**。于是新构建出来的 dist 根本不会被加载，而紧接着的
+# 自检（/health、/debug）照样全绿 —— 因为应答的是**旧进程**。
+# 结果就是整条「传新代码 → 跑 02」的更新路径**静默地不生效**，还告诉你「部署完成」。
+# （2026-09-17 实测踩到：跑完 02 看到 `active since 18:34`，而当时已经 19:24。）
+#
+# 服务端收到 SIGTERM 时会排空排队中的积分/流水，所以用 systemctl 重启是安全的。
+systemctl enable mymj
+systemctl restart mymj
 sleep 2
 
 # 服务端 SIGTERM 时会排空排队中的积分/流水，用 systemctl 停是安全的
@@ -179,7 +189,11 @@ cat <<EOF
   签发测试账号（在 ${APP_DIR}/apps/server 下跑）：
     sudo -u ${APP_USER} node --env-file=.env scripts/seed-testers.mjs 张三 李四 王五 赵六
 
-  改完代码后重新上线：
+  改完代码后重新上线（重跑本脚本也行）：
     cd ${APP_DIR} && pnpm build && systemctl restart mymj
+
+  确认新代码**真的**被加载了 —— 别只看 /health，旧进程也会回 200：
+    systemctl show mymj -p ActiveEnterTimestamp   # 时间应当是刚刚
+    systemctl show mymj -p MainPID                # PID 应当变了
 
 EOF

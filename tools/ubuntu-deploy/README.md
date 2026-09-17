@@ -306,6 +306,17 @@ sudo -u mymj env GIT_SSH_COMMAND="ssh -i /srv/mianyang-mahjong/.deploy-key -o Id
 - **`WorkingDirectory` 必须是 `apps/server`**：`.env` 由服务端自己按源码相对路径读进来，
   而 `STORAGE_DRIVER=local` 的 `STORAGE_LOCAL_DIR` 默认是**相对路径** `storage/blobs`。
 - **systemd 单元里别写 `Environment=`**：配置只留 `.env` 一处，免得两边不一致。
+- **更新代码必须显式 `restart`，`enable --now` 不够**（2026-09-17 实测踩到）：
+  服务已经在跑时 `systemctl enable --now mymj` **不会重启它**，新构建的 `dist` 根本
+  没被加载 —— 而紧接着的自检（`/health`、`/debug`）**照样全绿**，因为应答的是旧进程。
+  于是脚本报告「部署完成」，实际线上还是老代码，是最难发现的那种假成功。
+  `02` 已改成 `systemctl enable mymj` + `systemctl restart mymj`。
+  验证新代码真加载了，**别只看 `/health`**：
+
+  ```bash
+  systemctl show mymj -p ActiveEnterTimestamp   # 应当是刚刚
+  systemctl show mymj -p MainPID                # 应当变了
+  ```
 - **停服务用默认 `SIGTERM`**：服务端会先把排队中的积分与流水写盘，别设 `KillSignal=SIGKILL`。
 
 ## 装到一台「已经有别的东西在跑」的机器上
