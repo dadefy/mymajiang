@@ -110,6 +110,62 @@ systemctl status mymj-tunnel          # 或 journalctl -u mymj-tunnel -f
 
 **要固定地址**，得二选一：自己的域名 + Cloudflare 命名隧道（要买个域名并改 NS），
 或换 Tailscale Funnel（要注册账号，地址形如 `https://<机器名>.<tailnet>.ts.net`）。
+⚠️ Tailscale Funnel 听着更省事，但**国内访问不稳定**，发给国内的朋友很可能打不开 ⇒
+国内用还是走 Cloudflare。
+
+#### 固定地址：自己域名 + Cloudflare 命名隧道
+
+**为什么必须把域名加进 Cloudflare（改 NS 这一步省不掉）**：
+Cloudflare 官方文档写得很明确 —— `cfargotunnel.com` 那个子域**只为同一个 Cloudflare
+账号内的 DNS 记录代理流量**。所以「用阿里云 DNS 直接 CNAME 到隧道」这条路是不通的，
+域名必须先在 Cloudflare 上建站、NS 换成 Cloudflare 的。
+
+**第 0 步（国内注册商特有，最容易卡在这）**：新注册的国内域名常常处于
+`client hold` + `server hold`，也就是**解析被暂停**，此时不解析、通常也不让改 NS。
+绝大多数情况是**实名认证还没过**。判别方法（在服务器上跑就行）：
+
+```bash
+curl -sL https://rdap.org/domain/<你的域名> | python3 -m json.tool | grep -A3 status
+# 里面出现 "client hold" / "server hold" 就是还没通；"add period" 是新注册的正常标记
+dig +short NS <你的域名>          # 有输出（形如 dns15.hichina.com）= 已恢复解析
+```
+
+**第 1 步**：Cloudflare → Add a site → 填域名 → 选 Free 套餐 → 拿到两个
+`*.ns.cloudflare.com` 的 NS。
+
+**第 2 步**：到注册商处把 NS 换成这两个，等生效（几分钟到几小时，最长 24h）。
+再用 `dig +short NS <你的域名>` 确认已经变成 `*.ns.cloudflare.com`。
+
+**第 3 步**：Cloudflare Zero Trust → Networks → Tunnels → 建一条隧道，记下 token；
+在那条隧道里加一条 Public Hostname：`mahjong.<你的域名>` → `http://127.0.0.1:3000`。
+
+**第 4 步**（服务器上）：
+
+```bash
+sudo cloudflared service install <TOKEN>
+```
+
+⚠️ **它装的是独立的 `cloudflared.service`，和快速隧道的 `mymj-tunnel.service`
+是可以并存的** —— 所以**先别急着关 `mymj-tunnel`**：等固定地址验证通了再关，
+否则中途出错就没有任何可用地址了。验证：
+
+```bash
+curl -s https://mahjong.<你的域名>/health     # 期望 {"status":"ok","database":"connected"}
+```
+
+**第 5 步**：确认无误后再收尾 —— 关掉随机地址那条隧道，并把 `.env` 里的
+`PUBLIC_BASE_URL` 改成固定地址（「分享名片」用的就是它），然后重启 `mymj`：
+
+```bash
+sudo systemctl disable --now mymj-tunnel
+sudo -u mymj sed -i 's#^PUBLIC_BASE_URL=.*#PUBLIC_BASE_URL=https://mahjong.<你的域名>#' \
+  /srv/mianyang-mahjong/apps/server/.env
+sudo systemctl restart mymj
+```
+
+**关于延迟**：固定地址走的是同一张 Cloudflare 网络，**不会比随机地址更快**
+（实测边缘在洛杉矶，热态约 860ms；局域网 18ms）。真要低延迟只能上公网 IP + 端口映射，
+或把服务放到国内机房（那就要备案了）。
 
 **② `TRUST_PROXY=loopback` 是必需项，不是优化项。**
 隧道是从本机 `127.0.0.1` 转发进来的 ⇒ 服务端看到的客户端 IP 全是回环地址。
