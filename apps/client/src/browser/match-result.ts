@@ -92,7 +92,8 @@ function matchPlayerRow(player: MatchResultPlayer): HTMLElement {
  *   ④ 实际入账多少、入账之后账号是多少。
  *
  * `round` 是最后一小场的结算（可能没有，比如中途解散时）；有它才能显示 ④ 与本小场的数。
- * `onDismiss` 让渲染层在收起浮层后重画一次 —— 收起之后正文还在页面上（见下面的注释）。
+ * `onDismiss` 在「知道了」被点击时调用 —— 调用方必须据此清掉自己的状态并重画，
+ * 让面板**彻底消失**且重画后不再出现（见 close.onclick 里的说明）。
  */
 export function matchResultPanel(
   result: MatchResult,
@@ -111,11 +112,14 @@ export function matchResultPanel(
     const close = element("button", { text: "知道了" });
     close.onclick = () => {
       dismissed.add(result);
-      // 收起浮层但**不删正文**：这是整局的最终账，玩家多半还要再看两眼
-      // （谁赢了多少、账号变成多少）。收起的只是遮罩与居中那套样式。
-      panel.removeAttribute("style");
-      panel.removeAttribute("role");
-      close.remove();
+      // **彻底关闭**：面板整个从页面上摘掉，不再保留正文。
+      // 旧版故意留正文（"收起浮层但不删正文"），实测每个玩家的房间里都
+      // 永久挂着一份整场账单，只有"返回大厅再进房"才清得掉 —— 产品行为已改：
+      // 结算数据在战绩/历史记录里随时可查，房间正文不该被它占住。
+      // 摘掉之后能不能保持消失由调用方负责：onDismiss 必须清掉状态
+      // （debug-client 走 `flow.dismissMatchResult()` 把 `lastMatchResult` 置空，
+      // multi-client 在重画时跳过已 dismiss 的结果），否则下次重画又会出现。
+      panel.remove();
       onDismiss?.();
     };
     panel.append(close);

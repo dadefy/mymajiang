@@ -1132,6 +1132,74 @@ describe("ClientFlow", () => {
     expect(flow.current).toMatchObject({ name: "home", me: { points: 2040 } });
   });
 
+  it("整局结算点「知道了」后彻底关闭：lastMatchResult 清空，重画与退房都不复现", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    stubRoom(http, "room-1");
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    await flow.createRoom();
+    const socket = sockets.last();
+    socket.serverSends({
+      type: "match-finished",
+      result: {
+        roomId: "room-1",
+        completedRounds: 8,
+        reason: "completed",
+        rawDeltas: [{ playerId: SESSION.userId, delta: 40 }],
+        accountDeltas: [{ playerId: SESSION.userId, delta: 40 }],
+        startedAt: 1_700_000_000_000,
+        finishedAt: 1_700_002_600_000,
+        players: [{
+          playerId: SESSION.userId,
+          nickname: "张三",
+          avatarUrl: "avatar",
+          seat: 0,
+          delta: 40,
+          accountDelta: 40,
+          balance: 40,
+        }],
+      },
+    });
+
+    const done = flow.current;
+    expect(done.name).toBe("room");
+    if (done.name !== "room") return;
+    expect(done.lastMatchResult).not.toBeNull();
+    // 大局结束那一刻「回到房间」入口就没了：finished 房间不能被当成 active match。
+    expect(flow.activeRoomNumber).toBeUndefined();
+
+    // 「知道了」= 每个客户端独立清自己的状态（不发请求、不碰服务端、不碰战绩记录）。
+    flow.dismissMatchResult();
+    const dismissed = flow.current;
+    if (dismissed.name !== "room") return;
+    expect(dismissed.lastMatchResult).toBeNull();
+
+    // 重画来源之一（重拉快照）之后再断言一次：状态已经是 null，
+    // 渲染层「有值才 append」的面板不可能复现 —— 不需要刷新页面/返回大厅/重新进房。
+    await flow.refreshRoom();
+    const after = flow.current;
+    if (after.name !== "room") return;
+    expect(after.lastMatchResult).toBeNull();
+
+    // 结束后的房间可以正常退出房间（不再报「开局之后不能退出房间」，域层另测）。
+    await flow.leaveRoom();
+    expect(flow.current).toMatchObject({ name: "home", activeRoom: null });
+  });
+
+  it("「知道了」是幂等的：没有结算记录时什么都不做", async () => {
+    const { flow, http, sockets } = flowWith();
+    http.onJson("POST", "/v1/auth/login", 200, SESSION);
+    stubHome(http);
+    stubRoom(http, "room-1");
+    await flow.enterKey("MYMJ-7K3M-9QXA-2WET-5ZVB");
+    await flow.createRoom();
+    const before = flow.current;
+    expect(() => flow.dismissMatchResult()).not.toThrow();
+    // 没有可清的东西就不触发状态推送 —— 重复点击、双端各点一次都不会有多余重画。
+    expect(flow.current).toBe(before);
+  });
+
   it("回首页会重新拉账号状态 —— 积分是在整局结算那一刻改的", async () => {
     const { flow, http } = flowWith();
     http.onJson("POST", "/v1/auth/login", 200, SESSION);

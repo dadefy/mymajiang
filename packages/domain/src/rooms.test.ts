@@ -157,6 +157,50 @@ describe("match room", () => {
     expect(room.status).toBe("dissolved");
   });
 
+  it("大局结束后允许退出房间，且不会把 finished 房间降级成 dissolved", () => {
+    // 修复的缺陷：打满 8 小场后 status = finished，旧判据 `status !== "waiting"`
+    // 把它一并拦下 —— 玩家点「退出房间」报「开局之后不能退出房间」。
+    // 禁止退出的核心条件是 `status === "playing"`，不是「不是 waiting」。
+    const { room, users } = readyRoom();
+    room.start("A");
+    const round: RecordedRound = {
+      reason: "three-winners",
+      deltas: [
+        { playerId: "A", delta: 12 },
+        { playerId: "B", delta: -4 },
+        { playerId: "C", delta: -4 },
+        { playerId: "D", delta: -4 },
+      ],
+      winnerSeats: [0],
+      nextDealerSeat: 1,
+    };
+    for (let index = 0; index < 8; index += 1) room.recordCompletedRound(round);
+    expect(room.status).toBe("finished");
+    expect(users.every((user) => user.activeMatchId === undefined)).toBe(true);
+
+    expect(() => room.leave("D")).not.toThrow();
+    expect(room.players.has("D")).toBe(false);
+
+    // 人都走光也**保持 finished**：不能降级成 dissolved —— PostgresMatchRoom.leave
+    // 只在 dissolved 时写 finished_at，降级等于把真实结算时刻顶掉。
+    room.leave("A");
+    room.leave("B");
+    room.leave("C");
+    expect(room.status).toBe("finished");
+    expect(room.result?.reason).toBe("completed");
+    expect(room.completedRounds).toBe(8);
+  });
+
+  it("解散后的房间也允许退出", () => {
+    // 解散的等待房里人还在（requestDissolve 不清成员），
+    // 房间已经不存在了，客户端必须能正常离开，不能被退出规则卡住。
+    const { room } = readyRoom();
+    room.requestDissolve("A");
+    expect(room.status).toBe("dissolved");
+    expect(() => room.leave("B")).not.toThrow();
+    expect(room.players.has("B")).toBe(false);
+  });
+
   it("allows reconnection for 120 seconds after a playing-room disconnect", () => {
     let now = Date.parse("2026-09-15T00:00:00.000Z");
     const users = [account("A"), account("B"), account("C"), account("D")];

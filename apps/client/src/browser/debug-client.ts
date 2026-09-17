@@ -254,8 +254,10 @@ function renderRoom(screen: Extract<Screen, { name: "room" }>): void {
     }
     // 结算记录与上面那块分开：它的形状来自域包（`rawDeltas` + `accountDeltas`），
     // 与单局的 `deltas` 完全不同（见 result-text.ts）。
+    // 「知道了」必须清**状态**（`lastMatchResult` → null），不能只摘 DOM ——
+    // 否则下一次重画面板又回来了（实测「返回大厅再进房」才能清掉）。
     if (screen.lastMatchResult) {
-      app.append(matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, repaint));
+      app.append(matchResultPanel(screen.lastMatchResult, screen.snapshot, screen.lastResult, () => flow.dismissMatchResult()));
     }
   }
 }

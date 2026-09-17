@@ -457,6 +457,24 @@ export class ClientFlow {
   }
 
   /**
+   * 收起整局结算（房间页「知道了」按钮）。
+   *
+   * **必须清状态，不能只摘 DOM**：渲染层每次都按 `lastMatchResult` 重画
+   * （debug-client / multi-client 都是「有值就 append 面板」），只把面板从页面上
+   * 拿掉的话，下一次重画它就又回来了 —— 实测表现是「返回大厅再进房才消失」。
+   *
+   * 只清 `lastMatchResult`；`lastResult`（上一小场摘要行）与 `roundPopUntil`
+   * **有意保留**：前者是已结束房间页「查看最终状态」的一部分，
+   * 后者的清场时机在收到新一局的 `game` 帧时（见 `game` 分支的说明）。
+   * 重复点「知道了」是幂等的：已经没有结算记录时什么都不做。
+   */
+  dismissMatchResult(): void {
+    if (this.screen.name !== "room") return;
+    if (this.screen.lastMatchResult === null) return;
+    this.set({ ...this.screen, lastMatchResult: null });
+  }
+
+  /**
    * 重拉当前房间快照。
    *
    * 等待期的「谁准备了 / 谁刚加入」只能靠它刷新 —— 实时通道目前只推对局帧

@@ -160,11 +160,19 @@ export class MatchRoom {
   }
 
   leave(userId: string): void {
-    if (this.status !== "waiting") throw new Error("Players cannot leave after the match starts");
+    // 只挡**正在打**的房间：waiting 能退（原有规则），
+    // finished / dissolved 是已经结束的房间，人必须能正常离开——
+    // 「大局打完点退出房间被『开局之后不能退出』挡住」是实测过的缺陷：
+    // 打满 8 小场后 status = finished，旧判据 `!== "waiting"` 把它一并拦了。
+    // playing 中的退出仍然只能走「退出游戏 → 托管」（quitToTrustee），不走这里。
+    if (this.status === "playing") throw new Error("Players cannot leave after the match starts");
     if (!this.players.delete(userId)) throw new Error("Player is not in the room");
     this.dissolveVotes.delete(userId);
     if (this.players.size === 0) {
-      this.status = "dissolved";
+      // 只把**等待中**的空房标记为解散。finished / dissolved 的房间本来就结束了：
+      // 再降级会把 finished 的战绩语义抹掉（PostgresMatchRoom.leave 只在
+      // dissolved 时写 finished_at，等于把真实结算时刻顶掉）。
+      if (this.status === "waiting") this.status = "dissolved";
       return;
     }
     if (this.ownerId === userId) {

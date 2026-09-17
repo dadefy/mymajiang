@@ -3,7 +3,7 @@ import { playerProfile } from "./player-profile.js";
 import { installTableLayout } from "./table-layout.js";
 import { SwapSelection } from "./swap-selection.js";
 import { roundScorePop } from "./round-result.js";
-import { matchResultPanel } from "./match-result.js";
+import { isMatchResultDismissed, matchResultPanel } from "./match-result.js";
 import { ApiClient } from "../api-client.js";
 import { ClientFlow, type Screen } from "../flow.js";
 import type { MatchState, RoomResult, RoomSnapshot, Tile } from "../protocol.js";
@@ -445,9 +445,11 @@ function renderCenter(): void {
     // `onExpire` 让到点时重画一次 —— 打满 8 小场那一刻要接着显示整局结算记录，
     // 而服务端在那之后已经不再发任何帧。
     centerHost.append(roundScorePop(result, snapshot, popUntil, scheduleRender));
-  } else if (matchResult) {
+  } else if (matchResult && !isMatchResultDismissed(matchResult)) {
     // 打满 8 小场：3 秒数字放完才出结算记录（账号积分正是在这一刻改的）。
     // 万一没收到最后一小场的结算帧（例如中途解散），这一条也要能单独出得来。
+    // 「知道了」之后按已 dismiss 跳过：面板要**彻底关闭**，重画不得复现
+    // （/multi 的每座 flow 各自持有结果，这里用 match-result 的 WeakSet 判）。
     centerHost.append(matchResultPanel(matchResult, snapshot, result, scheduleRender));
   }
 
