@@ -15,7 +15,7 @@ describe("AudioManager", () => {
     const { calls, audio } = harness();
     expect(audio.playConfirmed({ eventId: "r1:peng:2", source: "server", cue: "peng" })).toBe(true);
     expect(audio.playConfirmed({ eventId: "r1:peng:2", source: "server", cue: "peng" })).toBe(false);
-    expect(calls).toEqual(["resources/audio/voice/peng.mp3"]);
+    expect(calls).toEqual(["resources/audio/sfx/placeholder_peng.wav"]);
   });
 
   it("keeps UI clicks separate and respects category settings", () => {
