@@ -36,7 +36,8 @@ export class LayaHttpTransport implements HttpTransport {
           reject(new Error("NETWORK_ERROR"));
           return;
         }
-        resolve({ status, body: parseResponse<T>(request.data) });
+        const raw = request.data ?? request.http?.responseText;
+        resolve({ status, body: parseResponse<T>(raw) });
       };
       /**
        * `Laya.HttpRequest` 没有 `timeout` 也没有 `abort`，所以超时只能在 Promise 这一层做：
@@ -64,7 +65,9 @@ export class LayaHttpTransport implements HttpTransport {
         `${this.baseUrl}${input.path}`,
         payload === undefined ? null : payload,
         input.method.toLowerCase(),
-        "json",
+        // Laya 3.4 在部分 201 响应上会把 `json` 模式的 data 留成 null；
+        // 统一按文本接收再由 parseResponse 解析，200/201/错误体走同一条可靠路径。
+        "text",
         headers,
       );
     });

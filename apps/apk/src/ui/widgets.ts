@@ -8,6 +8,8 @@
 /** 设计分辨率（竖屏）。引擎缩放模式由 Main.ts 统一设置。 */
 export const DESIGN_WIDTH = 750;
 export const DESIGN_HEIGHT = 1334;
+export const TABLE_WIDTH = 1920;
+export const TABLE_HEIGHT = 1080;
 
 export const THEME = {
   pageBg: "#10151f",

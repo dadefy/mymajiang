@@ -4,6 +4,7 @@ import { HomePage } from "./HomePage.js";
 import { KeyEntryPage } from "./KeyEntryPage.js";
 import { ProfilePage } from "./ProfilePage.js";
 import { RoomPage } from "./RoomPage.js";
+import { DESIGN_HEIGHT, DESIGN_WIDTH, TABLE_HEIGHT, TABLE_WIDTH } from "./widgets.js";
 
 interface PageView {
   readonly view: Laya.Box;
@@ -31,7 +32,7 @@ export class ScreenHost {
   constructor(
     private readonly flow: ClientFlow,
     api: ApiClient,
-    stage: Laya.Stage,
+    private readonly stage: Laya.Stage,
   ) {
     this.keyEntry = new KeyEntryPage(flow, stage);
     this.profile = new ProfilePage(flow, stage);
@@ -53,9 +54,30 @@ export class ScreenHost {
         if (previous.hide) previous.hide();
       }
       this.currentName = screen.name;
+      this.applyStageSize(screen.name);
       this.pageFor(screen.name).view.visible = true;
     }
     this.pageFor(screen.name).show(screen);
+  }
+
+  /**
+   * 切换设计分辨率：大厅/登录是竖屏 750×1334，牌桌是横屏 1920×1080。
+   *
+   * ⚠️ `Stage.designWidth` / `designHeight` 在 LayaAir 3.4 里是**普通字段**，
+   * 赋值本身不会触发任何重新布局 —— 舞台只在窗口 resize 时才算一遍。
+   * 所以这里必须显式 `updateCanvasSize(true)` 让引擎按新的设计尺寸重算缩放与居中，
+   * 否则切到牌桌时画面会继续按竖屏那套比例铺（只看得见左上角一块），
+   * 一直要等到用户手动缩放一次窗口才「自己好了」。
+   *
+   * （`Main.setupStage` 那处不用补：它把 `scaleMode` 从项目配置的 `fixedheight`
+   * 改成 `SCALE_SHOWALL`，那个 setter 自带重新布局。这里改设计尺寸时 `scaleMode`
+   * 没变，setter 是等值判断过的，不会再触发。）
+   */
+  private applyStageSize(name: Screen["name"]): void {
+    const landscape = name === "room";
+    this.stage.designWidth = landscape ? TABLE_WIDTH : DESIGN_WIDTH;
+    this.stage.designHeight = landscape ? TABLE_HEIGHT : DESIGN_HEIGHT;
+    this.stage.updateCanvasSize(true);
   }
 
   private get current(): PageView | null {

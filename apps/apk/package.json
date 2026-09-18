@@ -9,6 +9,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "laya:build:web": "layaair --version=3.4.0 build web -p ."
+    "laya:build:web": "node ../../tools/run-layaair.mjs --version=3.4.0 build web -p ."
   }
 }
