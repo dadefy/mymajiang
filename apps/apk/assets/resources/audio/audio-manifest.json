@@ -1,0 +1,198 @@
+{
+  "status": "placeholder",
+  "generatedBy": "tools/audio/generate-placeholder-sfx.mjs",
+  "sampleRate": 22050,
+  "channels": 1,
+  "bitDepth": 16,
+  "notice": "离线合成的占位音效，用于验证表现层接线；不代表最终产品音质，也不是真实麻将录音。",
+  "bgm": {
+    "status": "asset-pending",
+    "note": "仓库内没有任何已授权背景音乐，AudioManager 的三档场景音乐（lobby / waitingRoom / game）已接好但不会发起请求。"
+  },
+  "voice": {
+    "status": "runtime-only",
+    "note": "语音只有玩家运行时录音；报牌语音（喊碰/杠/胡）需要真人素材与授权，当前一律不播。"
+  },
+  "sounds": [
+    {
+      "file": "resources/audio/sfx/placeholder_tile_draw.wav",
+      "cue": "draw",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 110,
+      "sha256": "9cc67afd09a27eb873a010338e00b0b64b45fc91ffca17c0b085b2dac6e88509",
+      "note": "摸牌：轻而短的一下，末尾带上一点滑动，像把牌从桌面前推出来。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_tile_select.wav",
+      "cue": "tileSelect",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 90,
+      "sha256": "d9789964b3a78aa937d706a3fafa2eea781456ffbea8f7986fcc30886f8ca715",
+      "note": "选牌：比摸牌更轻、音高略高，只表示「这张被我点起来了」。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_tile_discard.wav",
+      "cue": "discard",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 130,
+      "sha256": "e635c169b81069aaa1c051d00ff75b25c2396db9369e549d0708e1f31cdf661f",
+      "note": "出牌：落桌那一下要有木板回声，比选牌重。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_peng.wav",
+      "cue": "peng",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 240,
+      "sha256": "e6af44b8bc581653f6141e203d11bd2fe43da07e44c00f8e74905722eba3e18d",
+      "note": "碰：两下相叠（拿牌碰出去），明显重于普通点击。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_gang.wav",
+      "cue": "kong",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 330,
+      "sha256": "1d7b3d3563fa9176cc09ac18c42cbae7008a5d5a7a5347cafc7ebe3737bd6644",
+      "note": "杠：三下递进 + 更低的上限音，比碰强一档但不铺满。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_hu.wav",
+      "cue": "hu",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 620,
+      "sha256": "aeadb465f190a73fa137593c605931b61f15affdb17a5edfd17e91845e8230c9",
+      "note": "胡：先一记重拍，再叠一个上行双音收住 —— 全桌最响的一下，仍然不到一秒。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_self_draw.wav",
+      "cue": "self-draw",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 560,
+      "sha256": "478249937863ad913235602903a7dfdf59b5b1c2a4a72fbcfa1b5f63b7e92cf6",
+      "note": "自摸：与胡同一族但收得更紧，尾音高半音，听得出是另一种成就感。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_round_finished.wav",
+      "cue": "round-finished",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 460,
+      "sha256": "a7388f9681668d72587f0a75bdb19b73b1f1e54c9e0ea61124431cb214e965ba",
+      "note": "小局结算：三音下行，表示「这一小节落了」，不做胜利号角。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_match_finished.wav",
+      "cue": "match-finished",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 700,
+      "sha256": "0ebf6a9f53a01799d916ff9f51ce1ba40a345dadc83c98264d62ecabec18fea9",
+      "note": "整场结算：比小局多一层低音托住，正式一档，靠层次不靠响度。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_swap.wav",
+      "cue": "swap",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 260,
+      "sha256": "395a8d111795ff0758880447a9a295f7ac8576fa13ea82312a168f52df705cd7",
+      "note": "换三张：三下极轻的点，像三张牌被推出去。"
+    },
+    {
+      "file": "resources/audio/sfx/placeholder_choose_missing.wav",
+      "cue": "choose-missing",
+      "group": "sfx",
+      "status": "placeholder",
+      "durationMs": 200,
+      "sha256": "7168dc4ae0ab82c6db0ea134bcaae1b18a75a7538c91969c41bcef2590d94367",
+      "note": "定缺：一下落定带短促下坠，表示「这门不要了」。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_click.wav",
+      "cue": "button",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 70,
+      "sha256": "8cef5b49e3a226c770ca3229954aa2d53742890467841de102e877fbe587bac9",
+      "note": "通用点击：50ms 的干点，不糊成一片。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_back.wav",
+      "cue": "uiBack",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 110,
+      "sha256": "a1f9b1750edc1709a8ea7975608ebd6c0e41dc21cf4b1b978e5a276e7c727310",
+      "note": "返回：比点击低一档并往下滑，语义上就是「退回去」。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_pass.wav",
+      "cue": "pass",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 120,
+      "sha256": "3a306f26915872ef6e38648259085c3ba2ea8e6c8b48915e373a4471fb8bb2ca",
+      "note": "过：闷一下就好，不要有存在感。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_turn_notify.wav",
+      "cue": "turnNotify",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 260,
+      "sha256": "8ae6abcd19617db9217f98f0fbb796e5268ef6437c2633939333bb89e6128ffd",
+      "note": "轮到你了：两声上行轻提示，要能从桌面环境声里出来，但不催。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_countdown.wav",
+      "cue": "countdown-3",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 120,
+      "sha256": "1a6457ad28fba8189af2c498cac54ebf1fae4e5682f4a4b2f9fd79af4cb80461",
+      "note": "倒计时（10 秒内每秒）：中音单点，稳定不抢戏。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_countdown_fast.wav",
+      "cue": "countdown-1",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 130,
+      "sha256": "3fc0929a25ae2db81f8c375540c0cee1ca39311b1d73e2f3f9aa3d5ddf9ca4bf",
+      "note": "倒计时（最后 1 秒）：高一点、硬一点，一眼（一听）就知道要超时了。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_trustee_on.wav",
+      "cue": "trustee",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 300,
+      "sha256": "16c57e5c815ceaa54a47fcf1c2ae4acea593d9302a653b9dd12c43c77e6038d1",
+      "note": "托管：两声下行，表示「交出去了」。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_trustee_off.wav",
+      "cue": "takeover",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 300,
+      "sha256": "28b64b9c5151f4216881eccacde8ecf6dd443b3cdd2df8e9bb06ef887fb093d0",
+      "note": "接管：与托管同一对音但反过来（上行），成对记忆。"
+    },
+    {
+      "file": "resources/audio/ui/placeholder_message.wav",
+      "cue": "messageReceive",
+      "group": "ui",
+      "status": "placeholder",
+      "durationMs": 240,
+      "sha256": "5f018222c58bc79e0bae43f99cfc371a533286d216e05b59b55b7a2948080547",
+      "note": "收到消息：柔和的双音，音量组是 UI，不与牌桌音效抢。"
+    }
+  ]
+}
