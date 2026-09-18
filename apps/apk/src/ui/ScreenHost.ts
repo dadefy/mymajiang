@@ -1,5 +1,5 @@
 import type { ApiClient, ClientFlow, Screen } from "@mianyang-mahjong/client";
-import { createPresentation, type Presentation } from "../presentation/presentation.js";
+import { createPresentation, presentationControls, type Presentation } from "../presentation/presentation.js";
 import { ChatPage } from "./ChatPage.js";
 import { HomePage } from "./HomePage.js";
 import { KeyEntryPage } from "./KeyEntryPage.js";
@@ -42,7 +42,7 @@ export class ScreenHost {
     this.presentation = createPresentation(stage);
     this.keyEntry = new KeyEntryPage(flow, stage);
     this.profile = new ProfilePage(flow, stage);
-    this.home = new HomePage(flow, stage);
+    this.home = new HomePage(flow, stage, presentationControls(this.presentation));
     this.room = new RoomPage(flow, api, stage, () => this.me, this.presentation.director);
     this.chat = new ChatPage(flow, stage);
     // 动画层要在所有页面**之上**：它是在页面之前建的（director 得先存在才传得出去），
@@ -85,7 +85,8 @@ export class ScreenHost {
    * 没变，setter 是等值判断过的，不会再触发。）
    */
   private applyStageSize(name: Screen["name"]): void {
-    const landscape = name === "room";
+    // Android 壳与正式 Laya 页面统一横屏；旧竖屏常量仅供历史组件兼容。
+    const landscape = true;
     this.stage.designWidth = landscape ? TABLE_WIDTH : DESIGN_WIDTH;
     this.stage.designHeight = landscape ? TABLE_HEIGHT : DESIGN_HEIGHT;
     this.stage.updateCanvasSize(true);

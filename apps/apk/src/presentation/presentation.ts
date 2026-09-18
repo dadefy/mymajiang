@@ -56,6 +56,7 @@ export function createPresentation(parent: Laya.Sprite): Presentation {
  * 动画开关，全部经由这里，不要在页面上直接摸 `Laya.SoundManager`。
  */
 export interface PresentationControls {
+  getSettings(): Readonly<{ musicVolume: number; effectsVolume: number; voiceVolume: number; masterMuted: boolean }>;
   setMusicVolume(value: number): void;
   setSfxVolume(value: number): void;
   setVoiceVolume(value: number): void;
@@ -67,6 +68,7 @@ export interface PresentationControls {
 export function presentationControls(presentation: Presentation): PresentationControls {
   const { audio, animations } = presentation;
   return {
+    getSettings: () => audio.currentSettings,
     setMusicVolume: (value) => audio.setMusicVolume(value),
     setSfxVolume: (value) => audio.setSfxVolume(value),
     setVoiceVolume: (value) => audio.setVoiceVolume(value),

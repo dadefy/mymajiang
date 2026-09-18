@@ -1,5 +1,6 @@
 import type { ClientFlow, Screen } from "@mianyang-mahjong/client";
-import { DESIGN_HEIGHT, DESIGN_WIDTH, THEME, field, label, textButton } from "./widgets.js";
+import { TABLE_HEIGHT, TABLE_WIDTH, THEME, box, field, label, textButton } from "./widgets.js";
+import { NON_TABLE, background, paperPanel } from "./non-table-skin.js";
 
 /** 资料页：密钥有效但还没建号时，填昵称与头像建号。 */
 export class ProfilePage {
@@ -16,24 +17,27 @@ export class ProfilePage {
     parent: Laya.Stage,
   ) {
     this.view = new Laya.Box();
-    this.view.size(DESIGN_WIDTH, DESIGN_HEIGHT);
+    this.view.size(TABLE_WIDTH, TABLE_HEIGHT);
     parent.addChild(this.view);
+    background(this.view, "login");
+    box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#10251F66").mouseEnabled = false;
+    const panel = paperPanel(this.view, 600, 130, 720, 820);
 
-    label(this.view, "完善资料", 44, { width: 750, align: "center", bold: true, color: THEME.accent }).pos(0, 220);
-    label(this.view, "首次使用，给自己起个名字", 26, { width: 750, align: "center", color: THEME.textDim }).pos(0, 300);
+    label(panel, "完善资料", 46, { width: 720, align: "center", bold: true, color: NON_TABLE.ink }).pos(0, 55);
+    label(panel, "首次使用，给自己起个名字", 24, { width: 720, align: "center", color: NON_TABLE.dim }).pos(0, 125);
 
-    label(this.view, "昵称（24 字以内）", 24, { color: THEME.textDim }).pos(75, 400);
-    this.nicknameInput = field(this.view, 75, 440, 600, 88, "请输入昵称", 24).input;
+    label(panel, "昵称（24 字以内）", 24, { color: NON_TABLE.dim }).pos(70, 220);
+    this.nicknameInput = field(panel, 70, 260, 580, 82, "请输入昵称", 24).input;
 
-    label(this.view, "头像地址（可留空）", 24, { color: THEME.textDim }).pos(75, 570);
-    this.avatarInput = field(this.view, 75, 610, 600, 88, "https://…").input;
+    label(panel, "头像地址（可留空）", 24, { color: NON_TABLE.dim }).pos(70, 390);
+    this.avatarInput = field(panel, 70, 430, 580, 82, "https://…").input;
 
-    textButton(this.view, "创建账号", 225, 760, 300, 88, THEME.accentDark, () => void this.submit());
+    textButton(panel, "创建账号", 170, 570, 380, 82, NON_TABLE.jade, () => void this.submit(), 18);
 
-    this.errorLabel = label(this.view, "", 26, { width: 750, align: "center", color: THEME.bad, wordWrap: true });
-    this.errorLabel.pos(0, 890);
-    this.busyLabel = label(this.view, "提交中…", 26, { width: 750, align: "center", color: THEME.textDim });
-    this.busyLabel.pos(0, 890);
+    this.errorLabel = label(panel, "", 24, { width: 620, align: "center", color: THEME.bad, wordWrap: true });
+    this.errorLabel.pos(50, 700);
+    this.busyLabel = label(panel, "提交中…", 24, { width: 620, align: "center", color: NON_TABLE.dim });
+    this.busyLabel.pos(50, 700);
     this.busyLabel.visible = false;
   }
 
