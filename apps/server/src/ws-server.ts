@@ -397,6 +397,11 @@ function buildRealtimeServer(
   function broadcastSeatEvent(event: SeatEvent): void {
     const active = activeMatches.get(event.roomId);
     if (!active) return;
+    // REST 层已经把对局收尾（三票解散）：补发 match-finished、摘除对局，**不要**再广播对局帧。
+    if (event.matchClosed) {
+      closeFinalizedMatch(active);
+      return;
+    }
     void broadcastState(active).catch(() => undefined);
   }
 
@@ -529,6 +534,38 @@ function buildRealtimeServer(
     await dependencies.accountStore.flush?.();
     for (const connection of seatConnections.get(active)?.values() ?? []) {
       connection.send({ type: "match-finished", result: matchSettlement(active.room, matchResult) });
+    }
+    dependencies.gameStateStore?.clear(active.room.roomId);
+    activeMatches.delete(active.room.roomId);
+    seatConnections.delete(active);
+  }
+
+  /**
+   * REST 层已把对局 finalize（三票解散），实时层补发终局帧并摘除对局。
+   *
+   * `voteDissolve` 直接在域层把房间打成 dissolved（积分已结、activeMatchId 已清、
+   * 控制权已作废），实时层对这一切一无所知 —— activeMatches 与动作/保留期/局间/落盘
+   * 定时器原样残留，托管的 0ms autoAct 会继续推进一个已解散的牌局并反复广播过期帧，
+   * 小局打完时更会撞 `recordCompletedRound` 的 "Room is not playing"。
+   *
+   * 与 {@link terminateAbandonedMatch} 的差别：域层终态**已经就绪**，这里绝不再碰房间，
+   * 只清实时层的残留、给还连着的客户端补发 `match-finished`（载荷用房间现成的 `result`）。
+   */
+  function closeFinalizedMatch(active: ActiveMatch): void {
+    if (active.terminating) return;
+    active.terminating = true;
+    for (const seat of active.seatsByUser.values()) {
+      active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
+    }
+    clearActionTimers(active);
+    clearWindowTimers(active);
+    clearInterRoundTimer(active);
+    cancelSaveTimer(active);
+    const result = active.room.result;
+    if (result) {
+      for (const connection of seatConnections.get(active)?.values() ?? []) {
+        connection.send({ type: "match-finished", result: matchSettlement(active.room, result) });
+      }
     }
     dependencies.gameStateStore?.clear(active.room.roomId);
     activeMatches.delete(active.room.roomId);

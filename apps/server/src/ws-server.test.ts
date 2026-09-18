@@ -718,7 +718,7 @@ describe("退出托管与重新接管", () => {
     reconnectWindowMs?: number;
     roundsPlayed?: number;
   } = {}) {
-    const { dependencies, tokens } = fixture();
+    const { app, dependencies, tokens } = fixture();
     const port = (nextPort += 1);
     const wss = await createWebSocketServer(dependencies, port, {
       playTimeoutMs: options.playTimeoutMs ?? 15_000,
@@ -756,7 +756,7 @@ describe("退出托管与重新接管", () => {
       states.push((await readUntil(client, (message) => message.type === "game" && message.state.phase === "playing")).state);
     }
 
-    return { dependencies, tokens, room, clients, userIds, states, port };
+    return { app, dependencies, tokens, room, clients, userIds, states, port };
   }
 
   it("主动退出：立刻转托管，座位/手牌/积分一个都不少", async () => {
@@ -1204,6 +1204,54 @@ describe("退出托管与重新接管", () => {
     await waitFor(() => room.status === "dissolved", 10_000);
     expect(room.players.get(userIds[3]!)!.renounced).toBe(false);
     expect(room.players.get(userIds[3]!)!.control).toBe("human");
+  });
+
+  it("REST 三票解散：实时层收尾 —— 补发 match-finished、摘除对局、托管不再 autoAct", async () => {
+    // 修复前的坑：`voteDissolve` 直接在域层 finalize，实时层一无所知 ——
+    // activeMatches/全部定时器残留，托管继续 autoAct、继续广播一个已解散房间的对局帧，
+    // 小局打完时撞 `recordCompletedRound` 的 "Room is not playing"，
+    // 而四家**永远收不到 match-finished**（REST 响应只有发起投票的那家能看到）。
+    const { app, tokens, room, clients, userIds, states } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+      interRoundPauseMs: 0,
+    });
+
+    // 让**当前出牌的那一家**进托管并真的出过一手：托管定时器活着，解散后不该再动
+    //（托管 autoAct 的 delay 是 0，只有轮到他时状态才会前进 —— 退出别的座位会白等 60 秒）
+    const acting = states[0]!.currentPlayerSeat as number;
+    clients[acting]!.send({ type: "quit" });
+    await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.control === "trustee");
+    // 托管 0ms autoAct 真的出过一手（snapshot 里的 discards 是**该座位自己**的弃牌）
+    await readUntil(clients[acting]!, (message) => message.type === "game" && message.state.discards.length > 0, 10_000);
+
+    for (const index of [0, 1, 2, 3].filter((seat) => seat !== acting)) {
+      const response = await app.inject({
+        method: "POST",
+        url: `/v1/rooms/${room.roomId}/dissolve/vote`,
+        headers: { "x-auth-token": await tokens.issueUserToken(userIds[index]!) },
+        payload: { agree: true },
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    expect(room.status).toBe("dissolved");
+
+    // 关键验收：四家（含托管的那家）都实时收到终局帧，不用等任何人再操作
+    for (const client of clients) {
+      const finished = await readUntil(client, (message) => message.type === "match-finished", 5_000);
+      expect(finished.result.reason).toBe("dissolved");
+      expect(finished.result.completedRounds).toBe(0);
+    }
+
+    // 对局已摘除：后续动作一律被拒（而不是继续推进一个已解散的牌局）
+    for (const client of clients) client.send({ type: "request_takeover" });
+    const error = await readUntil(clients[0]!, (message) => message.type === "error");
+    expect(error.message).toBe("Match has not started");
+
+    // 托管定时器已撤：静默窗口里不再有任何对局帧（修复前托管 autoAct 会持续广播）
+    const stray = await clients[acting]!.next(700).catch(() => null);
+    expect((stray as any)?.type ?? "silence").not.toBe("game");
+    await app.close();
   });
 
   it("全员暂离不终局：暂离明确表示还会回来，时间再久也不散场", async () => {

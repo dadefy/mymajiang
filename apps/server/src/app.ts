@@ -833,9 +833,13 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const user = await requireUser(request.headers, dependencies);
     const room = requireRoom(dependencies.roomStore, params.roomId);
     const finished = room.requestDissolve(user.userId);
-    return finished
-      ? { status: room.status, result: room.result ?? null }
-      : { status: room.status, votes: room.dissolveVotes.size, requiredVotes: 3 };
+    if (finished) {
+      // 房间已终态（waiting 直接散 / playing 三票 finalize）：桥接给实时层收尾。
+      // waiting 房间没有进行中的对局，实时层收到后是空操作。
+      dependencies.seatEvents.publish({ roomId: room.roomId, userId: user.userId, matchClosed: true });
+      return { status: room.status, result: room.result ?? null };
+    }
+    return { status: room.status, votes: room.dissolveVotes.size, requiredVotes: 3 };
   });
 
   app.post("/v1/rooms/:roomId/dissolve/vote", async (request) => {
@@ -846,6 +850,10 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
     const result = room.voteDissolve(user.userId, body.agree);
     if (result) {
       for (const player of room.players.values()) dependencies.accountStore.saveAccount(player.account);
+      // 三票落地、域层 finalize 完毕：不桥接的话实时层会对一个已解散的房间继续
+      // autoAct / 广播过期帧 / 在小局打完时撞 "Room is not playing"，且客户端永远
+      // 收不到 match-finished。事件是同步的：HTTP 响应返回前实时层已收尾。
+      dependencies.seatEvents.publish({ roomId: room.roomId, userId: user.userId, matchClosed: true });
       return { status: room.status, result };
     }
     return { status: room.status, votes: room.dissolveVotes.size, requiredVotes: 3 };

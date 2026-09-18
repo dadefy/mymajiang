@@ -17,6 +17,12 @@ export interface SeatEvent {
   roomId: string;
   /** 状态发生变化的那一**座**的主人。实时层据此定位座位并重排自动定时器。 */
   userId: string;
+  /**
+   * 对局已在 REST 层收尾（三票解散 `finalize` 完毕，积分已结、终态已落库）：
+   * 实时层**不要再读房间广播对局帧**，只负责摘除对局、撤掉定时器、
+   * 给还连着的客户端补发 `match-finished`（终局载荷用房间里现成的 `result`）。
+   */
+  matchClosed?: boolean;
 }
 
 export type SeatEventListener = (event: SeatEvent) => void;
