@@ -20,8 +20,10 @@ const dependencies = createInMemoryDependencies({
 });
 const password = "Preview123!";
 const hasher = new ScryptPasswordHasher();
+const KEYS_FOR_ACCEPTANCE = [];
 const users = ["青竹", "听雨", "晚风", "小满"].map((nickname) => {
   const key = dependencies.invitationKeys.issue({ count: 1, note: "Laya preview", actorId: "preview" })[0].key;
+  KEYS_FOR_ACCEPTANCE.push(key);
   const user = dependencies.accountService.activateWithKey({ key, nickname, avatarUrl: "avatar" });
   user.points = 2000;
   user.passwordHash = hasher.hash(password);
@@ -45,3 +47,4 @@ createAttachedWebSocketServer(app.server, dependencies);
 await app.listen({ host: "127.0.0.1", port });
 console.log(`Laya preview http://127.0.0.1:${port}/laya/index.html`);
 console.log(`Accounts ${users.map((user) => user.userId).join(", ")} / ${password}`);
+console.log(`KEYS_FOR_ACCEPTANCE=${KEYS_FOR_ACCEPTANCE.join(",")}`);

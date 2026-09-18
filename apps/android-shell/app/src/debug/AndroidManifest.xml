@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 debug 变体生效：指向本机 laya-preview（10.0.2.2 = 模拟器眼中的宿主机）。
+     验收辅助配置，不进入 release。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:usesCleartextTraffic="true"
+        tools:replace="android:usesCleartextTraffic">
+        <meta-data
+            android:name="app_url"
+            android:value="http://10.0.2.2:3200/laya/index.html" />
+    </application>
+</manifest>
