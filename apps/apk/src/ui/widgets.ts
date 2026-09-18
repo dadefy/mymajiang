@@ -12,18 +12,118 @@ export const TABLE_WIDTH = 1920;
 export const TABLE_HEIGHT = 1080;
 
 export const THEME = {
-  pageBg: "#10151f",
-  panelBg: "#1c2536",
-  panelBg2: "#24304a",
-  fieldBg: "#0b0f17",
-  accent: "#f0b254",
-  accentDark: "#b9822f",
-  text: "#e8ecf4",
-  textDim: "#8a94a6",
-  good: "#58c472",
-  bad: "#e05c5c",
-  warn: "#e0b64f",
+  /** 低饱和深青灰牌桌。绿色只保留为桌面氛围，不作为整屏高饱和底色。 */
+  felt: "#29443E",
+  feltDeep: "#1D332F",
+  feltEdge: "#171D20",
+  /** 深木色桌框。 */
+  wood: "#5A4030",
+  woodHi: "#755844",
+  /** 牌体（真实牌面资源自带牌面，这里只用于底色/背衬）。 */
+  ivory: "#F7F4EA",
+  ivoryEdge: "#C9BFA6",
+  /** 浮层与面板。 */
+  pageBg: "#171D20",
+  panelBg: "#20282B",
+  panelBg2: "#293336",
+  panelLine: "#465052",
+  fieldBg: "#151C1E",
+  /** 强调与语义色：只有这 5 个。 */
+  accent: "#C6A15B",
+  accentDark: "#987946",
+  text: "#F3EFE7",
+  textDim: "#B8B3AA",
+  textDim2: "#8F908A",
+  good: "#6EAE8D",
+  bad: "#D97867",
+  warn: "#D96C5F",
 } as const;
+
+/**
+ * 圆角矩形。
+ *
+ * LayaAir 没有现成的圆角矩形图元，`drawPath` 支持 `arcTo`，用它把四个角画出来。
+ * 圆角半径会自动收窄到不超过半宽/半高，避免小尺寸控件画出畸形。
+ */
+export function roundRect(
+  parent: Laya.Sprite,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+  fill: string,
+  stroke?: string,
+  lineWidth = 0,
+): Laya.Sprite {
+  const node = new Laya.Sprite();
+  node.pos(x, y);
+  node.size(w, h);
+  const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+  const path: unknown[] = [
+    ["moveTo", r, 0],
+    ["lineTo", w - r, 0], ["arcTo", w, 0, w, r, r],
+    ["lineTo", w, h - r], ["arcTo", w, h, w - r, h, r],
+    ["lineTo", r, h], ["arcTo", 0, h, 0, h - r, r],
+    ["lineTo", 0, r], ["arcTo", 0, 0, r, 0, r],
+    ["closePath"],
+  ];
+  const pen = stroke !== undefined && lineWidth > 0 ? { strokeStyle: stroke, lineWidth } : undefined;
+  node.graphics.drawPath(0, 0, path, { fillStyle: fill }, pen);
+  parent.addChild(node);
+  return node;
+}
+
+/** 正圆。`cx/cy` 是圆心（相对父节点），内部换算成左上角定位，保证几何居中。 */
+export function circle(
+  parent: Laya.Sprite,
+  cx: number,
+  cy: number,
+  radius: number,
+  fill: string,
+  stroke?: string,
+  lineWidth = 0,
+): Laya.Sprite {
+  const node = new Laya.Sprite();
+  node.pos(cx - radius, cy - radius);
+  node.size(radius * 2, radius * 2);
+  node.graphics.drawCircle(radius, radius, radius, fill, stroke ?? null, lineWidth);
+  parent.addChild(node);
+  return node;
+}
+
+/** 多边形（桌芯四个方向区就是四个三角形）。`points` 是相对本节点的扁平坐标数组。 */
+export function poly(
+  parent: Laya.Sprite,
+  x: number,
+  y: number,
+  points: number[],
+  fill: string,
+  stroke?: string,
+  lineWidth = 0,
+): Laya.Sprite {
+  const node = new Laya.Sprite();
+  node.pos(x, y);
+  node.graphics.drawPoly(0, 0, points, fill, stroke ?? null, lineWidth);
+  parent.addChild(node);
+  return node;
+}
+
+/** 直线（桌芯的两条对角线）。 */
+export function line(
+  parent: Laya.Sprite,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+  color: string,
+  width = 1,
+): Laya.Sprite {
+  const node = new Laya.Sprite();
+  node.graphics.drawLine(fromX, fromY, toX, toY, color, width);
+  parent.addChild(node);
+  return node;
+}
 
 const SUIT_NAMES = ["万", "筒", "条"] as const;
 
@@ -42,7 +142,7 @@ export function fmtDelta(delta: number): string {
 }
 
 /** 加入父容器的全宽底板。 */
-export function box(parent: Laya.Box | Laya.Stage, x: number, y: number, w: number, h: number, bgColor?: string): Laya.Box {
+export function box(parent: Laya.Sprite, x: number, y: number, w: number, h: number, bgColor?: string): Laya.Box {
   const view = new Laya.Box();
   view.pos(x, y);
   view.size(w, h);
@@ -59,7 +159,7 @@ export interface LabelOptions {
   color?: string;
 }
 
-export function label(parent: Laya.Box, text: string, fontSize: number, options: LabelOptions = {}): Laya.Label {
+export function label(parent: Laya.Sprite, text: string, fontSize: number, options: LabelOptions = {}): Laya.Label {
   const view = new Laya.Label();
   view.text = text;
   view.fontSize = fontSize;
@@ -79,7 +179,7 @@ export function label(parent: Laya.Box, text: string, fontSize: number, options:
  * 第一版直接用带底色的 Box 承接点击，行为完全可控。
  */
 export function textButton(
-  parent: Laya.Box,
+  parent: Laya.Sprite,
   text: string,
   x: number,
   y: number,
@@ -87,8 +187,15 @@ export function textButton(
   h: number,
   bgColor: string,
   onTap: () => void,
+  /** 圆角半径。0 = 直角（沿用旧观感）；牌桌上的按钮都传半径，做成手游那种圆润按钮。 */
+  radius = 0,
 ): Laya.Box {
-  const view = box(parent, x, y, w, h, bgColor);
+  const view = new Laya.Box();
+  view.pos(x, y);
+  view.size(w, h);
+  if (radius > 0) roundRect(view, 0, 0, w, h, radius, bgColor);
+  else view.graphics.drawRect(0, 0, w, h, bgColor);
+  parent.addChild(view);
   const caption = label(view, text, 28, { width: w, align: "center" });
   caption.name = "caption";
   caption.valign = "middle";
@@ -109,7 +216,7 @@ export interface Field {
 }
 
 /** 带底色外框的输入框。 */
-export function field(parent: Laya.Box, x: number, y: number, w: number, h: number, prompt: string, maxChars = 0): Field {
+export function field(parent: Laya.Sprite, x: number, y: number, w: number, h: number, prompt: string, maxChars = 0): Field {
   const wrapper = box(parent, x, y, w, h, THEME.fieldBg);
   const input = new Laya.TextInput();
   input.pos(20, (h - 44) / 2);
@@ -124,7 +231,7 @@ export function field(parent: Laya.Box, x: number, y: number, w: number, h: numb
 }
 
 /** 可滚动列表：Panel 负责裁剪与拖动，内部一列 VBox 由调用方填充。 */
-export function scrollList(parent: Laya.Box, x: number, y: number, w: number, h: number): Laya.VBox {
+export function scrollList(parent: Laya.Sprite, x: number, y: number, w: number, h: number): Laya.VBox {
   const panel = new Laya.Panel();
   panel.pos(x, y);
   panel.size(w, h);

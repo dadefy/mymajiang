@@ -9,14 +9,71 @@ import {
   swapSelectionIsValid,
   tileAsset,
 } from "./table-model.js";
-import { acceptRoomSnapshot, deadlineSeconds, effectiveRoomStatus, opponentBacks, roundPopIsLive, tableSide, type TableSide } from "./landscape-table.js";
-import { TABLE_HEIGHT, TABLE_WIDTH, THEME, box, fmtDelta, label, refill, scrollList, setButtonText, textButton, tileName, tileRun } from "./widgets.js";
+import { acceptRoomSnapshot, deadlineSeconds, effectiveRoomStatus, roundPopIsLive, tableSide } from "./landscape-table.js";
+import {
+  ACTION_GAP,
+  ACTION_LABEL,
+  ACTION_WIDTH,
+  BACK_SIDE_GAP,
+  BACK_SIDE_H,
+  BACK_SIDE_W,
+  BACK_TOP_GAP,
+  BACK_TOP_H,
+  BACK_TOP_W,
+  DIAL_LABEL_BAND,
+  DIAL_RADIUS,
+  DIAL_SIZE,
+  DISCARD_GAP_X,
+  DISCARD_GAP_Y,
+  DISCARD_H,
+  DISCARD_W,
+  HAND_TILE_GAP,
+  HAND_TILE_H,
+  HAND_TILE_W,
+  MELD_H,
+  MELD_MAX_W,
+  MELD_W,
+  SAFE,
+  SEAT_AVATAR,
+  SEAT_COL_W,
+  SEAT_W,
+  SIDE_RIVER_Y,
+  TABLE_H,
+  WIND_SLOTS,
+  Y,
+  actionButtons,
+  actionsWidth,
+  activeWindSlot,
+  addedTile,
+  huSummary,
+  isFinalCountdown,
+  type TableSide,
+  type WindSlot,
+} from "./table-layout.js";
+import {
+  TABLE_HEIGHT,
+  TABLE_WIDTH,
+  THEME,
+  box,
+  circle,
+  fmtDelta,
+  label,
+  line,
+  poly,
+  refill,
+  roundRect,
+  scrollList,
+  setButtonText,
+  textButton,
+  tileName,
+  tileRun,
+} from "./widgets.js";
 
 const PHASE_NAMES: Record<MatchState["phase"], string> = {
   swapping: "换三张",
   missing: "定缺",
-  playing: "行牌中",
-  claiming: "等待响应",
+  playing: "出牌阶段",
+  claiming: "等待操作",
   finished: "已结束",
 };
 
@@ -27,6 +84,25 @@ const STATUS_NAMES: Record<RoomSnapshot["status"], string> = {
   playing: "对局中",
   finished: "已结束",
   dissolved: "已解散",
+};
+
+/** 桌芯四个方向格的文字。固定牌桌方向，不代表服务端风位（见 table-layout 的说明）。 */
+const WIND_TEXT: Record<WindSlot, string> = { N: "北", E: "东", S: "南", W: "西" };
+
+/** 一整局几小场。服务端每帧都会带 `totalRounds`，这里只是它缺席时的兜底。 */
+const TOTAL_ROUNDS_FALLBACK = 8;
+
+/** 倒计时字号：正常 / 最后三秒。行高必须 ≥ 字号 ×1.3，否则 CJK 数字的字形盒会被裁。 */
+const CLOCK_FONT = 58;
+const CLOCK_FONT_FINAL = 66;
+const clockLine = (font: number): number => Math.ceil(font * 1.3);
+
+/** 碰/杠/胡 的瞬时提示位置（贴着**动作发起方**的手牌一侧，不压牌河/副露/桌芯）。 */
+const SHOUT_ANCHOR: Record<TableSide, { x: number; y: number }> = {
+  bottom: { x: 700, y: 806 },
+  top: { x: 1236, y: 156 },
+  left: { x: 292, y: 214 },
+  right: { x: 1392, y: 214 },
 };
 
 /**
@@ -52,7 +128,7 @@ function playerName(snapshot: RoomSnapshot | null, seat: number): string {
  * 刻意**不含** `points` 之类与牌桌无关的字段，免得账号积分一变就重画一次。
  */
 function snapshotSignature(snapshot: RoomSnapshot | null): string {
-  if (!snapshot) return "";
+  if (snapshot === null) return "";
   return [
     snapshot.status,
     snapshot.roomNo,
@@ -71,7 +147,7 @@ export class RoomPage {
   /** 牌桌菜单入口。只在牌局进行中出现 —— 那时候"退出房间"不是一个合法动作。 */
   private readonly menuButton: Laya.Box;
   /** 托管中压在牌桌正中的那一块：报「正在托管中 · 第 N/8 局」并给「重新接管」。 */
-  private readonly trusteePanel: Laya.Box;
+  private readonly trusteePanel: Laya.Sprite;
   private readonly trusteeRoundLabel: Laya.Label;
   private readonly noticeLabel: Laya.Label;
   private readonly playerHeading: Laya.Label;
@@ -89,13 +165,15 @@ export class RoomPage {
   private readonly backHomeButton: Laya.Box;
   private readonly startButton: Laya.Box;
   private readonly matchArea: Laya.Box;
-  private readonly resultOverlay: Laya.Box;
+  private readonly resultOverlay: Laya.Sprite;
   private readonly resultTitle: Laya.Label;
   /** 整局结算的「开始时间 · 耗时」那行；只有整局结算才有内容，其余时候隐藏。 */
   private readonly resultTime: Laya.Label;
   private readonly resultBody: Laya.Box;
+  /** 结算底部那行提示（例如「再来一局」未接通时的说明）。 */
+  private readonly resultNotice: Laya.Label;
   /** 一小场结束时**弹在牌桌上**的那一小块：只报四家的本小场得失分。 */
-  private readonly roundPop: Laya.Box;
+  private readonly roundPop: Laya.Sprite;
   private readonly roundPopTitle: Laya.Label;
   private readonly roundPopBody: Laya.Label;
   private readonly roundPopFoot: Laya.Label;
@@ -134,6 +212,17 @@ export class RoomPage {
   private actionLocked = false;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
   private turnClock: Laya.Label | null = null;
+  /** 桌芯中心圆：倒计时的底。每帧重画，这里只留当前那个 Label 供 `updateClock` 改写。 */
+  private prevHand: Tile[] | null = null;
+  /**
+   * 刚摸到的那张牌。
+   *
+   * 协议里**没有** `drawnTile` / draw 事件，所以只能从手牌多重集差推 ——
+   * 判据收在 `addedTile()` 里：只有"恰好多一张、且没有牌消失"才认，其余一律 null。
+   */
+  private drawnTile: Tile | null = null;
+  /** 结算浮层里那条「再来一局未接通」的说明是否已经点出来过。 */
+  private rematchHintShown = false;
 
   constructor(
     private readonly flow: ClientFlow,
@@ -145,67 +234,102 @@ export class RoomPage {
     this.view.size(TABLE_WIDTH, TABLE_HEIGHT);
     parent.addChild(this.view);
 
-    const header = box(this.view, 0, 0, TABLE_WIDTH, 72, THEME.panelBg);
-    this.statusLabel = label(header, "", 30, { bold: true });
-    this.statusLabel.pos(30, 20);
+    /* ---------- 顶栏：极简，只放房号/局数 + 聊天/菜单 ---------- */
+    this.statusLabel = label(this.view, "", 30, { bold: true, color: THEME.text });
+    this.statusLabel.pos(SAFE, Y.topbar + 6);
+    this.statusLabel.height = 40;
+    this.statusLabel.valign = "middle";
     // 两种退出在同一个位置上互斥出现：
     //   等人/未开局 → 「退出」= 真的离开房间（waiting 期合法，服务端会放行）
     //   牌局进行中  → 「菜单」= 继续游戏 / 返回大厅 / 退出游戏
     //                  （这一阶段服务端拒绝"离开房间"，必须走托管那条路）
-    this.exitButton = textButton(header, "退出", 1760, 8, 130, 56, THEME.panelBg2, () => void this.flow.leaveRoom());
-    this.menuButton = textButton(header, "菜单", 1760, 8, 130, 56, THEME.panelBg2, () => this.openTableMenu());
+    const buttonY = Y.topbar + 2;
+    this.exitButton = textButton(this.view, "退出", TABLE_WIDTH - SAFE - 100, buttonY, 100, 44,
+      THEME.panelBg2, () => void this.flow.leaveRoom(), 22);
+    this.menuButton = textButton(this.view, "菜单", TABLE_WIDTH - SAFE - 100, buttonY, 100, 44,
+      THEME.panelBg2, () => this.openTableMenu(), 22);
     this.menuButton.visible = false;
 
-    this.noticeLabel = label(this.view, "", 24, { width: 1500, align: "center", color: THEME.warn, wordWrap: true });
-    this.noticeLabel.pos(210, 82);
+    this.noticeLabel = label(this.view, "", 24, { width: TABLE_WIDTH - SAFE * 2, align: "center", color: THEME.warn, wordWrap: true });
+    this.noticeLabel.pos(SAFE, Y.topbar + 52);
     this.noticeLabel.visible = false;
 
-    this.playerHeading = label(this.view, "玩家", 28, { bold: true });
-    this.playerHeading.pos(75, 175);
-    this.playerList = scrollList(this.view, 75, 220, 600, 300);
-
+    /* ---------- 等人期间 ---------- */
+    this.playerHeading = label(this.view, "", 28, { bold: true });
+    this.playerHeading.visible = false;
+    this.playerList = scrollList(this.view, 0, 0, 1, 1);
+    this.playerList.parent.visible = false;
+    this.waitingTable = box(this.view, 360, 130, 1200, 750, THEME.felt);
     this.waitingControls = box(this.view, 0, 920, TABLE_WIDTH, 110);
-    this.waitingTable = box(this.view, 360, 130, 1200, 750, "#195b3d");
-    textButton(this.waitingControls, "分享名片", 570, 0, 260, 80, THEME.accentDark, () => shareDialog(this.view, this.flow));
-    this.backHomeButton = textButton(this.view, "返回大厅", 30, 980, 230, 70, THEME.accentDark, () => { void this.flow.backHome(); });
-    this.startButton = textButton(this.waitingControls, "开始对局", 1090, 0, 260, 80, THEME.accentDark, () => void this.flow.startMatch());
+    textButton(this.waitingControls, "分享名片", 570, 0, 260, 80, THEME.accentDark, () => shareDialog(this.view, this.flow), 24);
+    this.backHomeButton = textButton(this.view, "返回大厅", SAFE, 980, 230, 70, THEME.panelBg2, () => { void this.flow.backHome(); }, 22);
+    this.startButton = textButton(this.waitingControls, "开始对局", 1090, 0, 260, 80, THEME.accentDark, () => void this.flow.startMatch(), 24);
 
-    this.matchArea = box(this.view, 0, 72, TABLE_WIDTH, TABLE_HEIGHT - 72, "#154e38");
+    /* ---------- 牌桌本体 ---------- */
+    this.matchArea = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+    this.paintFelt(this.matchArea);
 
-    this.resultOverlay = box(this.view, 410, 95, 1100, 940, THEME.panelBg2);
-    this.resultTitle = label(this.resultOverlay, "", 34, { width: 1100, align: "center", bold: true, color: THEME.accent });
-    this.resultTitle.pos(0, 30);
-    // 标题与正文之间那一档（正文从 y=100 起）：够放一行 20 号字，不需要动正文的布局。
-    this.resultTime = label(this.resultOverlay, "", 20, { width: 1100, align: "center" });
-    this.resultTime.pos(0, 70);
-    this.resultTime.visible = false;
-    this.resultBody = box(this.resultOverlay, 75, 100, 950, 740);
-    // 一小场那屏：**压在牌桌正中**的一小块，不是整屏浮层 —— 牌桌一直看得见，
-    // 也点不到任何按钮，3 秒（服务端给的停留时长）后自己收掉。
-    // 只有四行「号位 + 昵称 + 得失分」，牌型与牌面按玩法都不在这屏出现。
-    this.roundPop = box(this.view, 610, 390, 700, 290, THEME.panelBg2);
-    this.roundPopTitle = label(this.roundPop, "", 26, { width: 700, align: "center", color: THEME.accent });
-    this.roundPopTitle.pos(0, 14);
-    // 四家各一行（用显式换行而不是自动折行：四家的行数固定，自动折行反而会因昵称长度跑版）。
-    this.roundPopBody = label(this.roundPop, "", 34, { width: 700, align: "center", wordWrap: true, bold: true });
-    this.roundPopBody.pos(0, 56);
-    this.roundPopFoot = label(this.roundPop, "", 20, { width: 700, align: "center" });
-    this.roundPopFoot.pos(0, 222);
+    /* ---------- 一小场那屏：压在桌芯上的一小块 ---------- */
+    this.roundPop = roundRect(this.view, TABLE_WIDTH / 2 - 330, 330, 660, 300, 24, "#0A231AF2", THEME.accent, 1);
+    this.roundPopTitle = label(this.roundPop, "", 28, { width: 660, align: "center", color: THEME.accent });
+    this.roundPopTitle.pos(0, 22);
+    this.roundPopTitle.height = 38;
+    this.roundPopTitle.valign = "middle";
+    this.roundPopBody = label(this.roundPop, "", 32, { width: 660, align: "center", wordWrap: true, bold: true, color: THEME.text });
+    this.roundPopBody.pos(0, 74);
+    this.roundPopFoot = label(this.roundPop, "", 25, { width: 660, align: "center", color: THEME.textDim });
+    this.roundPopFoot.pos(0, 254);
+    this.roundPopFoot.height = 34;
+    this.roundPopFoot.valign = "middle";
     this.roundPop.visible = false;
-    textButton(this.resultOverlay, "继续", 425, 850, 250, 70, THEME.accentDark, () => {
+
+    /* ---------- 大局结算 ---------- */
+    this.resultOverlay = roundRect(this.view, TABLE_WIDTH / 2 - 540, 250, 1080, 620, 26, "#0A231A", THEME.accentDark, 1);
+    this.resultTitle = label(this.resultOverlay, "", 40, { width: 1080, align: "center", bold: true, color: THEME.accent });
+    this.resultTitle.pos(0, 22);
+    this.resultTitle.height = 54;
+    this.resultTitle.valign = "middle";
+    this.resultTime = label(this.resultOverlay, "", 25, { width: 1080, align: "center", color: THEME.textDim });
+    this.resultTime.pos(0, 78);
+    this.resultTime.height = 34;
+    this.resultTime.valign = "middle";
+    this.resultTime.visible = false;
+    this.resultBody = box(this.resultOverlay, 0, 122, 1080, 400);
+    this.resultNotice = label(this.resultOverlay, "", 25, { width: 1080, align: "center", color: THEME.warn });
+    this.resultNotice.pos(0, 534);
+    this.resultNotice.height = 34;
+    this.resultNotice.valign = "middle";
+    this.resultNotice.visible = false;
+    textButton(this.resultOverlay, "返回大厅", 44, 528, 200, 68, THEME.panelBg2, () => { void this.flow.backHome(); }, 34);
+    // 「再来一局」：视觉主按钮，但**后端没有重开能力**（见 report），所以标注未接通。
+    textButton(this.resultOverlay, "再来一局", 700, 528, 200, 68, THEME.accentDark, () => this.onRematchTap(), 34);
+    textButton(this.resultOverlay, "知道了", 916, 528, 120, 68, THEME.panelBg2, () => {
       this.resultDismissed = true;
       this.resultOverlay.visible = false;
-    });
+    }, 34);
     this.resultOverlay.visible = false;
 
-    // 托管浮层：压在后牌桌正中，**不全屏遮挡** —— 牌面看得见正是这个状态要传达的信息
-    // （另外三家在替你打）。这里只让人点不到牌，并给出唯一的出路：重新接管。
-    this.trusteePanel = box(this.view, 660, 390, 600, 250, THEME.panelBg2);
-    label(this.trusteePanel, "你的牌局正在托管中", 34, { width: 600, align: "center", bold: true, color: THEME.accent }).pos(0, 36);
-    this.trusteeRoundLabel = label(this.trusteePanel, "", 26, { width: 600, align: "center", color: THEME.warn });
+    /* ---------- 托管浮层：压在牌桌正中，不全屏遮挡 ---------- */
+    this.trusteePanel = roundRect(this.view, TABLE_WIDTH / 2 - 300, Y.dial + 16, 600, 250, 24, "#0A231AF7", THEME.accentDark, 1);
+    label(this.trusteePanel, "你的牌局正在托管中", 40, { width: 600, align: "center", bold: true, color: THEME.accent }).pos(0, 34);
+    this.trusteeRoundLabel = label(this.trusteePanel, "", 25, { width: 600, align: "center", color: THEME.warn });
     this.trusteeRoundLabel.pos(0, 96);
-    textButton(this.trusteePanel, "重新接管", 175, 156, 250, 76, THEME.accentDark, () => this.flow.requestTakeover());
+    this.trusteeRoundLabel.height = 34;
+    this.trusteeRoundLabel.valign = "middle";
+    textButton(this.trusteePanel, "重新接管", 175, 152, 250, 72, THEME.accentDark, () => this.flow.requestTakeover(), 36);
     this.trusteePanel.visible = false;
+  }
+
+  /** 桌布：深绿底 + 木框 + 一圈极轻的内暗角（三笔描边，不做大面积渐变）。 */
+  private paintFelt(area: Laya.Box): void {
+    const felt = new Laya.Sprite();
+    felt.graphics.drawRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT, THEME.felt);
+    area.addChild(felt);
+    for (let i = 0; i < 3; i++) {
+      const inset = 6 + i * 10;
+      roundRect(area, inset, inset, TABLE_WIDTH - inset * 2, TABLE_HEIGHT - inset * 2, 10,
+        "#00000000", i === 0 ? THEME.wood : "#00000022", i === 0 ? 12 : 6);
+    }
   }
 
   show(screen: Screen): void {
@@ -218,6 +342,9 @@ export class RoomPage {
       this.lastMatchResult = null;
       this.resultDismissed = false;
       this.roundFinished = false;
+      this.prevHand = null;
+      this.drawnTile = null;
+      this.rematchHintShown = false;
       this.resetSelection();
     }
     // 房间号进房时不一定知道（快照才带），所以每次都跟最新值走，别退回空字符串。
@@ -243,7 +370,7 @@ export class RoomPage {
    * 才是拿到最新状态的那条路。所以终态一旦到手就不让更早的帧盖回去。
    */
   private mergeSnapshot(incoming: RoomSnapshot | null): void {
-    if (!incoming) return;
+    if (incoming === null) return;
     if (!acceptRoomSnapshot(this.snapshot?.status ?? null, incoming.status)) return;
     this.snapshot = incoming;
   }
@@ -261,20 +388,20 @@ export class RoomPage {
    * 「退出游戏」是把座位交给服务器托管（要回来得点「重新接管」）。
    */
   private openTableMenu(): void {
-    const overlay = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#0b1120e6");
+    const overlay = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#04100AD9");
     overlay.zOrder = 100;
-    label(overlay, "牌桌菜单", 36, { width: 620, color: THEME.text, bold: true, align: "center" }).pos(650, 220);
-    textButton(overlay, "继续游戏", 760, 310, 400, 80, THEME.accentDark, () => overlay.destroy(true));
+    label(overlay, "牌桌菜单", 40, { width: 620, color: THEME.text, bold: true, align: "center" }).pos(650, 220);
+    textButton(overlay, "继续游戏", 760, 310, 400, 80, THEME.accentDark, () => overlay.destroy(true), 40);
     textButton(overlay, "返回大厅", 760, 415, 400, 80, THEME.panelBg2, () => {
       overlay.destroy(true);
       void this.flow.backHome();
-    });
+    }, 40);
     textButton(overlay, "退出游戏", 760, 520, 400, 80, THEME.panelBg2, () => {
       overlay.destroy(true);
       this.confirmQuitGame();
-    });
-    label(overlay, "返回大厅：暂时离开牌桌，你仍属于这一局，随时可以回来接着打。", 22, { width: 700, color: THEME.textDim, wordWrap: true }).pos(610, 650);
-    label(overlay, "退出游戏：由服务器接管你的座位并自动代打，牌、座次与积分都保留。", 22, { width: 700, color: THEME.textDim, wordWrap: true }).pos(610, 710);
+    }, 40);
+    label(overlay, "返回大厅：暂时离开牌桌，你仍属于这一局，随时可以回来接着打。", 25, { width: 700, color: THEME.textDim, wordWrap: true }).pos(610, 650);
+    label(overlay, "退出游戏：由服务器接管你的座位并自动代打，牌、座次与积分都保留。", 25, { width: 700, color: THEME.textDim, wordWrap: true }).pos(610, 710);
   }
 
   /**
@@ -284,21 +411,31 @@ export class RoomPage {
    * 而不是在一次误触里就离开牌桌。
    */
   private confirmQuitGame(): void {
-    const overlay = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#0b1120f2");
+    const overlay = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#04100AF2");
     overlay.zOrder = 110;
-    label(overlay, "确定退出当前游戏吗？", 36, { width: 620, color: THEME.accent, bold: true, align: "center" }).pos(650, 310);
-    label(overlay, "退出后系统将自动托管你的座位，\n本次大局结束前你可以回来重新接管。", 26, {
-      width: 620,
-      color: THEME.text,
-      align: "center",
-      wordWrap: true,
+    label(overlay, "确定退出当前游戏吗？", 40, { width: 620, color: THEME.accent, bold: true, align: "center" }).pos(650, 310);
+    label(overlay, "退出后系统将自动托管你的座位，\n本次大局结束前你可以回来重新接管。", 30, {
+      width: 620, color: THEME.text, align: "center", wordWrap: true,
     }).pos(650, 390);
-    textButton(overlay, "取消", 660, 540, 250, 80, THEME.panelBg2, () => overlay.destroy(true));
+    textButton(overlay, "取消", 660, 540, 250, 80, THEME.panelBg2, () => overlay.destroy(true), 40);
     textButton(overlay, "确认退出", 1010, 540, 250, 80, THEME.accentDark, () => {
       overlay.destroy(true);
       // 服务端接管后会把控制权随下一帧下发，界面据此切成「托管中 + 重新接管」。
       this.flow.quitGame();
-    });
+    }, 40);
+  }
+
+  /**
+   * 「再来一局」。
+   *
+   * ⚠️ 服务端**没有**重开能力：`room.start()` 要求 `status === "waiting"`，
+   * 而一大局打完 `finalize()` 会把房间置成 `finished`；也没有 rematch / 重置房间的接口。
+   * 所以这里**不假装能继续**，只把缺口说清楚。
+   */
+  private onRematchTap(): void {
+    this.rematchHintShown = true;
+    this.resultNotice.text = "「再来一局」需要服务端支持（重开已结束的房间），当前未接通";
+    this.resultNotice.visible = true;
   }
 
   private renderAll(notice?: string): void {
@@ -306,8 +443,9 @@ export class RoomPage {
     this.noticeLabel.text = notice ?? "";
     const waiting = this.snapshot?.status === "waiting" && this.match === null;
     // 显示房间号而不是内部 roomId —— 玩家要把它念给下一桌的人听。
-    const number = this.roomNo.length > 0 ? `房间号 ${this.roomNo}` : "房间号读取中";
-    this.statusLabel.text = `${number} · ${this.roomStatusText()}`;
+    const number = this.roomNo.length > 0 ? `房号 ${this.roomNo}` : "房号读取中";
+    const round = this.match ? ` · 第 ${this.match.roundNumber}/${this.match.totalRounds ?? 8} 局` : "";
+    this.statusLabel.text = `${number}${round} · ${this.roomStatusText()}`;
     const inProgress = this.match !== null || this.snapshot?.status === "playing";
     this.exitButton.visible = !inProgress;
     this.menuButton.visible = inProgress;
@@ -352,9 +490,7 @@ export class RoomPage {
     });
   }
 
-  /**
-   * 标题栏那半句状态（判据收在 `effectiveRoomStatus` 里，可单测）。
-   */
+  /** 标题栏那半句状态（判据收在 `effectiveRoomStatus` 里，可单测）。 */
   private roomStatusText(): string {
     const status = effectiveRoomStatus(this.snapshot?.status ?? null, this.match !== null);
     return status ? STATUS_NAMES[status] : "连接中";
@@ -382,14 +518,14 @@ export class RoomPage {
       const player = players[(me + index) % 4];
       const [x, y] = positions[index]!;
       const seat = box(this.waitingTable, x!, y!, 190, 160);
-      socialAvatar(seat, player?.nickname ?? "＋", player?.avatarUrl, 59, 0);
-      label(seat, player?.nickname ?? "等待入座", 24, { width: 190, align: "center" }).pos(0, 83);
+      socialAvatar(seat, player?.nickname ?? "＋", player?.avatarUrl, 59, 0, 72);
+      label(seat, player?.nickname ?? "等待入座", 25, { width: 190, align: "center" }).pos(0, 83);
       if (player) {
-        label(seat, `ID ${player.userId}`, 19, { width: 190, align: "center" }).pos(0, 114);
-        if (player.userId === this.snapshot?.ownerId) label(seat, "房主", 20, { width: 190, align: "center", color: "#f1d18c" }).pos(0, 141);
+        label(seat, `ID ${player.userId}`, 20, { width: 190, align: "center", color: THEME.textDim }).pos(0, 114);
+        if (player.userId === this.snapshot?.ownerId) label(seat, "房主", 20, { width: 190, align: "center", color: THEME.accent }).pos(0, 141);
       }
     }
-    label(this.waitingTable, `房间 ${this.roomNo}\n${players.length}/4 人`, 34, { width: 320, align: "center", wordWrap: true }).pos(440, 330);
+    label(this.waitingTable, `房号 ${this.roomNo}\n${players.length}/4 人`, 40, { width: 340, align: "center", wordWrap: true, color: THEME.text }).pos(430, 320);
   }
 
   private renderWaitingControls(): void {
@@ -400,181 +536,401 @@ export class RoomPage {
     setButtonText(this.startButton, full ? "开始游戏" : "等待四人到齐");
   }
 
+  /* ==================================================================
+   * 牌桌本体
+   * ==================================================================*/
+
   private renderMatch(match: MatchState): void {
     this.matchArea.removeChildren();
-    const table = box(this.matchArea, 400, 130, 1120, 580, THEME.fieldBg);
-    const acting = match.currentPlayerSeat === null ? "等待" : playerName(this.snapshot, match.currentPlayerSeat);
-    label(table, `第 ${match.roundNumber}/${match.totalRounds ?? 8} 局`, 30, { width: 260, align: "center", bold: true, color: THEME.accent }).pos(430, 220);
-    label(table, `${PHASE_NAMES[match.phase]} · 剩余 ${match.tilesLeft} 张`, 24, { width: 360, align: "center" }).pos(380, 265);
-    label(table, `当前：${acting}`, 24, { width: 360, align: "center", color: THEME.warn }).pos(380, 305);
-    this.turnClock = label(table, "", 36, { width: 180, align: "center", bold: true, color: THEME.accent });
-    this.turnClock.pos(470, 350);
+    this.paintFelt(this.matchArea);
 
-    const zones: Record<TableSide, [number, number, number, number]> = {
-      top: [210, 20, 700, 125], right: [890, 130, 210, 330],
-      bottom: [210, 430, 700, 125], left: [20, 130, 210, 330],
-    };
+    const cx = TABLE_WIDTH / 2;
+    const handX = SAFE + SEAT_W + 14;
+
+    // 左：座位信息 → 牌背 → 副露 → 弃牌；右镜像。由外到内：手牌→副露→牌河→桌芯。
+    const leftBacksX = SAFE + SEAT_W + 12;
+    const leftMeldX = leftBacksX + BACK_SIDE_W + 14;
+    const leftRiverX = leftMeldX + MELD_MAX_W + 16;
+    const rightBacksX = TABLE_WIDTH - SAFE - SEAT_W - 12 - BACK_SIDE_W;
+    const rightMeldX = rightBacksX - 14 - MELD_MAX_W;
+    const rightRiverX = rightMeldX - 16 - (2 * (DISCARD_W + DISCARD_GAP_X) - DISCARD_GAP_X);
+
+    const riverW = 9 * (DISCARD_W + DISCARD_GAP_X) - DISCARD_GAP_X;
+    const riverX = cx - riverW / 2;
+
+    /* ---------- 四家：信息 / 副露 / 牌背 / 弃牌 ---------- */
     for (const player of match.players) {
       const side = tableSide(match.seat, player.seat);
-      const [x, y, w, h] = zones[side];
-      const zone = box(table, x, y, w, h, "#123526");
-      const state = `${player.won ? "已胡 · " : ""}${player.missingSuit ? `缺${SUIT_NAMES[player.missingSuit]} · ` : ""}`;
-      label(zone, `${state}${tileRun(player.discards)}`, 19, { width: w - 20, align: "center", wordWrap: true, color: THEME.textDim }).pos(10, 12);
+      this.renderSeat(match, player.seat, side);
+      if (side !== "bottom") this.renderBacks(player.handSize, side, leftBacksX, rightBacksX, cx);
+      this.renderMelds(player.melds, side, leftMeldX, rightMeldX, cx, handX);
     }
+    this.renderRiver(match, "top", riverX, Y.topRiver, 9, 2);
+    this.renderRiver(match, "left", leftRiverX, SIDE_RIVER_Y, 2, 6);
+    this.renderRiver(match, "right", rightRiverX, SIDE_RIVER_Y, 2, 6);
+    this.renderRiver(match, "bottom", riverX, Y.selfRiver, 9, 2);
 
-    this.renderSeatPanels(match);
+    /* ---------- 中央桌芯 ---------- */
+    this.renderDial(match, cx);
 
-    const melds = match.melds.map((meld) => `${meld.kind === "pong" ? "碰" : meld.concealed ? "暗杠" : "杠"}${tileName(meld.tile)}`).join("　");
-    label(this.matchArea, `副露：${melds || "无"}`, 22, { width: 760 }).pos(300, 730);
-    label(this.matchArea, match.missingSuit ? `定缺：${SUIT_NAMES[match.missingSuit]}` : "定缺：待定", 22, { color: THEME.textDim }).pos(1070, 730);
-
+    /* ---------- 手牌 + 操作区 ---------- */
     const hand = sortedHand(match.hand);
-    label(this.matchArea, "我的手牌", 25, { bold: true }).pos(300, 775);
-    this.renderHand(hand, match);
-    this.renderControls(hand, match);
+    this.trackDrawnTile(hand);
+    this.renderHand(hand, match, handX);
+    this.renderControls(match, hand);
+    this.renderShout(match, handX);
+
     this.updateClock();
     this.startClock();
   }
 
-  private renderSeatPanels(match: MatchState): void {
-    const positions: Record<TableSide, [number, number, number, number]> = {
-      bottom: [30, 770, 245, 190], right: [1640, 325, 245, 240],
-      top: [840, 10, 245, 120], left: [35, 325, 245, 240],
-    };
-    for (const player of match.players) {
-      const side = tableSide(match.seat, player.seat);
-      const [x, y, w, h] = positions[side];
-      // 暗杠：服务端只让对手看到一副「扣着的杠」。牌值可见时亮一张、其余扣着；
-      // 若口径改成全扣（tile 为 null），就只写「暗杠」不带牌值。
-      const melds = player.melds
-        .map((meld) => {
-          if (meld.tile === null) return "暗杠(扣)";
-          if (meld.kind === "kong" && meld.concealed) return `暗杠${tileName(meld.tile)}(扣3)`;
-          return `${meld.kind === "pong" ? "碰" : "杠"}${tileName(meld.tile)}`;
-        })
-        .join(" ");
-      // 在场状态要让另外三家看得见：托管中的座位是**服务器在打**，
-      // 不标出来的话别人会一直等"他怎么还不出牌"。
-      const presence = player.presence === "trustee" ? " · 托管中"
-        : player.presence === "away" ? " · 暂离"
-        : player.presence === "disconnected" ? " · 掉线" : "";
-      const snap = this.snapshot?.players[player.seat];
-      const row = box(this.matchArea, x, y, w, h, player.seat === match.currentPlayerSeat ? THEME.accentDark : THEME.panelBg2);
-      // 头像优先用对局帧自带的那份（`MatchState.players[].avatarUrl`）—— 它在每一帧里都有，
-      // 而房间快照可能还没到/还没刷新。昵称对局帧不带，只能靠快照，取不到就退回「玩家N」。
-      socialAvatar(row, snap?.nickname ?? String(player.seat), snap?.avatarUrl ?? player.avatarUrl, 50, 10);
-      label(row, `${playerName(this.snapshot, player.seat)}${presence}`, 20, { width: 165, bold: true }).pos(72, 10);
-      label(row, `本场 ${fmtDelta(player.matchDelta ?? 0)} · 本局 ${fmtDelta(player.roundDelta ?? 0)}`, 18, { width: 165, color: THEME.warn }).pos(72, 40);
-      const controlText = player.seat === match.seat
-        ? (match.control === "trustee" ? "托管" : "本人")
-        : (player.presence === "trustee" ? "托管" : "本人");
-      const awayText = player.seat === match.seat ? (match.away ? " · 暂离" : "") : (player.presence === "away" ? " · 暂离" : "");
-      label(row, `${controlText}${awayText}${player.won ? " · 已胡" : ""}`, 18, { width: 165, color: THEME.textDim }).pos(72, 67);
-      if (side !== "bottom") {
-        const backs = opponentBacks(player.handSize);
-        const vertical = side === "left" || side === "right";
-        backs.forEach((_, index) => {
-          const back = box(row, vertical ? 20 + (index % 7) * 27 : 10 + index * 16, vertical ? 104 + Math.floor(index / 7) * 42 : 94, 24, 36, "#315d84");
-          back.alpha = 0.95;
-        });
+  /** 桌芯：正方形外框 + 中心圆（倒计时）+ 两条对角线切出的四个方向区。 */
+  private renderDial(match: MatchState, cx: number): void {
+    const active = activeWindSlot(match.seat, match.currentPlayerSeat);
+    const d = box(this.matchArea, cx - DIAL_SIZE / 2, Y.dial, DIAL_SIZE, DIAL_SIZE);
+    roundRect(d, 0, 0, DIAL_SIZE, DIAL_SIZE, 20, "#03140ECC");
+
+    // 四个方向区：对角线切出的四个三角，只有当前操作方那一个点亮。
+    for (const slot of WIND_SLOTS) {
+      const hot = slot === active;
+      poly(d, 0, 0, windTriangleOf(slot), hot ? "#E9B44C2E" : "#00000000",
+        hot ? THEME.accent : undefined, hot ? 2 : 0);
+    }
+    line(d, 0, 0, DIAL_SIZE, DIAL_SIZE, "#FFFFFF1A");
+    line(d, DIAL_SIZE, 0, 0, DIAL_SIZE, "#FFFFFF1A");
+
+    // 中心圆：只放倒计时。圆画在正中，Label 用「高度=行高 + valign 居中」保证几何居中。
+    circle(d, DIAL_SIZE / 2, DIAL_SIZE / 2, DIAL_RADIUS, "#020E09E8", "#FFFFFF1F", 1);
+
+    const seconds = deadlineSeconds(match.actionDeadlineAt);
+    const final = isFinalCountdown(seconds);
+    const font = final ? CLOCK_FONT_FINAL : CLOCK_FONT;
+    const lineH = clockLine(font);
+    const text = seconds === null ? "" : String(seconds);
+    this.turnClock = label(d, text, font, {
+      width: DIAL_SIZE, align: "center", bold: true,
+      color: final ? THEME.bad : THEME.text,
+    });
+    this.turnClock.pos(0, (DIAL_SIZE - lineH) / 2);
+    this.turnClock.height = lineH;
+    this.turnClock.valign = "middle";
+
+    // 四个方向标签：贴边 + 另一轴居中（用 valign/align，不靠偏移量）。
+    for (const slot of WIND_SLOTS) {
+      const b = windLabelBoxOf(slot);
+      const hot = slot === active;
+      const t = label(d, WIND_TEXT[slot], 30, {
+        width: b.w, align: "center", bold: hot,
+        color: hot ? THEME.accent : THEME.textDim,
+      });
+      t.pos(b.x, b.y);
+      t.height = b.h;
+      t.valign = "middle";
+    }
+
+    // 桌芯两侧：阶段（左）/ 余牌（右）。都不占中心。
+    const phase = this.phaseText(match);
+    const pl = label(this.matchArea, phase, 30, { width: 250, align: "right", color: THEME.text });
+    pl.pos(cx - DIAL_SIZE / 2 - 34 - 250, Y.dial);
+    pl.height = DIAL_SIZE;
+    pl.valign = "middle";
+    const kl = label(this.matchArea, "余牌", 25, { width: 140, color: THEME.textDim });
+    kl.pos(cx + DIAL_SIZE / 2 + 34, Y.dial + DIAL_SIZE / 2 - 46);
+    const vl = label(this.matchArea, String(match.tilesLeft), 40, { width: 140, bold: true, color: THEME.accent });
+    vl.pos(cx + DIAL_SIZE / 2 + 34, Y.dial + DIAL_SIZE / 2 - 14);
+    vl.height = 52;
+    vl.valign = "middle";
+  }
+
+  private phaseText(match: MatchState): string {
+    if (match.phase === "claiming") return PHASE_NAMES.claiming;
+    return PHASE_NAMES[match.phase];
+  }
+
+  /** 一家座位信息：头像 + (昵称·本场分) + 状态。无卡片，只有文字投影。 */
+  private renderSeat(match: MatchState, seat: number, side: TableSide): void {
+    const player = match.players.find((entry) => entry.seat === seat);
+    if (!player) return;
+    const pos = SEAT_POS[side];
+    const acting = match.currentPlayerSeat === seat;
+    const snap = this.snapshot?.players[seat];
+    const row = box(this.matchArea, pos.x, pos.y, SEAT_W, 100);
+
+    const avatar = box(row, 0, 0, SEAT_AVATAR, SEAT_AVATAR);
+    socialAvatar(avatar, snap?.nickname ?? String(seat), snap?.avatarUrl ?? player.avatarUrl, 0, 0, SEAT_AVATAR);
+    if (acting) roundRect(row, -3, -3, SEAT_AVATAR + 6, SEAT_AVATAR + 6, 15, "#00000000", THEME.accent, 3);
+
+    const colX = SEAT_AVATAR + 12;
+    const name = label(row, playerName(this.snapshot, seat), 30, { width: SEAT_COL_W - 76, color: THEME.text });
+    name.pos(colX, 0);
+    name.height = 39;
+    name.valign = "middle";
+    const score = player.matchDelta ?? 0;
+    const scoreLabel = label(row, fmtDelta(score), 30, {
+      width: 68, align: "right", bold: true,
+      color: score > 0 ? THEME.good : score < 0 ? THEME.bad : THEME.textDim,
+    });
+    scoreLabel.pos(colX + SEAT_COL_W - 76, 0);
+    scoreLabel.height = 39;
+    scoreLabel.valign = "middle";
+
+    const status = this.seatStatusText(match, player.seat, player.presence, player.won);
+    const st = label(row, status, 25, { width: SEAT_COL_W, color: THEME.textDim });
+    st.pos(colX, 42);
+    st.height = 33;
+    st.valign = "middle";
+  }
+
+  /** 缺门 · 托管中 / 暂离 / 掉线 / 已胡。用 · 连接，超长由 Label 的宽度兜住。 */
+  private seatStatusText(match: MatchState, seat: number, presence: string | undefined, won: boolean): string {
+    const player = match.players.find((entry) => entry.seat === seat);
+    const bits: string[] = [];
+    if (player?.missingSuit) bits.push(`缺${SUIT_NAMES[player.missingSuit]}`);
+    const trustee = seat === match.seat ? match.control === "trustee" : presence === "trustee";
+    if (trustee) bits.push("托管中");
+    else if (seat === match.seat ? match.away === true : presence === "away") bits.push("暂离");
+    else if (presence === "disconnected") bits.push("掉线");
+    if (won) bits.push("已胡");
+    return bits.join(" · ");
+  }
+
+  /** 对手牌背：**只由 handSize 生成**，不含任何牌值。 */
+  private renderBacks(handSize: number, side: TableSide, leftBacksX: number, rightBacksX: number, cx: number): void {
+    const count = Math.max(0, handSize);
+    if (side === "top") {
+      const total = count * (BACK_TOP_W + BACK_TOP_GAP) - BACK_TOP_GAP;
+      const startX = cx - total / 2;
+      for (let i = 0; i < count; i++) box(this.matchArea, startX + i * (BACK_TOP_W + BACK_TOP_GAP), Y.topBacks, BACK_TOP_W, BACK_TOP_H, "#1E5740");
+      return;
+    }
+    const x = side === "left" ? leftBacksX : rightBacksX;
+    for (let i = 0; i < count; i++) box(this.matchArea, x, SIDE_RIVER_Y + i * (BACK_SIDE_H + BACK_SIDE_GAP), BACK_SIDE_W, BACK_SIDE_H, "#1E5740");
+  }
+
+  /** 副露：放在各自手牌**朝中心的一侧**，与牌河留出间距。 */
+  private renderMelds(
+    melds: ReadonlyArray<{ kind: "pong" | "kong"; tile: Tile | null; concealed?: boolean }>,
+    side: TableSide, leftMeldX: number, rightMeldX: number, cx: number, handX: number,
+  ): void {
+    if (melds.length === 0) return;
+    const anchor = side === "top" ? { x: cx - MELD_MAX_W / 2, y: Y.topMelds }
+      : side === "left" ? { x: leftMeldX, y: 432 }
+      : side === "right" ? { x: rightMeldX, y: 432 }
+      : { x: handX, y: Y.selfMelds };
+    let x = anchor.x;
+    for (const meld of melds) {
+      const count = meld.kind === "kong" ? 4 : 3;
+      const w = count * (MELD_W + 2) + 6;
+      const cell = box(this.matchArea, x, anchor.y, w, MELD_H + 6);
+      roundRect(cell, 0, 0, w, MELD_H + 6, 8, "#00000033");
+      for (let i = 0; i < count; i++) {
+        // 暗杠：牌值不可见时画扣着的背，不泄露牌面。
+        if (meld.tile === null || (meld.kind === "kong" && meld.concealed && i > 0)) {
+          box(cell, 3 + i * (MELD_W + 2), 3, MELD_W, MELD_H, "#1E5740");
+        } else {
+          const image = new Laya.Image();
+          image.skin = tileAsset(meld.tile);
+          image.pos(3 + i * (MELD_W + 2), 3);
+          image.size(MELD_W, MELD_H);
+          cell.addChild(image);
+        }
       }
-      if (melds) label(row, melds, 16, { width: w - 20, color: THEME.textDim, wordWrap: true }).pos(10, h - 36);
+      x += w + 8;
     }
   }
 
-  private renderHand(hand: Tile[], match: MatchState): void {
-    const canDiscard = actionAvailable(this.liveActions, "discard") && match.phase === "playing";
-    // 定缺之后手里还有缺门牌时，服务端只收缺门牌（`Missing suit tiles must be discarded first`），
-    // 所以这里也把能点的牌收窄到缺门 —— 与浏览器端的 `DiscardSelection.canSelect` 同一判据。
-    // 不收窄的话，点一张缺门之外的牌会被服务端拒掉，看起来就像「点了没反应」。
-    const discardable = canDiscard ? discardableIndexes(hand, match.missingSuit) : null;
-    const canSwap = match.phase === "swapping" && actionAvailable(this.liveActions, "swap");
-    // 托管中：牌照常显示（看得见牌局），但一张都不能点 —— 这一座现在由服务器操作。
-    // 服务端那边也会拒（`SEAT_UNDER_TRUSTEE`），这里只是别让人点了没反应。
-    const trustee = match.control === "trustee";
-    hand.forEach((tile, index) => {
-      const selected = this.selectedIndexes.has(index);
-      const enabled = !trustee && (canSwap || (discardable?.has(index) ?? false));
-      const card = box(this.matchArea, 300 + index * 74, selected ? 800 : 818, 68, 104, selected ? THEME.accentDark : "#f3ead7");
-      card.alpha = enabled ? 1 : 0.48;
+  /** 一家弃牌。最近打出的一张用金框**原位**高亮，不另画一张盖上去。 */
+  private renderRiver(match: MatchState, side: TableSide, x: number, y: number, cols: number, rows: number): void {
+    const player = match.players.find((entry) => tableSide(match.seat, entry.seat) === side);
+    if (!player) return;
+    const tiles = player.discards.slice(0, cols * rows);
+    const isSelf = side === "bottom";
+    const lastIndex = match.phase === "claiming" && isSelf ? tiles.length - 1 : -1;
+    tiles.forEach((tile, index) => {
+      const col = index % cols, row = Math.floor(index / cols);
+      const cell = box(this.matchArea,
+        x + col * (DISCARD_W + DISCARD_GAP_X),
+        y + row * (DISCARD_H + DISCARD_GAP_Y),
+        DISCARD_W, DISCARD_H);
       const image = new Laya.Image();
       image.skin = tileAsset(tile);
-      image.pos(6, 5);
-      image.size(56, 84);
-      card.addChild(image);
-      label(card, String((tile % 9) + 1), 14, { width: 68, align: "center", color: "#2a2118" }).pos(0, 86);
-      if (enabled) card.on(Laya.Event.CLICK, null, () => this.toggleTile(index, hand, match));
+      image.size(DISCARD_W, DISCARD_H);
+      cell.addChild(image);
+      if (index === lastIndex) roundRect(cell, -2, -2, DISCARD_W + 4, DISCARD_H + 4, 7, "#00000000", THEME.accent, 3);
     });
   }
 
-  private renderControls(hand: Tile[], match: MatchState): void {
-    const controls = box(this.matchArea, 1370, 735, 520, 245, THEME.panelBg);
-    // 托管中：一个操作按钮都不给。服务端同样会拒绝（见 ws-server 的控制权闸门），
-    // 这里说明一下"为什么点不动"，否则看起来像卡住了。
+  /**
+   * 记录"刚摸到的那张"。
+   *
+   * 判据在 `addedTile()`：只有手牌恰好多一张、且没有牌消失才认。其余情况（碰杠换牌、
+   * 一帧里发生两件事）一律置空 —— 宁可不提示，也不误报。
+   */
+  private trackDrawnTile(hand: readonly Tile[]): void {
+    this.drawnTile = addedTile(this.prevHand, hand) as Tile | null;
+    this.prevHand = [...hand];
+  }
+
+  /**
+   * 手牌：整副牌里最醒目的主体。
+   *
+   * 刚摸到的那张**不排进顺子**，单独放在最右、和其余牌留 16px 间距并上浮
+   * —— 这是麻将桌的惯例，一眼就能看出"这是刚摸的"。
+   */
+  private renderHand(hand: Tile[], match: MatchState, handX: number): void {
+    const canDiscard = actionAvailable(this.liveActions, "discard") && match.phase === "playing";
+    // 定缺之后手里还有缺门牌时，服务端只收缺门牌（`Missing suit tiles must be discarded first`），
+    // 所以这里也把能点的牌收窄到缺门 —— 与浏览器端的 `DiscardSelection.canSelect` 同一判据。
+    const discardable = canDiscard ? discardableIndexes(hand, match.missingSuit) : null;
+    const canSwap = match.phase === "swapping" && actionAvailable(this.liveActions, "swap");
+    // 托管中：牌照常显示（看得见牌局），但一张都不能点 —— 这一座现在由服务器操作。
+    const trustee = match.control === "trustee";
+    const myTurn = match.currentPlayerSeat === match.seat;
+
+    const rest = [...hand];
+    const drawnIndex = this.drawnTile === null ? -1 : rest.lastIndexOf(this.drawnTile);
+    const drawn = drawnIndex >= 0 ? rest.splice(drawnIndex, 1)[0]! : null;
+
+    const draw = (tile: Tile, index: number, isDrawn: boolean, offsetX: number): void => {
+      const selected = this.selectedIndexes.has(index);
+      const enabled = !trustee && (canSwap || (discardable?.has(index) ?? false));
+      // 三种弱化分开：缺门限制最重、不是自己操作只轻微、托管与缺门同级。
+      const dim = enabled ? 1 : (myTurn ? 0.74 : 0.88);
+      const lift = (selected ? 18 : 0) + (isDrawn ? 10 : 0);
+      const card = box(this.matchArea, offsetX, Y.hand - lift, HAND_TILE_W, HAND_TILE_H);
+      const image = new Laya.Image();
+      image.skin = tileAsset(tile);
+      image.size(HAND_TILE_W, HAND_TILE_H);
+      card.addChild(image);
+      if (dim < 1) card.alpha = dim;
+      if (selected) roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", THEME.accent, 3);
+      // 刚摸的牌：金色描边 + 上浮，动画结束后提示仍然保留。
+      if (isDrawn) roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", THEME.warn, 3);
+      if (enabled) card.on(Laya.Event.CLICK, null, () => this.toggleTile(index, hand, match));
+    };
+
+    let x = handX;
+    rest.forEach((tile, index) => { draw(tile, index, false, x); x += HAND_TILE_W + HAND_TILE_GAP; });
+    if (drawn !== null) draw(drawn, drawnIndex, true, x + 12);
+  }
+
+  /**
+   * 操作区：**严格按服务端 actions 渲染**。
+   *
+   * `actions` 里没有的种类根本不出现（而不是画出来再置灰）。
+   * 数量变化时整体右对齐重排，不留空洞。
+   */
+  private renderControls(match: MatchState, hand: Tile[]): void {
+    const actY = Y.hand - 20 - 100;
+
     if (match.control === "trustee") {
-      label(controls, "托管中 · 由服务器代打", 28, { width: 480, align: "center", color: THEME.accent }).pos(20, 60);
-      label(controls, "点牌桌中央的「重新接管」", 22, { width: 480, align: "center", color: THEME.textDim }).pos(20, 120);
+      const t = label(this.matchArea, "托管中 · 由服务器代打", 30, { width: 400, align: "right", color: THEME.accent });
+      t.pos(TABLE_WIDTH - SAFE - 400, actY + 30);
       return;
     }
+
     if (match.phase === "swapping" && actionAvailable(this.liveActions, "swap")) {
       const valid = swapSelectionIsValid(hand, this.selectedIndexes);
-      label(controls, valid ? "已选同花色三张牌" : `请选择同一花色的三张牌（${this.selectedIndexes.size}/3）`, 22, {
-        width: 480,
-        align: "center",
-        color: valid ? THEME.good : THEME.warn,
-      }).pos(20, 18);
-      textButton(controls, "确认换牌", 30, 75, 220, 78, valid ? THEME.accentDark : THEME.panelBg2, () => {
-        if (!valid || this.actionLocked) return;
-        this.actionLocked = true;
-        this.flow.swap(selectedTiles(hand, this.selectedIndexes));
-        this.resetSelection();
+      const hint = label(this.matchArea, `请选择 3 张牌 · 已选 ${this.selectedIndexes.size}/3`, 30, {
+        width: 560, align: "right", color: valid ? THEME.good : THEME.text,
       });
-      textButton(controls, "自动选择", 270, 75, 220, 78, THEME.panelBg2, () => this.send(() => this.flow.autoSwap()));
+      hint.pos(TABLE_WIDTH - SAFE - 560, actY - 8);
+      textButton(this.matchArea, "确认换牌", TABLE_WIDTH - SAFE - 290, actY + 42, 290, 80,
+        valid ? THEME.accentDark : "#2B3831", () => {
+          if (!valid || this.actionLocked) return;
+          this.actionLocked = true;
+          this.flow.swap(selectedTiles(hand, this.selectedIndexes));
+          this.resetSelection();
+        }, 40);
       return;
     }
 
     if (match.phase === "missing" && actionAvailable(this.liveActions, "choose-missing")) {
-      label(controls, "请选择本局定缺花色", 22, { width: 480, align: "center", color: THEME.warn }).pos(20, 18);
+      const cx = TABLE_WIDTH / 2;
+      const hint = label(this.matchArea, "请选择定缺花色", 30, { width: 680, align: "center", color: THEME.text });
+      hint.pos(cx - 340, Y.dial - 4);
       (["wan", "tong", "tiao"] as const).forEach((suit, index) => {
-        textButton(controls, `缺${SUIT_NAMES[suit]}`, 18 + index * 125, 70, 112, 72, THEME.accentDark, () => this.send(() => this.flow.chooseMissing(suit)));
+        const colors = { wan: "#A62B1F", tong: "#1F5FA8", tiao: "#1B6E41" } as const;
+        textButton(this.matchArea, `缺${SUIT_NAMES[suit]}`, cx - 270 + index * 180, Y.dial + 46, 164, 120, colors[suit],
+          () => this.send(() => this.flow.chooseMissing(suit)), 24);
       });
-      textButton(controls, "自动", 400, 70, 102, 72, THEME.panelBg2, () => this.send(() => this.flow.autoMissing()));
       return;
     }
 
-    const buttons: Array<{ text: string; action: () => void; color?: string }> = [];
+    // 认领：严格按 actions 决定出现哪些（顺序 胡>杠>碰>过）
     if (match.phase === "claiming") {
-      if (actionAvailable(this.liveActions, "hu")) buttons.push({ text: "胡", action: () => this.flow.claim("hu"), color: THEME.accentDark });
-      if (actionAvailable(this.liveActions, "peng")) buttons.push({ text: "碰", action: () => this.flow.claim("peng") });
-      if (actionAvailable(this.liveActions, "kong")) buttons.push({ text: "杠", action: () => this.flow.claim("kong") });
-      if (actionAvailable(this.liveActions, "pass")) buttons.push({ text: "过", action: () => this.flow.claim("pass") });
-    } else {
-      if (actionAvailable(this.liveActions, "discard")) {
-        const selected = [...this.selectedIndexes][0];
-        buttons.push({
-          text: selected !== undefined ? `打出 ${tileName(hand[selected]!)}` : "请先选牌",
-          action: () => {
-            if (selected === undefined) return;
-            this.flow.discard(hand[selected]!);
-            this.resetSelection();
-          },
-          color: selected !== undefined ? THEME.accentDark : THEME.panelBg2,
-        });
+      const kinds = actionButtons(this.liveActions);
+      if (kinds.length === 0) {
+        const t = label(this.matchArea, "等待其他玩家操作…", 30, { width: 400, align: "right", color: THEME.textDim });
+        t.pos(TABLE_WIDTH - SAFE - 400, actY + 30);
+        return;
       }
-      if (actionAvailable(this.liveActions, "hu")) buttons.push({ text: "自摸", action: () => this.flow.selfDraw(), color: THEME.accentDark });
-      if (actionAvailable(this.liveActions, "kong-concealed")) buttons.push({ text: "暗杠", action: () => this.flow.concealedKong() });
-      if (actionAvailable(this.liveActions, "kong-added")) buttons.push({ text: "补杠", action: () => this.flow.addedKong() });
-    }
-
-    if (buttons.length === 0) {
-      label(controls, match.won ? "本局已胡，等待其他玩家" : "等待其他玩家操作…", 24, { width: 480, align: "center", color: THEME.textDim }).pos(20, 80);
+      this.drawActionRow(kinds, TABLE_WIDTH - SAFE, actY, (kind) => this.send(() => this.flow.claim(kind as "hu" | "peng" | "kong" | "pass")));
       return;
     }
-    const width = Math.min(150, Math.floor((480 - (buttons.length - 1) * 12) / buttons.length));
-    const total = buttons.length * width + (buttons.length - 1) * 12;
-    buttons.forEach((button, index) => {
-      textButton(controls, button.text, (520 - total) / 2 + index * (width + 12), 70, width, 80, button.color ?? THEME.panelBg2, () => this.send(button.action));
-    });
+
+    // 行牌阶段：打出 / 自摸 / 暗杠 / 补杠
+    const kinds: string[] = [];
+    const selected = [...this.selectedIndexes][0];
+    if (actionAvailable(this.liveActions, "discard")) kinds.push("discard");
+    if (actionAvailable(this.liveActions, "hu")) kinds.push("hu");
+    if (actionAvailable(this.liveActions, "kong-concealed")) kinds.push("kong");
+    if (actionAvailable(this.liveActions, "kong-added")) kinds.push("kong");
+    if (kinds.length === 0) {
+      const t = label(this.matchArea, match.won ? "本局已胡，等待其他玩家" : "等待其他玩家操作…", 30,
+        { width: 420, align: "right", color: THEME.textDim });
+      t.pos(TABLE_WIDTH - SAFE - 420, actY + 30);
+      return;
+    }
+    let x = TABLE_WIDTH - SAFE - actionsWidth(kinds.map((k) => (k === "discard" ? "discard" : "kong")));
+    for (const kind of kinds) {
+      const label0 = kind === "discard"
+        ? (selected === undefined ? "请先选牌" : `打出 ${tileName(hand[selected]!)}`)
+        : kind === "hu" ? "自摸" : selected === undefined ? "暗杠" : "杠";
+      const action = kind === "discard"
+        ? () => { if (selected === undefined) return; this.flow.discard(hand[selected]!); this.resetSelection(); }
+        : kind === "hu" ? () => this.flow.selfDraw()
+        : actionAvailable(this.liveActions, "kong-concealed") ? () => this.flow.concealedKong()
+        : () => this.flow.addedKong();
+      const w = ACTION_WIDTH[kind] ?? 148;
+      const bg = kind === "discard" ? (selected === undefined ? "#2B3831" : THEME.accentDark) : THEME.accentDark;
+      textButton(this.matchArea, label0, x, actY, w, 100, bg, () => this.send(action), 26);
+      x += w + ACTION_GAP;
+    }
+  }
+
+  /** 一排操作按钮：按优先级颜色分级，整体右对齐。 */
+  private drawActionRow(kinds: string[], rightX: number, y: number, onTap: (kind: string) => void): void {
+    const colors: Record<string, string> = {
+      hu: "#A3231A", kong: "#A05213", peng: "#16553C", pass: "#33443C",
+    };
+    let x = rightX - actionsWidth(kinds);
+    for (const kind of kinds) {
+      const w = ACTION_WIDTH[kind] ?? 148;
+      textButton(this.matchArea, ACTION_LABEL[kind] ?? kind, x, y, w, 100, colors[kind] ?? "#33443C", () => onTap(kind), 26);
+      x += w + ACTION_GAP;
+    }
+  }
+
+  /**
+   * 碰 / 杠 / 胡：贴**动作发起方**的手牌一侧显示，0.8 秒后自己收。
+   *
+   * 不再从中央桌芯弹出 —— 桌芯只负责方向与倒计时。
+   */
+  private renderShout(match: MatchState, handX: number): void {
+    // 谁能"碰/杠/胡"？就是当前帧里被服务端允许 claim 的那一家；没有就退回当前操作方。
+    const claimant = match.currentPlayerSeat;
+    if (claimant === null) return;
+    const side = tableSide(match.seat, claimant);
+    const kinds = actionButtons(this.liveActions);
+    const shout = kinds.indexOf("hu") >= 0 ? "胡！" : kinds.indexOf("kong") >= 0 ? "杠！" : kinds.indexOf("peng") >= 0 ? "碰！" : null;
+    if (shout === null) return;
+    const anchor = SHOUT_ANCHOR[side];
+    const x = side === "bottom" ? Math.min(anchor.x, handX + 380) : anchor.x;
+    const t = label(this.matchArea, shout, 56, { width: 200, align: "center", bold: true, color: shout === "胡！" ? THEME.bad : THEME.accent });
+    t.pos(x, anchor.y);
+    t.height = 74;
+    t.valign = "middle";
   }
 
   private renderResult(): void {
@@ -586,25 +942,25 @@ export class RoomPage {
     //
     // 判据是 `roundPopIsLive()` 而**不是** `this.match === null`：服务端一小场结束时只发
     // 结算帧、不发 `game` 帧，`this.match` 停在结束之前的状态，那个判据一次都不会成立
-    // —— 结果就是这一屏永远不出现。`lastMatchResult` 也不能当"该收屏"的信号：
-    // 打满 8 小场时它随 `match-finished` 一起来，但最后一小场那屏仍要放满停留时长
-    // 再交接给整局结算记录（见 flow 里 `roundPopUntil` 的说明）。
+    // —— 结果就是这一屏永远不出现。
     if (result !== null && this.popVisible()) {
       const left = this.popUntil === null ? null : this.popUntil - Date.now();
       this.roundPopTitle.text = roundLabel(result.roundNumber ?? 1, result.totalRounds);
-      // 四家按座位排：`deltas` 是服务端按座位顺序下发的，没有 `players` 时按下标兜底
-      // （与下面整局结算那一屏同一套兜底写法）。
       const rows: NonNullable<RoomResult["players"]> = result.players
         ?? result.deltas.map<NonNullable<RoomResult["players"]>[number]>((entry, seat) => ({ playerId: entry.playerId, seat, won: false, hand: [], melds: [] }));
-      this.roundPopBody.text = [...rows]
-        .sort((left0, right) => left0.seat - right.seat)
-        .map((player) => {
-          const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
-          const name = this.snapshot?.players.find((entry) => entry.userId === player.playerId)?.nickname ?? `${player.seat} 号位`;
-          return `${player.seat} 号位 ${name}  ${fmtDelta(delta)}`;
-        })
-        .join("\n");
-      this.roundPopFoot.text = left === null ? "" : `${Math.ceil(left / 1000)} 秒后开始下一小场`;
+      const lines: string[] = [];
+      for (const win of result.wins ?? []) {
+        const summary = huSummary(win, tileName);
+        const name = this.nicknameOfSeat(summary.seat);
+        lines.push(`${name}  ${summary.way}${summary.fans ? ` · ${summary.fans}` : ""}  ${fmtDelta(summary.points)}`);
+      }
+      for (const player of [...rows].sort((a, b) => a.seat - b.seat)) {
+        if ((result.wins ?? []).some((win) => win.seat === player.seat)) continue;
+        const delta = result.deltas.find((entry) => entry.playerId === player.playerId)?.delta ?? 0;
+        lines.push(`${this.nicknameOfSeat(player.seat)}  ${fmtDelta(delta)}`);
+      }
+      this.roundPopBody.text = lines.join("\n");
+      this.roundPopFoot.text = left === null ? "" : `${Math.ceil(left / 1000)} 秒后进入下一局`;
       this.roundPop.visible = true;
       this.resultOverlay.visible = false;
       // 到点重画一次：打满 8 小场时那一刻要接着显示整局结算记录，
@@ -632,80 +988,64 @@ export class RoomPage {
       return;
     }
 
-    this.resultTitle.text = settled.reason === "dissolved"
-      ? `本局结算记录 · 中途解散 · 已打 ${settled.completedRounds} 小场`
-      : `本局结算记录 · 打满 ${settled.completedRounds} 小场`;
-    // 「开始时间 · 耗时」。文案与两个浏览器客户端共用一份（`matchTimeText` 收在 client 包里），
-    // 时间戳缺任一个时它返回 null，这里就整行隐藏。
+    const dissolved = settled.reason === "dissolved";
+    this.resultTitle.text = dissolved ? "本场提前结束" : "本场结束";
     const time = matchTimeText(settled.startedAt, settled.finishedAt);
-    this.resultTime.text = time ?? "";
-    this.resultTime.visible = time !== null;
+    this.resultTime.text = dissolved
+      ? `已完成 ${settled.completedRounds}/${this.lastResult?.totalRounds ?? TOTAL_ROUNDS_FALLBACK} 局 · 当前未完成小局已作废`
+      : `打满 ${settled.completedRounds} 小场${time === null ? "" : ` · 耗时 ${time}`}`;
+    this.resultTime.visible = true;
     this.resultBody.removeChildren();
-    // 本小场那一份可能是空的：中途解散时整局结算会**先于**任何一小场结算到达。
-    // 浏览器端同样允许这种情况（`matchResultPanel(result, snapshot, round = null)`），
-    // 所以这里的每一处取值都要能容忍 `result === null`。
-    const winnerSeats = result?.winnerSeats ?? [];
-    label(this.resultBody, winnerSeats.length > 0 ? `胡牌：${winnerSeats.map((seat) => `座位${seat}`).join("、")}` : "流局", 26).pos(0, 0);
-    // 每家胡了什么牌型、谁给的牌 —— 结算界面的第一信息，放在牌面之前。
-    // 与两个浏览器客户端共用一份文案（win-summary 收在 client 包里）。
-    let winY = 32;
-    for (const win of result?.wins ?? []) {
-      const who = this.snapshot?.players[win.seat]?.nickname ?? `座位${win.seat}`;
-      label(this.resultBody, `${who}：${winSummaryText(win, this.snapshot)}`, 22, { width: 640, wordWrap: true }).pos(0, winY);
-      winY += 46;
+
+    // 列头：玩家 | 本场 | 入账 | 余额（数字列固定宽、右对齐）
+    const COL = { player: 0, x1: 560, x2: 700, x3: 840, numW: 130 };
+    const head = box(this.resultBody, 44, 0, 992, 40);
+    label(head, "玩家", 25, { width: 300, color: THEME.textDim }).pos(COL.player, 0);
+    for (const [text, x] of [["本场", COL.x1], ["入账", COL.x2], ["余额", COL.x3]] as const) {
+      const l = label(head, text, 25, { width: COL.numW, align: "right", color: THEME.textDim });
+      l.pos(x, 0);
     }
-    const nickOf = (userId: string): string => this.snapshot?.players.find((player) => player.userId === userId)?.nickname ?? userId;
-    // 没有本小场那一份时退回整局结算的行（它有 `seat`，足够排四行）。
-    const players: NonNullable<RoomResult["players"]> = result?.players
-      ?? result?.deltas.map<NonNullable<RoomResult["players"]>[number]>((entry, seat) => ({ playerId: entry.playerId, seat, won: false, hand: [], melds: [] }))
-      ?? settled.players?.map<NonNullable<RoomResult["players"]>[number]>((entry) => ({ playerId: entry.playerId, seat: entry.seat, won: false, hand: [], melds: [] }))
-      ?? [];
-    // 本小场得失分：单局那份优先，没有就退回整局结算里的 `rawDeltas`。
-    const deltaOf = (playerId: string): number => result?.deltas.find((entry) => entry.playerId === playerId)?.delta
-      ?? settled.rawDeltas.find((entry) => entry.playerId === playerId)?.delta
-      ?? 0;
-    const rowsTop = winY + 13;
-    players.forEach((player, index) => {
-      const delta = deltaOf(player.playerId);
-      const y = rowsTop + index * 190;
-      // 整局结算那一侧的行数据（服务端按座位拼好的）：头像、昵称、10 位 id 号、
-      // 实际入账分与入账后余额都在这里。一小场结束时没有这一份。
-      const settledPlayer = settled.players?.find((entry) => entry.playerId === player.playerId);
-      // 这一行有两个数，别混：`delta` 是本小场，`cumulative` 是整局累计（头像下显示的那个）。
-      const cumulative = player.matchDelta ?? settledPlayer?.delta;
-      const total = cumulative === undefined ? "" : ` · 本场累计 ${fmtDelta(cumulative)}`;
-      const nickname = settledPlayer?.nickname ?? nickOf(player.playerId);
-      const idText = settledPlayer ? `（ID ${settledPlayer.playerId}）` : "";
-      // 头像只有整局结算拿得到（快照的成员列表里没有头像字段，`match-finished` 才带上）。
-      // 取不到就只留昵称，不留一个空图。
-      let textLeft = 0;
-      if (settledPlayer?.avatarUrl) {
-        const avatar = new Laya.Image();
-        avatar.skin = settledPlayer.avatarUrl; avatar.pos(0, y - 6); avatar.size(40, 40);
-        this.resultBody.addChild(avatar);
-        textLeft = 48;
+    line(this.resultBody, 44, 40, 1036, 40, "#FFFFFF1A");
+
+    const settledPlayers = settled.players ?? [];
+    settledPlayers.forEach((player, index) => {
+      const y = 52 + index * 78;
+      const row = box(this.resultBody, 44, y, 992, 70);
+      const avatar = box(row, 0, 12, 42, 42);
+      socialAvatar(avatar, player.nickname, player.avatarUrl, 0, 0, 42);
+      const name = label(row, player.nickname, 30, { width: 300, color: THEME.text });
+      name.pos(56, 0);
+      name.height = 36;
+      name.valign = "middle";
+      const id = label(row, `ID ${player.playerId}`, 25, { width: 300, color: THEME.textDim });
+      id.pos(56, 36);
+      id.height = 33;
+      id.valign = "middle";
+      // 三个数字列：固定宽 + tabular 对齐，纵向成列
+      const nums: Array<[number, string, string]> = [
+        [COL.x1, fmtDelta(player.delta), player.delta > 0 ? THEME.good : player.delta < 0 ? THEME.bad : THEME.textDim],
+        [COL.x2, fmtDelta(player.accountDelta), player.accountDelta > 0 ? THEME.good : player.accountDelta < 0 ? THEME.bad : THEME.textDim],
+        [COL.x3, String(player.balance), THEME.text],
+      ];
+      for (const [x, text, color] of nums) {
+        const l = label(row, text, 30, { width: COL.numW, align: "right", bold: true, color });
+        l.pos(x, 18);
+        l.height = 39;
+        l.valign = "middle";
       }
-      label(this.resultBody, `${nickname}${idText}${player.won ? " · 已胡" : ""}  ${delta > 0 ? "赢 " : delta < 0 ? "输 " : ""}${fmtDelta(delta)} 分${total}`, 26, { color: delta >= 0 ? THEME.good : THEME.bad, width: 650 - textLeft }).pos(textLeft, y);
-      const tiles = sortedHand(player.hand);
-      tiles.forEach((tile, i) => {
-        const image = new Laya.Image();
-        image.skin = tileAsset(tile); image.pos(i * 44, y + 40); image.size(40, 60);
-        this.resultBody.addChild(image);
-      });
-      if (settledPlayer) {
-        label(this.resultBody, `账号入账：${fmtDelta(settledPlayer.accountDelta)} · 余额 ${settledPlayer.balance}`, 20).pos(0, y + 160);
-      }
-      let x = 0;
-      player.melds.forEach((meld) => {
-        for (let i = 0; i < (meld.kind === "kong" ? 4 : 3); i++) {
-          const image = new Laya.Image();
-          image.skin = tileAsset(meld.tile); image.pos(x, y + 108); image.size(30, 45);
-          this.resultBody.addChild(image); x += 32;
-        }
-        x += 10;
-      });
+      if (index < settledPlayers.length - 1) line(this.resultBody, 44, y + 74, 1036, y + 74, "#FFFFFF0F");
     });
+
+    const done = `${settled.completedRounds}/${this.lastResult?.totalRounds ?? TOTAL_ROUNDS_FALLBACK}`;
+    const foot = label(this.resultOverlay, `已完成 ${done} 局`, 25, { width: 400, color: THEME.textDim });
+    foot.pos(44, 560);
+    foot.height = 34;
+    foot.valign = "middle";
     this.resultOverlay.visible = true;
+  }
+
+  private nicknameOfSeat(seat: number): string {
+    return this.snapshot?.players[seat]?.nickname ?? `${seat} 号位`;
   }
 
   private toggleTile(index: number, hand: Tile[], match: MatchState): void {
@@ -739,7 +1079,6 @@ export class RoomPage {
     this.handSignature = "";
   }
 
-
   private schedulePolling(): void {
     if (this.pollTimer !== null) return;
     this.pollTimer = setInterval(() => { void this.poll(); }, 2500);
@@ -754,7 +1093,8 @@ export class RoomPage {
 
   private startClock(): void {
     if (this.clockTimer !== null) return;
-    this.clockTimer = setInterval(() => this.updateClock(), 250);
+    // 100ms 一跳：最后三秒的呼吸缩放要够顺，而它只改一个 Label，代价可以忽略。
+    this.clockTimer = setInterval(() => this.updateClock(), 100);
   }
 
   private stopClock(): void {
@@ -763,11 +1103,29 @@ export class RoomPage {
     this.turnClock = null;
   }
 
+  /**
+   * 倒计时只显示服务端 `actionDeadlineAt` 的剩余秒数，**不触发任何业务动作**。
+   *
+   * 最后三秒要一眼看出来：字号加大 + 变橙红 + 轻微呼吸缩放（1.0→1.08→1.0）。
+   */
   private updateClock(): void {
-    if (!this.turnClock || !this.match) return;
+    const clock = this.turnClock;
+    if (clock === null || this.match === null) return;
     const seconds = deadlineSeconds(this.match.actionDeadlineAt);
-    this.turnClock.text = seconds === null ? "" : `${seconds}s`;
-    this.turnClock.color = seconds !== null && seconds <= 5 ? THEME.bad : THEME.accent;
+    const final = isFinalCountdown(seconds);
+    clock.text = seconds === null ? "" : String(seconds);
+    clock.fontSize = final ? CLOCK_FONT_FINAL : CLOCK_FONT;
+    clock.color = final ? THEME.bad : THEME.text;
+    clock.height = clockLine(clock.fontSize);
+    clock.y = (DIAL_SIZE - clock.height) / 2;
+    if (final) {
+      const scale = 1 + 0.08 * (0.5 + 0.5 * Math.sin(Date.now() / 260));
+      clock.scaleX = scale;
+      clock.scaleY = scale;
+    } else if (clock.scaleX !== 1) {
+      clock.scaleX = 1;
+      clock.scaleY = 1;
+    }
   }
 
   private async poll(): Promise<void> {
@@ -789,3 +1147,33 @@ export class RoomPage {
     if (changed) this.renderAll();
   }
 }
+
+/** 四个方向区的三角顶点。与 `table-layout.windTriangle` 同一套几何。 */
+function windTriangleOf(slot: WindSlot): number[] {
+  const s = DIAL_SIZE, h = s / 2;
+  switch (slot) {
+    case "N": return [0, 0, s, 0, h, h];
+    case "E": return [s, 0, s, s, h, h];
+    case "S": return [s, s, 0, s, h, h];
+    case "W": return [0, s, 0, 0, h, h];
+  }
+}
+
+/** 方向标签的摆放矩形：贴边、另一轴居中。 */
+function windLabelBoxOf(slot: WindSlot): { x: number; y: number; w: number; h: number } {
+  const s = DIAL_SIZE, b = DIAL_LABEL_BAND;
+  switch (slot) {
+    case "N": return { x: 0, y: 0, w: s, h: b };
+    case "S": return { x: 0, y: s - b, w: s, h: b };
+    case "W": return { x: 0, y: 0, w: b, h: s };
+    case "E": return { x: s - b, y: 0, w: b, h: s };
+  }
+}
+
+/** 四家座位信息的左上角。上家/下家贴在牌背外侧，对家在上方居中，自己在左下。 */
+const SEAT_POS: Record<TableSide, { x: number; y: number }> = {
+  top: { x: TABLE_WIDTH / 2 - SEAT_W / 2, y: Y.topInfo },
+  left: { x: SAFE, y: 432 },
+  right: { x: TABLE_WIDTH - SAFE - SEAT_W, y: 432 },
+  bottom: { x: SAFE, y: Y.selfInfo },
+};
