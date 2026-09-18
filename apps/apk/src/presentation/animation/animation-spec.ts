@@ -136,11 +136,11 @@ export function countdownColor(seconds: number | null): string {
  * 不再另起一套 `assets/animation/` 目录。
  */
 export const ANIMATION_ASSET = {
-  ringActive: "resources/animation/ring_active_player.png",
-  ringTrack: "resources/animation/ring_countdown_track.png",
-  ringFill: "resources/animation/ring_countdown_fill.png",
-  iconTrustee: "resources/animation/icon_trustee.png",
-  iconTakeover: "resources/animation/icon_takeover.png",
+  ringActive: "resources/ui/ring_active_player.png",
+  ringTrack: "resources/ui/ring_countdown_track.png",
+  ringFill: "resources/ui/ring_countdown_fill.png",
+  iconTrustee: "resources/ui/icon_trustee.png",
+  iconTakeover: "resources/ui/icon_takeover.png",
 } as const;
 
 /* --------------------------------------------------------------------------
