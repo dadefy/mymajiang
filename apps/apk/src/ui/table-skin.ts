@@ -40,7 +40,14 @@ export const SKIN = {
   bg: "resources/bg/table-lake.jpg",
   slab: "resources/table/slab.png",
   tileFace: "resources/table/tile-face.png",
-  tileBack: "resources/table/tile-back.png",
+  tileBackVertical: "resources/tiles/tile_back_vertical.png",
+  tileBackHorizontal: "resources/tiles/tile_back_horizontal.png",
+  tileSideLeft: "resources/tiles/tile_side_view_left.png",
+  tileSideRight: "resources/tiles/tile_side_view_right.png",
+  tileEdgeBottom: "resources/tiles/tile_edge_bottom.png",
+  tileShadow: "resources/tiles/tile_shadow.png",
+  tileWallVertical: "resources/tiles/tile_wall_stack_vertical.png",
+  tileWallHorizontal: "resources/tiles/tile_wall_stack_horizontal.png",
   panel: "resources/table/panel-ink.png",
 } as const;
 
@@ -182,9 +189,29 @@ export function inkPanel(
  */
 export function tileBack(
   parent: Laya.Sprite, x: number, y: number, w: number, h: number,
+  view: "top" | "left" | "right" | "concealed" = "concealed",
+): Laya.Image {
+  const source = view === "top" ? { skin: SKIN.tileBackHorizontal, ratio: 358 / 250 }
+    : view === "left" ? { skin: SKIN.tileSideLeft, ratio: 245 / 358 }
+    : view === "right" ? { skin: SKIN.tileSideRight, ratio: 246 / 358 }
+    : { skin: SKIN.tileBackVertical, ratio: 250 / 358 };
+  const targetRatio = w / h;
+  const drawW = targetRatio > source.ratio ? h * source.ratio : w;
+  const drawH = targetRatio > source.ratio ? h : w / source.ratio;
+  const node = new Laya.Image();
+  node.skin = source.skin;
+  node.pos(x + (w - drawW) / 2, y + (h - drawH) / 2);
+  node.size(drawW, drawH);
+  parent.addChild(node);
+  return node;
+}
+
+/** 两层牌墙只作余牌视觉提示；实际数量仍完全取服务端 `tilesLeft`。 */
+export function tileWall(
+  parent: Laya.Sprite, x: number, y: number, w: number, h: number, orientation: "vertical" | "horizontal",
 ): Laya.Image {
   const node = new Laya.Image();
-  node.skin = SKIN.tileBack;
+  node.skin = orientation === "vertical" ? SKIN.tileWallVertical : SKIN.tileWallHorizontal;
   node.pos(x, y);
   node.size(w, h);
   parent.addChild(node);
@@ -201,6 +228,12 @@ export function tileBack(
 export function addTileFace(
   container: Laya.Sprite, w: number, h: number, glyphSkin: string,
 ): Laya.Image {
+  const shadow = new Laya.Image();
+  shadow.skin = SKIN.tileShadow;
+  shadow.pos(1, 2);
+  shadow.size(w, h);
+  shadow.alpha = 0.45;
+  container.addChild(shadow);
   const face = new Laya.Image();
   face.skin = SKIN.tileFace;
   face.size(w, h);
@@ -209,6 +242,13 @@ export function addTileFace(
   glyph.skin = glyphSkin;
   glyph.size(w, h);
   container.addChild(glyph);
+  const edge = new Laya.Image();
+  const edgeH = Math.max(3, h * (48 / 358));
+  edge.skin = SKIN.tileEdgeBottom;
+  edge.pos(0, h - edgeH);
+  edge.size(w, edgeH);
+  edge.alpha = 0.82;
+  container.addChild(edge);
   return glyph;
 }
 

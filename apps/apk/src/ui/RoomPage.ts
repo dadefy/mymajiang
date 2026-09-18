@@ -81,6 +81,7 @@ import {
   plate,
   setPie,
   tileBack,
+  tileWall,
   type A2Key,
 } from "./table-skin.js";
 
@@ -1019,6 +1020,8 @@ export class RoomPage {
     const leftW = 150;
     const leftX = cx + DIAL_SIZE / 2 + 34;
     const panelY = Y.dial + DIAL_SIZE / 2 - 76;
+    tileWall(this.matchArea, leftX - 50, panelY + 50, 38, 54, "vertical");
+    tileWall(this.matchArea, leftX + leftW + 22, panelY + 56, 54, 38, "horizontal");
     inkPanel(this.matchArea, leftX - 10, panelY, leftW + 20, 152);
     const kl = label(this.matchArea, "余牌", 22, {
       width: leftW, align: "center", color: TABLE_THEME.goldSoft,
@@ -1146,13 +1149,14 @@ export class RoomPage {
       const total = count * (BACK_TOP_W + BACK_TOP_GAP) - BACK_TOP_GAP;
       const startX = cx - total / 2;
       for (let i = 0; i < count; i++) {
-        tileBack(this.matchArea, startX + i * (BACK_TOP_W + BACK_TOP_GAP), Y.topBacks, BACK_TOP_W, BACK_TOP_H);
+        tileBack(this.matchArea, startX + i * (BACK_TOP_W + BACK_TOP_GAP), Y.topBacks, BACK_TOP_W, BACK_TOP_H, "top");
       }
       return;
     }
     const x = side === "left" ? leftBacksX : rightBacksX;
     for (let i = 0; i < count; i++) {
-      tileBack(this.matchArea, x, SIDE_RIVER_Y + i * (BACK_SIDE_H + BACK_SIDE_GAP), BACK_SIDE_W, BACK_SIDE_H);
+      tileBack(this.matchArea, x, SIDE_RIVER_Y + i * (BACK_SIDE_H + BACK_SIDE_GAP), BACK_SIDE_W, BACK_SIDE_H,
+        side === "left" ? "left" : "right");
     }
   }
 
