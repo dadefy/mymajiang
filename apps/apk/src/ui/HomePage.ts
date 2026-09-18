@@ -126,7 +126,9 @@ export class HomePage {
     label(panel, "加入房间", 40, { width: 740, align: "center", color: NON_TABLE.ink, bold: true }).pos(0, 55);
     const input = field(panel, 130, 145, 480, 78, "请输入 6 位房间号", 6).input;
     textButton(panel, "取消", 130, 285, 220, 76, "#879B8E", () => this.closeModal(), 18);
-    textButton(panel, "加入", 390, 285, 220, 76, NON_TABLE.jade, () => { this.closeModal(); void this.flow.joinRoom(input.text); }, 18); this.modal = modal;
+    const join = textButton(panel, "加入", 390, 285, 220, 76, NON_TABLE.jade, () => { if (/^\d{6}$/.test(input.text.trim())) { this.closeModal(); void this.flow.joinRoom(input.text); } }, 18);
+    const sync = () => { const valid = /^\d{6}$/.test(input.text.trim()); join.mouseEnabled = valid; join.alpha = valid ? 1 : .45; };
+    input.on(Laya.Event.INPUT, null, sync); sync(); this.modal = modal;
   }
   private simpleDialog(title: string, message: string, action: string, run: () => void): void {
     this.closeModal(); const modal = box(this.view, 0, 0, NON_TABLE.width, NON_TABLE.height, "#10251FCC"); const panel = paperPanel(modal, 590, 300, 740, 440);
