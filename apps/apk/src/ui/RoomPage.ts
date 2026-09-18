@@ -20,8 +20,6 @@ import {
   BACK_TOP_GAP,
   BACK_TOP_H,
   BACK_TOP_W,
-  DIAL_LABEL_BAND,
-  DIAL_RADIUS,
   DIAL_SIZE,
   DISCARD_GAP_X,
   DISCARD_GAP_Y,
@@ -109,10 +107,38 @@ const WIND_TEXT: Record<WindSlot, string> = { N: "北", E: "东", S: "南", W: "
 /** 一整局几小场。服务端每帧都会带 `totalRounds`，这里只是它缺席时的兜底。 */
 const TOTAL_ROUNDS_FALLBACK = 8;
 
-/** 倒计时字号：正常 / 最后三秒。行高必须 ≥ 字号 ×1.3，否则 CJK 数字的字形盒会被裁。 */
-const CLOCK_FONT = 58;
-const CLOCK_FONT_FINAL = 66;
+/**
+ * 倒计时字号：正常 / 最后三秒。行高必须 ≥ 字号 ×1.3，否则 CJK 数字的字形盒会被裁。
+ *
+ * 上限由罗盘的环决定：环 98、圈厚约 7，内孔只有 86，58 的字号会把环撑破。
+ */
+const CLOCK_FONT = 46;
+const CLOCK_FONT_FINAL = 54;
 const clockLine = (font: number): number => Math.ceil(font * 1.3);
+
+/**
+ * 中心倒计时环的直径（画在 210 的玉盘正中）。
+ *
+ * 环带落在半径 43~49 那一圈，四个方向胶囊的内沿必须停在 57 之外 —— 环再大一点
+ * 就会从东西两枚胶囊身上穿过去。
+ */
+const DIAL_RING = 98;
+
+/** 倒计时行的顶边：读数就是罗盘的圆心，上下都不再压第二行字。 */
+const clockTop = (font: number): number => DIAL_SIZE / 2 - clockLine(font) / 2;
+
+/**
+ * 四个方向胶囊在玉盘上的落位（相对桌芯左上角）。
+ *
+ * 南北横排、东西竖排，都不越出圆盘。东西两枚特意收窄并贴到盘边：它们的内沿
+ * 离圆心 57，正好让开半径 43~49 的倒计时环带，不再被环穿过去。
+ */
+const WIND_PILL: Record<WindSlot, { x: number; y: number; w: number; h: number }> = {
+  N: { x: 74, y: 14, w: 62, h: 30 },
+  S: { x: 74, y: 166, w: 62, h: 30 },
+  W: { x: 2, y: 90, w: 46, h: 30 },
+  E: { x: 162, y: 90, w: 46, h: 30 },
+};
 
 /**
  * 顶栏通知带：左边让开「房号牌匾」（约 370 收口），右边让开右侧栏第一枚图标（1648 起）。
@@ -146,6 +172,24 @@ const SHOUT_ANCHOR: Record<TableSide, { x: number; y: number }> = {
 
 /** 设置面板那三个开关的键。 */
 type SettingKey = "music" | "sfx" | "voice";
+
+/**
+ * 定缺 → A2 那三枚花色胶囊。没定缺就什么都不画。
+ *
+ * 胶囊上的「缺万 / 缺筒 / 缺条」字样与配色都由资源给（任务书第十五条：
+ * 不许前端自己拿黄字糊一个「缺」）。
+ */
+function missingBadgeKey(suit: Suit | null | undefined): A2Key | null {
+  return suit === "wan" || suit === "tong" || suit === "tiao" ? `badge_missing_${suit}` : null;
+}
+
+/** 倒计时配色分档：宽裕时象牙、十秒内转金、五秒内朱红。只有颜色变，不闪全屏。 */
+function clockColor(seconds: number | null): string {
+  if (seconds === null) return TABLE_THEME.ivory;
+  if (seconds <= 5) return TABLE_THEME.vermilion;
+  if (seconds <= 10) return TABLE_THEME.gold;
+  return TABLE_THEME.ivory;
+}
 
 /**
  * 把一串文本放进剪贴板，返回**是否真的成功**。
@@ -302,8 +346,22 @@ export class RoomPage {
   private handSignature = "";
   private actionLocked = false;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
-  private turnClock: Laya.Label | null = null;
   /** 桌芯中心圆：倒计时的底。每帧重画，这里只留当前那个 Label 供 `updateClock` 改写。 */
+  private turnClock: Laya.Label | null = null;
+  /** 进度环的扇形遮罩：`updateClock` 每 100ms 改它的**角度**，不去缩放整圈。 */
+  private countdownMask: Laya.Sprite | null = null;
+  /** 进度环整圈：实测不到窗口长度时干脆不画，别摆一条不动的满环骗人。 */
+  private countdownFill: Laya.Sprite | null = null;
+  /** 遮罩所对应环的半径（`setPie` 画扇形要用）。 */
+  private countdownRadius = 0;
+  /**
+   * 当前这一窗操作的 `actionDeadlineAt`，与**第一次看见它**的时刻。
+   *
+   * 协议只给截止时间、不给这一窗有多长，所以进度圈的分母只能实测：拿「首次观测」
+   * 到截止时间的差当窗口长度。写死 15 秒会在换三张 / 定缺 / 认领那几窗全错。
+   */
+  private deadlineSeen: string | null = null;
+  private deadlineWindowMs = 0;
   private prevHand: Tile[] | null = null;
   /**
    * 刚摸到的那张牌。
@@ -888,62 +946,127 @@ export class RoomPage {
     this.startClock();
   }
 
-  /** 桌芯：正方形外框 + 中心圆（倒计时）+ 两条对角线切出的四个方向区。 */
+  /**
+   * 桌芯罗盘：玉色圆盘 + 四个方向胶囊 + 中心的倒计时环。
+   *
+   * 进度环是 A2 的 `ring_countdown_track`（底圈）叠 `ring_countdown_fill`（进度），
+   * 进度**只能按角度裁**（扇形遮罩）—— 整圈一缩放，环的粗细就变了。
+   * 一圈多长服务端没下发，所以分母按「第一次看到这个 deadline」实测；
+   * 实测不到就不画进度，只留底圈和秒数。
+   */
   private renderDial(match: MatchState, cx: number): void {
     const active = activeWindSlot(match.seat, match.currentPlayerSeat);
     const d = box(this.matchArea, cx - DIAL_SIZE / 2, Y.dial, DIAL_SIZE, DIAL_SIZE);
-    roundRect(d, 0, 0, DIAL_SIZE, DIAL_SIZE, 20, "#03140ECC");
+    const c = DIAL_SIZE / 2;
 
-    // 四个方向区：对角线切出的四个三角，只有当前操作方那一个点亮。
+    // 玉盘：外圈深翡翠、内圈再暗一档，收在一道香槟金里。
+    circle(d, c, c, c - 1, TABLE_THEME.jadeDeep, TABLE_THEME.gold, 2);
+    circle(d, c, c, c - 13, TABLE_THEME.jadeDark);
+    // 当前操作方：从圆心铺开一道很淡的金，指方向而不压牌河。
+    if (active !== null) poly(d, 0, 0, windTriangleOf(active), "#E9B44C1F");
+
     for (const slot of WIND_SLOTS) {
+      const pill = WIND_PILL[slot];
       const hot = slot === active;
-      poly(d, 0, 0, windTriangleOf(slot), hot ? "#E9B44C2E" : "#00000000",
-        hot ? THEME.accent : undefined, hot ? 2 : 0);
-    }
-    line(d, 0, 0, DIAL_SIZE, DIAL_SIZE, "#FFFFFF1A");
-    line(d, DIAL_SIZE, 0, 0, DIAL_SIZE, "#FFFFFF1A");
-
-    // 中心圆：只放倒计时。圆画在正中，Label 用「高度=行高 + valign 居中」保证几何居中。
-    circle(d, DIAL_SIZE / 2, DIAL_SIZE / 2, DIAL_RADIUS, "#020E09E8", "#FFFFFF1F", 1);
-
-    const seconds = deadlineSeconds(match.actionDeadlineAt);
-    const final = isFinalCountdown(seconds);
-    const font = final ? CLOCK_FONT_FINAL : CLOCK_FONT;
-    const lineH = clockLine(font);
-    const text = seconds === null ? "" : String(seconds);
-    this.turnClock = label(d, text, font, {
-      width: DIAL_SIZE, align: "center", bold: true,
-      color: final ? THEME.bad : THEME.text,
-    });
-    this.turnClock.pos(0, (DIAL_SIZE - lineH) / 2);
-    this.turnClock.height = lineH;
-    this.turnClock.valign = "middle";
-
-    // 四个方向标签：贴边 + 另一轴居中（用 valign/align，不靠偏移量）。
-    for (const slot of WIND_SLOTS) {
-      const b = windLabelBoxOf(slot);
-      const hot = slot === active;
-      const t = label(d, WIND_TEXT[slot], 30, {
-        width: b.w, align: "center", bold: hot,
-        color: hot ? THEME.accent : THEME.textDim,
+      a2(d, "tag_jade_base", pill.x, pill.y, pill.w, pill.h, "fill");
+      if (hot) {
+        roundRect(d, pill.x - 3, pill.y - 3, pill.w + 6, pill.h + 6, 17, "#00000000", TABLE_THEME.goldSoft, 2);
+      }
+      const t = label(d, WIND_TEXT[slot], 26, {
+        width: pill.w, align: "center", bold: hot, color: hot ? TABLE_THEME.cream : TABLE_THEME.goldSoft,
       });
-      t.pos(b.x, b.y);
-      t.height = b.h;
+      t.pos(pill.x, pill.y + (pill.h - 32) / 2);
+      t.height = 32;
       t.valign = "middle";
     }
 
-    // 桌芯两侧：阶段（左）/ 余牌（右）。都不占中心。
-    const phase = this.phaseText(match);
-    const pl = label(this.matchArea, phase, 30, { width: 250, align: "right", color: THEME.text });
-    pl.pos(cx - DIAL_SIZE / 2 - 34 - 250, Y.dial);
-    pl.height = DIAL_SIZE;
+    /* ---------- 中心环：底圈常驻，进度圈按角度裁剪 ---------- */
+    const ringX = c - DIAL_RING / 2;
+    a2(d, "ring_countdown_track", ringX, ringX, DIAL_RING, DIAL_RING);
+    const fill = new Laya.Sprite();
+    fill.pos(ringX, ringX);
+    fill.size(DIAL_RING, DIAL_RING);
+    a2(fill, "ring_countdown_fill", 0, 0, DIAL_RING, DIAL_RING);
+    this.countdownRadius = DIAL_RING / 2;
+    this.countdownMask = pieMask(fill, DIAL_RING / 2, -Math.PI / 2, -Math.PI / 2);
+    this.countdownFill = fill;
+    d.addChild(fill);
+    this.observeDeadline(match.actionDeadlineAt);
+    this.paintCountdownRing();
+
+    const seconds = deadlineSeconds(match.actionDeadlineAt);
+    const font = isFinalCountdown(seconds) ? CLOCK_FONT_FINAL : CLOCK_FONT;
+    this.turnClock = label(d, seconds === null ? "" : String(seconds), font, {
+      width: DIAL_SIZE, align: "center", bold: true, color: clockColor(seconds),
+    });
+    this.turnClock.pos(0, clockTop(font));
+    this.turnClock.height = clockLine(font);
+    this.turnClock.valign = "middle";
+
+    /* ---------- 桌芯两侧：阶段（左）/ 余牌 + 小局（右）。都不占中心，也不再是裸字。 ---------- */
+    const total = match.totalRounds ?? TOTAL_ROUNDS_FALLBACK;
+    const phaseW = 210;
+    const phaseX = cx - DIAL_SIZE / 2 - 24 - phaseW;
+    const phaseY = Y.dial + DIAL_SIZE / 2 - 28;
+    a2(this.matchArea, "tag_jade_base", phaseX, phaseY, phaseW, 56, "fill");
+    const pl = label(this.matchArea, this.phaseText(match), 28, {
+      width: phaseW, align: "center", color: TABLE_THEME.cream,
+    });
+    pl.pos(phaseX, phaseY + 11);
+    pl.height = 34;
     pl.valign = "middle";
-    const kl = label(this.matchArea, "余牌", 25, { width: 140, color: THEME.textDim });
-    kl.pos(cx + DIAL_SIZE / 2 + 34, Y.dial + DIAL_SIZE / 2 - 46);
-    const vl = label(this.matchArea, String(match.tilesLeft), 40, { width: 140, bold: true, color: THEME.accent });
-    vl.pos(cx + DIAL_SIZE / 2 + 34, Y.dial + DIAL_SIZE / 2 - 14);
+
+    const leftW = 150;
+    const leftX = cx + DIAL_SIZE / 2 + 34;
+    const panelY = Y.dial + DIAL_SIZE / 2 - 76;
+    inkPanel(this.matchArea, leftX - 10, panelY, leftW + 20, 152);
+    const kl = label(this.matchArea, "余牌", 22, {
+      width: leftW, align: "center", color: TABLE_THEME.goldSoft,
+    });
+    kl.pos(leftX, panelY + 8);
+    kl.height = 28;
+    kl.valign = "middle";
+    const vl = label(this.matchArea, String(match.tilesLeft), 40, {
+      width: leftW, align: "center", bold: true, color: TABLE_THEME.cream,
+    });
+    vl.pos(leftX, panelY + 36);
     vl.height = 52;
     vl.valign = "middle";
+    a2(this.matchArea, "divider_gold", leftX + 12, panelY + 92, leftW - 24, 12, "fill");
+    const rl = label(this.matchArea, `第 ${match.roundNumber}/${total} 局`, 21, {
+      width: leftW, align: "center", color: TABLE_THEME.goldSoft,
+    });
+    rl.pos(leftX, panelY + 108);
+    rl.height = 30;
+    rl.valign = "middle";
+  }
+
+  /**
+   * 记下这一窗操作的实测长度。
+   *
+   * `actionDeadlineAt` 一变就是一窗新操作：以「第一次看见它的时刻」为起点。
+   * 客户端轮询/推送的延迟会算进窗口里，所以这里只取一个合理区间内的值，
+   * 越界就当没测到（宁可不画进度，也不画一条乱跳的环）。
+   */
+  private observeDeadline(deadlineAt: number | undefined): void {
+    const key = deadlineAt === undefined ? null : String(deadlineAt);
+    if (key === this.deadlineSeen) return;
+    this.deadlineSeen = key;
+    const span = deadlineAt === undefined ? 0 : deadlineAt - Date.now();
+    this.deadlineWindowMs = span > 900 && span < 60_000 ? span : 0;
+  }
+
+  /** 按剩余时间改写进度环的扇形角度。没实测到窗口长度就整圈不画。 */
+  private paintCountdownRing(): void {
+    const mask = this.countdownMask;
+    if (mask === null) return;
+    const deadlineAt = this.match?.actionDeadlineAt;
+    const fraction = deadlineAt === undefined || this.deadlineWindowMs <= 0
+      ? 0
+      : Math.max(0, Math.min(1, (deadlineAt - Date.now()) / this.deadlineWindowMs));
+    const from = -Math.PI / 2;
+    setPie(mask, this.countdownRadius, from, from + fraction * Math.PI * 2);
+    if (this.countdownFill !== null) this.countdownFill.visible = fraction > 0.005;
   }
 
   private phaseText(match: MatchState): string {
@@ -951,7 +1074,14 @@ export class RoomPage {
     return PHASE_NAMES[match.phase];
   }
 
-  /** 一家座位信息：头像 + (昵称·本场分) + 状态。无卡片，只有文字投影。 */
+  /**
+   * 一家座位：墨青牌匾 + 圆头像 + 庄家 / 定缺角标 + 大局累计分 + 状态。
+   *
+   * 落点仍由 `SEAT_POS` 决定（四家座位是硬保留项），改的只是这一块长什么样 ——
+   * 原来三行字直接悬在背景上，现在收进牌匾里。
+   * 分数取**整局累计** `matchDelta`（换一小场不清零），配色只分暖金 / 冷灰蓝 / 象牙灰，
+   * 不借股市那套红绿。网络状态要真实延迟才画，协议里没有，所以这里不摆。
+   */
   private renderSeat(match: MatchState, seat: number, side: TableSide): void {
     const player = match.players.find((entry) => entry.seat === seat);
     if (!player) return;
@@ -959,37 +1089,48 @@ export class RoomPage {
     const acting = match.currentPlayerSeat === seat;
     const snap = this.snapshot?.players[seat];
     const row = box(this.matchArea, pos.x, pos.y, SEAT_W, 100);
+    inkPanel(row, -10, -12, SEAT_W + 20, 104);
 
-    const avatar = box(row, 0, 0, SEAT_AVATAR, SEAT_AVATAR);
-    socialAvatar(avatar, snap?.nickname ?? String(seat), snap?.avatarUrl ?? player.avatarUrl, 0, 0, SEAT_AVATAR);
-    if (acting) roundRect(row, -3, -3, SEAT_AVATAR + 6, SEAT_AVATAR + 6, 15, "#00000000", THEME.accent, 3);
+    const name = playerName(this.snapshot, seat);
+    const avatarY = 14;
+    avatarDisc(row, 0, avatarY, SEAT_AVATAR, snap?.avatarUrl ?? player.avatarUrl, name);
+    if (acting) {
+      a2(row, "ring_active_player", -8, avatarY - 8, SEAT_AVATAR + 16, SEAT_AVATAR + 16);
+    }
+    // 庄家：A2 那枚圆章压在头像左上角，和光环错开。
+    if (match.dealerSeat === seat) a2(row, "badge_dealer", -14, avatarY - 20, 34, 34);
 
     const colX = SEAT_AVATAR + 12;
-    const name = label(row, playerName(this.snapshot, seat), 30, { width: SEAT_COL_W - 76, color: THEME.text });
-    name.pos(colX, 0);
-    name.height = 39;
-    name.valign = "middle";
+    const nameLabel = label(row, name, 30, { width: SEAT_COL_W - 76, color: TABLE_THEME.cream });
+    nameLabel.pos(colX, 0);
+    nameLabel.height = 39;
+    nameLabel.valign = "middle";
     const score = player.matchDelta ?? 0;
     const scoreLabel = label(row, fmtDelta(score), 30, {
       width: 68, align: "right", bold: true,
-      color: score > 0 ? THEME.good : score < 0 ? THEME.bad : THEME.textDim,
+      color: score > 0 ? TABLE_THEME.scoreUp : score < 0 ? TABLE_THEME.scoreDown : TABLE_THEME.scoreFlat,
     });
     scoreLabel.pos(colX + SEAT_COL_W - 76, 0);
     scoreLabel.height = 39;
     scoreLabel.valign = "middle";
 
+    // 状态行：定缺胶囊在最左，后面才是在场 / 托管 / 已胡那些文字。
+    let statusX = colX;
+    const badge = missingBadgeKey(player.missingSuit);
+    if (badge !== null) {
+      a2(row, badge, colX, 44, 56, 30);
+      statusX = colX + 64;
+    }
     const status = this.seatStatusText(match, player.seat, player.presence, player.won);
-    const st = label(row, status, 25, { width: SEAT_COL_W, color: THEME.textDim });
-    st.pos(colX, 42);
+    const st = label(row, status, 25, { width: SEAT_W + 20 - statusX, color: TABLE_THEME.goldSoft });
+    st.pos(statusX, 42);
     st.height = 33;
     st.valign = "middle";
   }
 
-  /** 缺门 · 托管中 / 暂离 / 掉线 / 已胡。用 · 连接，超长由 Label 的宽度兜住。 */
+  /** 托管中 / 暂离 / 掉线 / 已胡，用 · 连接，超长由 Label 的宽度兜住。定缺不写在这里 —— 它归胶囊。 */
   private seatStatusText(match: MatchState, seat: number, presence: string | undefined, won: boolean): string {
-    const player = match.players.find((entry) => entry.seat === seat);
     const bits: string[] = [];
-    if (player?.missingSuit) bits.push(`缺${SUIT_NAMES[player.missingSuit]}`);
     const trustee = seat === match.seat ? match.control === "trustee" : presence === "trustee";
     if (trustee) bits.push("托管中");
     else if (seat === match.seat ? match.away === true : presence === "away") bits.push("暂离");
@@ -1406,12 +1547,15 @@ export class RoomPage {
     if (this.clockTimer !== null) clearInterval(this.clockTimer);
     this.clockTimer = null;
     this.turnClock = null;
+    this.countdownMask = null;
+    this.countdownFill = null;
   }
 
   /**
    * 倒计时只显示服务端 `actionDeadlineAt` 的剩余秒数，**不触发任何业务动作**。
    *
-   * 最后三秒要一眼看出来：字号加大 + 变橙红 + 轻微呼吸缩放（1.0→1.08→1.0）。
+   * 颜色按剩余时间分三档（象牙 → 金 → 朱红），最后三秒再加大字号 + 轻微呼吸缩放
+   * （1.0→1.08→1.0）。进度环的角度也在这一跳里改写：它只改扇形遮罩的角度，不碰整圈。
    */
   private updateClock(): void {
     const clock = this.turnClock;
@@ -1420,9 +1564,10 @@ export class RoomPage {
     const final = isFinalCountdown(seconds);
     clock.text = seconds === null ? "" : String(seconds);
     clock.fontSize = final ? CLOCK_FONT_FINAL : CLOCK_FONT;
-    clock.color = final ? THEME.bad : THEME.text;
+    clock.color = clockColor(seconds);
     clock.height = clockLine(clock.fontSize);
-    clock.y = (DIAL_SIZE - clock.height) / 2;
+    clock.y = clockTop(clock.fontSize);
+    this.paintCountdownRing();
     if (final) {
       const scale = 1 + 0.08 * (0.5 + 0.5 * Math.sin(Date.now() / 260));
       clock.scaleX = scale;
@@ -1453,26 +1598,20 @@ export class RoomPage {
   }
 }
 
-/** 四个方向区的三角顶点。与 `table-layout.windTriangle` 同一套几何。 */
+/**
+ * 当前操作方那道很淡的金扇形。
+ *
+ * 不能沿用 `table-layout.windTriangle` 的方形角点 —— 那三个顶点离圆心 148，
+ * 而玉盘只有 104 半径，扇形会从盘子里戳到桌布上。这里收在盘内。
+ */
 function windTriangleOf(slot: WindSlot): number[] {
-  const s = DIAL_SIZE, h = s / 2;
-  switch (slot) {
-    case "N": return [0, 0, s, 0, h, h];
-    case "E": return [s, 0, s, s, h, h];
-    case "S": return [s, s, 0, s, h, h];
-    case "W": return [0, s, 0, 0, h, h];
-  }
-}
-
-/** 方向标签的摆放矩形：贴边、另一轴居中。 */
-function windLabelBoxOf(slot: WindSlot): { x: number; y: number; w: number; h: number } {
-  const s = DIAL_SIZE, b = DIAL_LABEL_BAND;
-  switch (slot) {
-    case "N": return { x: 0, y: 0, w: s, h: b };
-    case "S": return { x: 0, y: s - b, w: s, h: b };
-    case "W": return { x: 0, y: 0, w: b, h: s };
-    case "E": return { x: s - b, y: 0, w: b, h: s };
-  }
+  const c = DIAL_SIZE / 2, r = c - 8, spread = (26 * Math.PI) / 180;
+  const dir = { N: -Math.PI / 2, E: 0, S: Math.PI / 2, W: Math.PI }[slot];
+  return [
+    c, c,
+    c + r * Math.cos(dir - spread), c + r * Math.sin(dir - spread),
+    c + r * Math.cos(dir + spread), c + r * Math.sin(dir + spread),
+  ];
 }
 
 /** 四家座位信息的左上角。上家/下家贴在牌背外侧，对家在上方居中，自己在左下。 */

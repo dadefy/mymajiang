@@ -45,7 +45,7 @@ export const SKIN = {
 } as const;
 
 /** 九宫格留边：和生成脚本里的圆角半径一致，改一处要改两处。 */
-const GRID = { panel: 26, tileBack: 20 } as const;
+const GRID = { panel: 26 } as const;
 
 /** 石板在 1920×1080 上的落点（生成画布含 46px 落影留白）。 */
 export const SLAB = { x: 104, y: 93, w: 1712, h: 982 } as const;
@@ -174,11 +174,21 @@ export function inkPanel(
   return plate(parent, x, y, w, h, SKIN.panel, GRID.panel);
 }
 
-/** 牌背底板。上家 36×40、左右 40×30 两种比例共用一张，靠九宫格保住圆角。 */
+/**
+ * 牌背底板。上家 36×40、左右 40×30、副露 38×54 三种比例共用一张。
+ *
+ * 这张图里有一圈**内缩的描金边**，九宫格会把那圈边钉死在角上、拉花中段，
+ * 36×40 的小牌直接糊成一颗绿椭圆。所以这里整张等比缩放，不走 plate。
+ */
 export function tileBack(
   parent: Laya.Sprite, x: number, y: number, w: number, h: number,
 ): Laya.Image {
-  return plate(parent, x, y, w, h, SKIN.tileBack, GRID.tileBack);
+  const node = new Laya.Image();
+  node.skin = SKIN.tileBack;
+  node.pos(x, y);
+  node.size(w, h);
+  parent.addChild(node);
+  return node;
 }
 
 /**
