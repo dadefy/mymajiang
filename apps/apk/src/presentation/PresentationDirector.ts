@@ -1,6 +1,7 @@
 import type { MatchState, Screen, SeatControl, Tile } from "@mianyang-mahjong/client";
 import { tableSide, deadlineSeconds } from "../ui/landscape-table.js";
 import { addedTile } from "../ui/table-layout.js";
+import { sortedHand } from "../ui/table-model.js";
 import type { AnimationPayload, SeatSide } from "./animation/animation-spec.js";
 import type { AnimationCue, AnimationCoordinator } from "./animation/AnimationCoordinator.js";
 import type { AudioManager, ConfirmedAudioEvent, UiCue } from "./audio/AudioManager.js";
@@ -101,7 +102,7 @@ export class PresentationDirector {
    * ------------------------------------------------------------------ */
 
   /**
-   * 每渲染一帧调用一次（`ScreenHost.render` 与 `RoomPage.show` 各一处，别处不需要）。
+   * 每渲染一帧调用一次。全应用只有 `ScreenHost.render` 这一个观察点。
    *
    * 顺序是「先渲染、再交给表现层」：这样动画永远压在完成后的画面上，
    * 中途来新帧也只是把在途动画收掉，不会出现动画与牌桌各画一半。
@@ -403,15 +404,21 @@ export class PresentationDirector {
    *
    * 服务端**不会**为这些动作单独推事件，真正成立时那一帧自然会再发一次确认动画；
    * 这里给的只是按下瞬间的手感，所以不参与 eventId 去重，也不会改变牌桌。
+   *
+   * 这里**不出声**：这些按钮都是 `textButton`，全局点音钩子已经为这一按响过一声了，
+   * 再补一条就是两声糊在一起。碰/杠/胡的强调音由服务端确认帧负责（见 `diff`）。
    */
   notifyAction(action: "hu" | "peng" | "kong" | "pass"): void {
-    if (action === "pass") { this.notifyPass(); return; }
-    this.options.audio.playUi("button");
+    if (action === "pass") this.notifyPass();
   }
 
-  /** 「过」：一条柔和提示，不响强调音（见 `NOT_DERIVABLE_FROM_STATE`）。 */
+  /**
+   * 「过」：只补一下淡出动画。
+   *
+   * 词表里留着 `pass` 这条音，但这一按不再叠第二声（点音已经响了）；
+   * 将来服务端若显式推「某人过了」，那条路径才用它（见 `NOT_DERIVABLE_FROM_STATE`）。
+   */
   notifyPass(): void {
-    this.options.audio.playUi("button");
     void this.options.animations.playLocal("pass", { side: "bottom" });
   }
 
@@ -469,7 +476,8 @@ function frameOf(match: MatchState, drawn: Tile | null): FrameView {
     seat: match.seat,
     currentPlayerSeat: match.currentPlayerSeat,
     control: match.control ?? "human",
-    hand: match.hand,
+    // 牌桌渲染的是排序后的手牌，槽位必须按同一口径数，否则幽灵牌偏一格。
+    hand: sortedHand(match.hand),
     drawn,
     deadlineAt: match.actionDeadlineAt ?? null,
     players: match.players.map((player) => {

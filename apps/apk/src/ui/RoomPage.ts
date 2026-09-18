@@ -1,4 +1,5 @@
 import { shareDialog, socialAvatar } from "./SocialDialogs.js";
+import type { PresentationDirector } from "../presentation/PresentationDirector.js";
 import type { ApiClient, ClientFlow, MatchState, MatchResult, RoomResult, RoomSnapshot, Screen, Suit, Tile } from "@mianyang-mahjong/client";
 import { matchTimeText, roundLabel, winSummaryText } from "@mianyang-mahjong/client";
 import {
@@ -388,6 +389,13 @@ export class RoomPage {
     private readonly api: ApiClient,
     parent: Laya.Stage,
     private readonly getMe: () => { userId: string } | undefined,
+    /**
+     * 表现层事件出口（可空：单测与不接音效的构建传不到也能跑）。
+     *
+     * 这里**只**用于「玩家点了哪张牌 / 按了哪个认领按钮」两件事 —— 音效与动画的判定
+     * 全在 director 里按帧差分，页面不直接 `playSound`，也不直接 `Tween`。
+     */
+    private readonly director?: PresentationDirector,
   ) {
     this.view = new Laya.Box();
     this.view.size(TABLE_WIDTH, TABLE_HEIGHT);
@@ -1254,7 +1262,7 @@ export class RoomPage {
       }
       // 刚摸的牌：香槟金描边 + 上浮，动画结束后提示仍然保留。
       if (isDrawn) roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", TABLE_THEME.gold, 3);
-      if (enabled) card.on(Laya.Event.CLICK, null, () => this.toggleTile(index, hand, match));
+      if (enabled) card.on(Laya.Event.CLICK, null, () => this.toggleTile(index, hand, match, tile));
     };
 
     let x = handX;
@@ -1313,7 +1321,11 @@ export class RoomPage {
         t.pos(TABLE_WIDTH - SAFE - 400, actY + 30);
         return;
       }
-      this.drawActionRow(kinds, TABLE_WIDTH - SAFE, actY, (kind) => this.send(() => this.flow.claim(kind as "hu" | "peng" | "kong" | "pass")));
+      this.drawActionRow(kinds, TABLE_WIDTH - SAFE, actY, (kind) => this.send(() => {
+        // 放在 send 里面：锁挡下重复点击时不该再闪一下反馈。
+        this.director?.notifyAction(kind as "hu" | "peng" | "kong" | "pass");
+        this.flow.claim(kind as "hu" | "peng" | "kong" | "pass");
+      }));
       return;
     }
 
@@ -1498,7 +1510,7 @@ export class RoomPage {
     return this.snapshot?.players[seat]?.nickname ?? `${seat} 号位`;
   }
 
-  private toggleTile(index: number, hand: Tile[], match: MatchState): void {
+  private toggleTile(index: number, hand: Tile[], match: MatchState, tile: Tile): void {
     // 这一小场已经结算：牌桌上压着结算那屏，旧手牌不该再有任何反应。
     if (this.roundFinished) return;
     if (match.phase === "swapping") {
@@ -1508,6 +1520,8 @@ export class RoomPage {
       this.selectedIndexes = this.selectedIndexes.has(index) ? new Set() : new Set([index]);
     }
     this.renderMatch(match);
+    // 只在「选中」时给反馈：取消选中再抬一次动画读起来像是又选了一遍。
+    if (this.selectedIndexes.has(index)) this.director?.notifyTileSelect(tile);
   }
 
   private send(action: () => void): void {

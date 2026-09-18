@@ -1,4 +1,5 @@
 import type { ApiClient, ClientFlow, Screen } from "@mianyang-mahjong/client";
+import { createPresentation, type Presentation } from "../presentation/presentation.js";
 import { ChatPage } from "./ChatPage.js";
 import { HomePage } from "./HomePage.js";
 import { KeyEntryPage } from "./KeyEntryPage.js";
@@ -18,8 +19,12 @@ interface PageView {
  *
  * 渲染层不持有任何业务状态：每一帧都来自 `flow.onChange` 的 Screen 快照，
  * 页面自己只保留纯展示性的本地状态（例如结算浮层是否已被关掉）。
+ *
+ * 音效与动画也在这里装配（见 `presentation.ts`）：页面拿得到的是 `director`，
+ * 拿不到 `AudioManager` 与 `AnimationCoordinator` —— 想直接 `playSound` 都没有入口。
  */
 export class ScreenHost {
+  readonly presentation: Presentation;
   private readonly keyEntry: KeyEntryPage;
   private readonly profile: ProfilePage;
   private readonly home: HomePage;
@@ -34,11 +39,15 @@ export class ScreenHost {
     api: ApiClient,
     private readonly stage: Laya.Stage,
   ) {
+    this.presentation = createPresentation(stage);
     this.keyEntry = new KeyEntryPage(flow, stage);
     this.profile = new ProfilePage(flow, stage);
     this.home = new HomePage(flow, stage);
-    this.room = new RoomPage(flow, api, stage, () => this.me);
+    this.room = new RoomPage(flow, api, stage, () => this.me, this.presentation.director);
     this.chat = new ChatPage(flow, stage);
+    // 动画层要在所有页面**之上**：它是在页面之前建的（director 得先存在才传得出去），
+    // 所以这里补一次 addChild 把它挪到子节点末尾。它整层鼠标穿透，盖在上面也不吃掉点击。
+    stage.addChild(this.presentation.overlayNode);
     this.profile.view.visible = false;
     this.home.view.visible = false;
     this.room.view.visible = false;
@@ -58,6 +67,8 @@ export class ScreenHost {
       this.pageFor(screen.name).view.visible = true;
     }
     this.pageFor(screen.name).show(screen);
+    // 先渲染、后交给表现层：动画压在完成后的画面上，事件也是这一帧的画面。
+    this.presentation.director.observe(screen);
   }
 
   /**

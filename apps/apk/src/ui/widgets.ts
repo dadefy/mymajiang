@@ -200,8 +200,28 @@ export function textButton(
   caption.name = "caption";
   caption.valign = "middle";
   caption.height = h;
-  view.on(Laya.Event.CLICK, null, () => onTap());
+  view.on(Laya.Event.CLICK, null, () => {
+    notifyTap();
+    onTap();
+  });
   return view;
+}
+
+/**
+ * 点击音的**唯一**挂点。
+ *
+ * UI 层不 import 表现层 —— 那会绕成环（表现层要用这里的 `THEME` 与版式常量），
+ * 所以由 `presentation.ts` 装配时把一个回调塞进来。
+ * 这样全工程只有一处接点击音，不必在每个按钮上重复 `playSound`。
+ */
+let tapNotifier: (() => void) | null = null;
+
+export function setTapSoundHook(notify: (() => void) | null): void {
+  tapNotifier = notify;
+}
+
+function notifyTap(): void {
+  if (tapNotifier !== null) tapNotifier();
 }
 
 /** 改写 textButton 上的文字（例如「准备」↔「取消准备」）。 */
