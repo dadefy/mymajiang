@@ -4,11 +4,12 @@ import { BrowserVoiceRecorder, MAX_VOICE_SECONDS } from "@mianyang-mahjong/clien
 import { buildMessageRows, describeGroupHeader, estimateMessageHeight, type ChatMessageRow } from "./chat-model.js";
 import { pickImage } from "./file-picker.js";
 import { THEME as BASE_THEME, box, field, label, refill, setButtonText, textButton } from "./widgets.js";
+import { NON_TABLE, background, paperPanel } from "./non-table-skin.js";
 
 const THEME = { ...BASE_THEME, panelBg: "#f7f7f7", panelBg2: "#d7e5dc", text: SOCIAL.ink, textDim: SOCIAL.dim, accentDark: SOCIAL.green };
 
 /** 消息行宽度；右侧要留出撤回按钮的位置。 */
-const ROW_WIDTH = 690;
+const ROW_WIDTH = 1020;
 
 /**
  * 群聊页面：群信息、消息列表、发消息、发图片与撤回。
@@ -30,6 +31,7 @@ export class ChatPage {
   private readonly emptyLabel: Laya.Label;
   private readonly statusLabel: Laya.Label;
   private readonly input: Laya.TextInput;
+  private readonly memberList: Laya.VBox;
   private messages: GroupMessageView[] = [];
   private sending = false;
   private uploading = false;
@@ -43,47 +45,60 @@ export class ChatPage {
     parent: Laya.Stage,
   ) {
     this.view = new Laya.Box();
-    this.view.size(750, 1334);
-    this.view.bgColor = SOCIAL.bg;
+    this.view.size(1920, 1080);
     parent.addChild(this.view);
+    background(this.view, "group");
+    box(this.view, 0, 0, 1920, 1080, "#F4EEDC55").mouseEnabled = false;
 
-    const header = box(this.view, 0, 0, 750, 110, THEME.panelBg);
-    textButton(header, "返回", 24, 25, 130, 60, THEME.panelBg2, () => void this.flow.backHome());
-    this.titleLabel = label(header, "", 30, { width: 420, align: "center", bold: true });
-    this.titleLabel.pos(165, 42);
-    textButton(header, "群设置", 596, 25, 130, 60, SOCIAL.green, () => { if (this.flow.current.name === "chat") settingsDialog(this.view, this.flow, this.flow.current); });
+    const left = paperPanel(this.view, 28, 28, 310, 1024);
+    textButton(left, "返回大厅", 22, 22, 266, 64, "#789084", () => void this.flow.backHome(), 16);
+    label(left, "牌友群", 30, { width: 266, align: "center", color: NON_TABLE.ink, bold: true }).pos(22, 125);
+    const currentGroup = box(left, 18, 190, 274, 110, "#DDEAE2");
+    this.titleLabel = label(currentGroup, "", 27, { width: 240, align: "center", bold: true, color: NON_TABLE.ink });
+    this.titleLabel.pos(17, 18);
+    this.metaLabel = label(currentGroup, "", 18, { width: 240, align: "center", color: NON_TABLE.dim });
+    this.metaLabel.pos(17, 63);
+    label(left, "当前群聊", 20, { width: 266, align: "center", color: NON_TABLE.dim }).pos(22, 330);
 
-    this.metaLabel = label(this.view, "", 22, { width: 690, color: THEME.textDim });
-    this.metaLabel.pos(30, 124);
-    this.noticeLabel = label(this.view, "", 22, { width: 690, color: THEME.warn, wordWrap: true });
-    this.noticeLabel.pos(30, 156);
+    const center = paperPanel(this.view, 360, 28, 1130, 1024);
+    const header = box(center, 0, 0, 1130, 105, "#F4EEDCEE");
+    label(header, "群聊", 34, { width: 780, align: "center", bold: true, color: NON_TABLE.ink }).pos(175, 24);
+    textButton(header, "群设置", 930, 20, 165, 62, SOCIAL.green, () => { if (this.flow.current.name === "chat") settingsDialog(this.view, this.flow, this.flow.current); }, 16);
 
-    this.earlierButton = textButton(this.view, "加载更早的消息", 245, 202, 260, 56, THEME.panelBg2, () => void this.flow.loadEarlier());
+    this.noticeLabel = label(center, "", 20, { width: 1020, color: THEME.warn, wordWrap: true });
+    this.noticeLabel.pos(55, 108);
+
+    this.earlierButton = textButton(center, "加载更早的消息", 435, 145, 260, 52, THEME.panelBg2, () => void this.flow.loadEarlier(), 14);
 
     // 消息列表：Panel 裁剪 + 内部一列 VBox，由 renderMessages 重建。
     const panel = new Laya.Panel();
-    panel.pos(30, 272);
-    panel.size(690, 850);
+    panel.pos(55, 210);
+    panel.size(1020, 660);
     panel.vScrollBarSkin = "";
     panel.hScrollBarSkin = "";
     this.messageList = new Laya.VBox();
     this.messageList.pos(0, 0);
-    this.messageList.width = 690;
+    this.messageList.width = 1020;
     this.messageList.space = 10;
     panel.addChild(this.messageList);
-    this.view.addChild(panel);
+    center.addChild(panel);
     this.messagePanel = panel;
 
-    this.emptyLabel = label(this.view, "还没有消息，打个招呼吧", 24, { width: 690, align: "center", color: THEME.textDim });
-    this.emptyLabel.pos(30, 660);
+    this.emptyLabel = label(center, "还没有消息，打个招呼吧", 24, { width: 1020, align: "center", color: THEME.textDim });
+    this.emptyLabel.pos(55, 510);
 
-    this.statusLabel = label(this.view, "", 22, { width: 690, align: "center", color: THEME.warn, wordWrap: true });
-    this.statusLabel.pos(30, 1136);
+    this.statusLabel = label(center, "", 20, { width: 1020, align: "center", color: THEME.warn, wordWrap: true });
+    this.statusLabel.pos(55, 875);
 
-    this.input = field(this.view, 30, 1190, 360, 80, "说点什么…", 500).input;
-    this.voiceButton = textButton(this.view, "语音", 398, 1190, 90, 80, THEME.panelBg2, () => void this.toggleRecording());
-    this.imageButton = textButton(this.view, "图片", 496, 1190, 90, 80, THEME.panelBg2, () => void this.pickAndSendImage());
-    this.sendButton = textButton(this.view, "发送", 594, 1190, 126, 80, THEME.accentDark, () => void this.send());
+    this.input = field(center, 55, 920, 650, 72, "说点什么…", 500).input;
+    this.voiceButton = textButton(center, "语音", 720, 920, 100, 72, THEME.panelBg2, () => void this.toggleRecording(), 14);
+    this.imageButton = textButton(center, "图片", 835, 920, 100, 72, THEME.panelBg2, () => void this.pickAndSendImage(), 14);
+    this.sendButton = textButton(center, "发送", 950, 920, 125, 72, THEME.accentDark, () => void this.send(), 14);
+
+    const right = paperPanel(this.view, 1512, 28, 380, 1024);
+    label(right, "群成员", 30, { width: 330, align: "center", color: NON_TABLE.ink, bold: true }).pos(25, 28);
+    const members = new Laya.Panel(); members.pos(25, 95); members.size(330, 880); members.vScrollBarSkin = "";
+    this.memberList = new Laya.VBox(); this.memberList.width = 330; this.memberList.space = 8; members.addChild(this.memberList); right.addChild(members);
   }
 
   show(screen: Screen): void {
@@ -112,6 +127,12 @@ export class ChatPage {
 
     this.messages = screen.messages;
     this.renderMessages(buildMessageRows(screen.messages, { meId: screen.meId, now: new Date() }));
+    refill(this.memberList, screen.group?.members.length ?? 0, (index, row) => {
+      const member = screen.group!.members[index]!; row.size(330, 76); row.bgColor = index % 2 ? "#E9E2D1" : "#F2EBD9";
+      socialAvatar(row, member.nickname ?? member.userId, member.avatarUrl, 8, 8, 58);
+      label(row, member.nickname ?? member.userId, 21, { width: 220, color: NON_TABLE.ink }).pos(78, 10);
+      label(row, member.role === "owner" ? "群主" : member.role === "admin" ? "管理员" : "成员", 17, { color: NON_TABLE.dim }).pos(78, 43);
+    });
   }
 
   /** 离开页面时清掉没发出去的草稿，并放弃正在进行的录音（不上传也不留）。 */
@@ -209,25 +230,26 @@ export class ChatPage {
       const height = isImage ? 320 : isInvite ? 245 : estimateMessageHeight(item.content);
       total += height + 10;
       row.size(ROW_WIDTH, height);
-      const bubbleX = item.mine ? 100 : 78;
-      socialAvatar(row, item.sender, undefined, item.mine ? 620 : 0, 0, 60);
-      const bubble = box(row, bubbleX, 34, 500, height - 40, item.mine ? "#a5e877" : SOCIAL.panel);
-      label(row, `${item.sender}  ${item.time}`, 20, { width: 500, color: SOCIAL.dim }).pos(bubbleX, 4);
+      const bubbleX = item.mine ? 235 : 78;
+      socialAvatar(row, item.sender, undefined, item.mine ? 950 : 0, 0, 60);
+      const bubble = box(row, bubbleX, 34, 700, height - 40, item.mine ? "#B7DDC8" : "#F4EEDC");
+      label(row, `${item.sender}  ${item.time}`, 20, { width: 700, color: SOCIAL.dim }).pos(bubbleX, 4);
       if (isImage) {
         const image = new Laya.Image(); image.skin = message.content; image.pos(12, 12); image.size(260, 240); bubble.addChild(image);
         image.on(Laya.Event.CLICK, null, () => {
-          const preview = box(this.view, 0, 0, 750, 1334, "#202622"); preview.zOrder = 120;
-          const full = new Laya.Image(); full.skin = message.content; full.pos(25, 190); full.size(700, 900); preview.addChild(full);
-          textButton(preview, "关闭图片", 250, 1160, 250, 70, SOCIAL.green, () => preview.destroy(true));
+          const preview = box(this.view, 0, 0, 1920, 1080, "#202622EE"); preview.zOrder = 120;
+          const full = new Laya.Image(); full.skin = message.content; full.pos(510, 90); full.size(900, 820); preview.addChild(full);
+          textButton(preview, "关闭图片", 810, 940, 300, 70, SOCIAL.green, () => preview.destroy(true), 16);
         });
       } else if (isInvite) {
         let roomNo = "";
         try { const invite = JSON.parse(message.content); if (/^\d{6}$/.test(invite.roomNo)) roomNo = invite.roomNo; } catch { /* 历史无效名片 */ }
-        label(bubble, "绵阳麻将 · 房间邀请", 28, { color: SOCIAL.ink }).pos(18, 18);
-        label(bubble, roomNo ? `房间号 ${roomNo}` : "邀请已失效", 26, { color: SOCIAL.ink }).pos(18, 65);
-        if (roomNo) textButton(bubble, "点击进入房间", 18, 112, 450, 60, SOCIAL.green, () => { void this.flow.joinRoom(roomNo); });
+        bubble.bgColor = "#35594E";
+        label(bubble, "绵阳麻将 · 房间邀请", 28, { color: "#F4EEDC" }).pos(18, 18);
+        label(bubble, roomNo ? `房间号 ${roomNo}` : "邀请已失效", 26, { color: "#F4EEDC" }).pos(18, 65);
+        if (roomNo) textButton(bubble, "加入房间", 470, 100, 200, 60, SOCIAL.green, () => { void this.flow.joinRoom(roomNo); }, 14);
       } else {
-        const body = label(bubble, item.content, 28, { width: 465, wordWrap: true, color: item.tone === "system" ? SOCIAL.dim : SOCIAL.ink });
+        const body = label(bubble, item.content, 28, { width: 665, wordWrap: true, color: item.tone === "system" ? SOCIAL.dim : SOCIAL.ink });
         body.pos(16, 12); body.height = height - 60;
       }
 
