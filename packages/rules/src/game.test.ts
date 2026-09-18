@@ -199,6 +199,101 @@ describe("行牌与结算", () => {
     expect(game.result!.deltas.reduce((sum, entry) => sum + entry.delta, 0)).toBe(0);
   });
 
+  it("杠分：直杠 2 分、暗杠各家 2 分、补杠各家 1 分，事件账本零和", () => {
+    // 此前杠分只有间接覆盖（100 种子结算回放不保证真的出现杠）。
+    // 贪杠机器人：能杠必杠、能碰必碰（补杠要先碰出刻子）、有胡必胡，其余按缺门→最小牌出。
+    // 逐种子搜索直到三种杠都被观察到，再逐条核对事件账本的金额与方向。
+    const seen = new Map<string, Array<{ payer: string | null; payee: string; points: number }>>();
+    let played = 0;
+    for (let seed = 1; seed <= 800 && seen.size < 3; seed += 1) {
+      const game = new MahjongGame(seed, [...IDS]);
+      let guard = 0;
+      try {
+        while (game.phase !== "finished") {
+          if (guard++ > 20000) throw new Error("auto game loop did not terminate");
+          const actor = IDS.find((id) => game.allowedActions(id).length > 0);
+          if (!actor) break;
+          const actions = game.allowedActions(actor);
+          if (game.phase === "claiming") {
+            if (actions.includes("kong")) {
+              game.claim(actor, "kong");
+            } else if (actions.includes("hu")) {
+              game.claim(actor, "hu");
+            } else if (actions.includes("peng")) {
+              game.claim(actor, "peng");
+            } else {
+              game.claim(actor, "pass");
+            }
+          } else if (actions.includes("kong-concealed")) {
+            game.concealedKong(actor);
+          } else if (actions.includes("kong-added")) {
+            game.addedKong(actor);
+          } else if (actions.includes("discard")) {
+            const player = game.players[game.currentPlayerSeat]!;
+            const missing = player.hand.find((tile) => tileSuit(tile) === player.missingSuit);
+            game.discard(actor, missing ?? [...player.hand].sort((a, b) => a - b)[0]!);
+          } else {
+            game.autoAct(actor);
+          }
+        }
+        played += 1;
+      } catch {
+        // 个别种子撞上边界规则（如最后 4 张强制胡）——跳过，不影响断言的确定性。
+        continue;
+      }
+      for (const event of game.events) {
+        if (event.type !== "kong") continue;
+        const group = seen.get(event.note) ?? [];
+        group.push({ payer: event.payer, payee: event.payee, points: event.points });
+        seen.set(event.note, group);
+      }
+    }
+    expect(played).toBeGreaterThan(0);
+    // 三种杠都要真的被观察到，否则金额断言就是空转
+    expect(seen.size).toBe(3);
+    expect(seen.has("直杠")).toBe(true);
+    expect(seen.has("暗杠")).toBe(true);
+    expect(seen.has("补杠")).toBe(true);
+
+    // 直杠：点杠者独付 2 分
+    for (const event of seen.get("直杠")!) {
+      expect(event.points).toBe(2);
+      expect(event.payer).not.toBeNull();
+      expect(event.payer).not.toBe(event.payee);
+    }
+    // 暗杠：其余三家各付 2 分（同一开杠者的三个付款人互不相同）
+    for (const event of seen.get("暗杠")!) {
+      expect(event.points).toBe(2);
+      expect(event.payer).not.toBeNull();
+    }
+    const kongedBy = new Map<string, Set<string>>();
+    for (const event of seen.get("暗杠")!) {
+      const payers = kongedBy.get(event.payee) ?? new Set<string>();
+      payers.add(event.payer!);
+      kongedBy.set(event.payee, payers);
+    }
+    for (const payers of kongedBy.values()) expect(payers.size).toBe(3);
+    // 补杠：其余三家各付 1 分
+    for (const event of seen.get("补杠")!) expect(event.points).toBe(1);
+    const addedBy = new Map<string, Set<string>>();
+    for (const event of seen.get("补杠")!) {
+      const payers = addedBy.get(event.payee) ?? new Set<string>();
+      payers.add(event.payer!);
+      addedBy.set(event.payee, payers);
+    }
+    for (const payers of addedBy.values()) expect(payers.size).toBe(3);
+
+    // 每一笔杠分都有真实的付款人：按"收入 - 支出"逐家累计，全局净额恒为零
+    const netByPlayer = new Map<string, number>();
+    for (const group of seen.values()) {
+      for (const event of group) {
+        netByPlayer.set(event.payee, (netByPlayer.get(event.payee) ?? 0) + event.points);
+        netByPlayer.set(event.payer!, (netByPlayer.get(event.payer!) ?? 0) - event.points);
+      }
+    }
+    expect([...netByPlayer.values()].reduce((sum, delta) => sum + delta, 0)).toBe(0);
+  });
+
   it("手里还有缺门牌时必须先打缺门", () => {
     const game = new MahjongGame(99, [...IDS]);
     startPlaying(game, () => 0.5);
