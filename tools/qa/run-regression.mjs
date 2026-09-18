@@ -42,10 +42,18 @@ const results = [];
 function run(label, command, args, opts = {}) {
   console.log(`\n▶ ${label}`);
   const started = Date.now();
+  // Windows 上的 spawn 规则（修「'C:\Program' 不是内部或外部命令」）：
+  // - node 子进程：executable + args 数组 + shell:false。process.execPath 通常是
+  //   "C:\Program Files\nodejs\node.exe"，含空格；以前 shell:true 把它整条拼进 cmd
+  //   字符串，空格处被截断。数组形式不做任何 shell 解析，天然免疫空格路径。
+  // - pnpm：Windows 上它是 pnpm.cmd 批处理 shim，新版 Node 出于 CVE-2024-27980
+  //   防护，shell:false 拉起 .cmd 会直接 EINVAL；必须走 shell。但传给 cmd 的是
+  //   不含路径的裸名 "pnpm.cmd"（由 PATH 解析），不存在空格问题，故保持 shell:true。
+  const useShell = isWin && command === pnpm;
   const r = spawnSync(command, args, {
     cwd: ROOT,
     stdio: opts.quiet ? "ignore" : "inherit",
-    shell: isWin,
+    shell: useShell,
     env: { ...process.env, ...(opts.env ?? {}) },
     timeout: opts.timeoutMs ?? 15 * 60_000,
   });
@@ -99,9 +107,10 @@ async function main() {
   }
 
   if (tier === "local-online" || tier === "all") {
+    // node 子进程一律 shell:false（见 run() 内注释：空格路径免疫）
     const health = spawnSync(node, ["-e",
       "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"],
-      { shell: isWin, timeout: 15_000 });
+      { shell: false, timeout: 15_000 });
     if (health.status !== 0) {
       console.log("\n✗ 本机 3000 端口没有服务端 —— 先启动它：");
       console.log("    cd apps/server && node dist/main.js   （或 pnpm --filter @mianyang-mahjong/server start）");
@@ -121,7 +130,7 @@ async function main() {
     console.log(`\n▶ public-online 目标：${base}`);
     if (!run("公网 /health", node, ["-e",
       `fetch('${base}/health').then(async r=>{console.log(r.ok?await r.text():'HTTP '+r.status);process.exit(r.ok?0:1)}).catch(e=>{console.error(String(e));process.exit(1)})`],
-      { shell: isWin, timeout: 30_000 })) return finish();
+      { shell: false, timeout: 30_000 })) return finish();
     if (!run("公网 smoke（SERVER_BASE_URL 指向线上）", node, [...envArgs, "apps/server/scripts/smoke.mjs"],
       { env: { SERVER_BASE_URL: base }, timeoutMs: 5 * 60_000 })) return finish();
     console.log("\n提示：完整线上行为验收（真渲染 + 真协议）需要 4 把密钥：");
