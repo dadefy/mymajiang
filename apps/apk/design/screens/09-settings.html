@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>09-settings · 麻雀精灵</title>
+<link rel="stylesheet" href="../tokens.css">
+<style>
+  /* 最终基准 UI 层（背景图之上） */
+  .bg-cover { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .scrim { position:absolute; inset:0; pointer-events:none; }
+
+  /* 玩家信息卡（左上） */
+  .player-tag {
+    position:absolute; display:flex; align-items:center; gap:16px;
+    background:linear-gradient(180deg, rgba(26,38,33,.95), rgba(20,30,26,.93));
+    border-radius:999px; padding:10px 26px 10px 12px;
+    box-shadow:inset 0 0 0 2px rgba(201,166,96,.55), 0 10px 24px rgba(0,0,0,.35);
+  }
+  .player-tag .avatar { width:78px; height:78px; border:3px solid var(--gold); font-size:32px; }
+  .player-tag .nick { color:#F2EBDD; font-size:26px; font-weight:700; }
+  .player-tag .uid { color:rgba(242,235,221,.75); font-size:var(--fs-mini); }
+  .lv-badge { display:inline-flex; flex-direction:column; gap:4px; margin-left:6px; }
+  .lv-badge .lv { font-size:var(--fs-mini); font-weight:800; color:var(--gold-hi); letter-spacing:1px; }
+  .lv-badge .bar { width:120px; height:10px; border-radius:999px; background:rgba(0,0,0,.45); box-shadow:inset 0 0 0 1px rgba(201,166,96,.6); overflow:hidden; }
+  .lv-badge .bar i { display:block; height:100%; width:68%; background:linear-gradient(90deg, var(--gold-deep,#A88742), var(--gold-hi)); }
+
+  /* 右上：金币 + 图标钮 */
+  .coin-pill {
+    position:absolute; display:flex; align-items:center; gap:10px;
+    background:linear-gradient(180deg, rgba(26,38,33,.95), rgba(20,30,26,.93));
+    border-radius:999px; padding:10px 24px;
+    box-shadow:inset 0 0 0 2px rgba(201,166,96,.55), 0 10px 24px rgba(0,0,0,.35);
+    color:var(--gold-hi); font-size:28px; font-weight:800;
+  }
+  .icon-round {
+    position:absolute; width:64px; height:64px; border-radius:50%;
+    background:linear-gradient(180deg, rgba(26,38,33,.95), rgba(20,30,26,.93));
+    box-shadow:inset 0 0 0 2px rgba(201,166,96,.55), 0 8px 18px rgba(0,0,0,.35);
+    display:flex; align-items:center; justify-content:center; font-size:28px; color:#F2EBDD; cursor:pointer;
+  }
+
+  /* 功能大卡（贴参考图：上图形区 + 下米白文字区 + 右下圆箭头） */
+  .fc2 {
+    position:relative; width:352px; border-radius:22px; overflow:hidden; cursor:pointer;
+    background:var(--ivory-card);
+    box-shadow:0 18px 40px rgba(50,35,15,.38), inset 0 0 0 2px rgba(255,255,255,.6);
+    transition:transform .1s, filter .1s;
+  }
+  .fc2:hover { transform:translateY(-8px); filter:brightness(1.05); }
+  .fc2:active { transform:translateY(-3px); }
+  .fc2 .art { height:300px; position:relative; display:flex; align-items:center; justify-content:center; }
+  .fc2 .tile {
+    width:124px; height:162px; border-radius:16px;
+    background:linear-gradient(180deg, #F7F1E3, #E6DCC4);
+    box-shadow:0 10px 0 rgba(0,0,0,.22), 0 22px 36px rgba(0,0,0,.32), inset 0 2px 0 rgba(255,255,255,.8);
+    display:flex; align-items:center; justify-content:center;
+    font-size:76px; font-weight:800; color:#35544a;
+    transform:rotate(-4deg);
+  }
+  .fc2 .leaf { position:absolute; border-radius:0 60% 0 60%; opacity:.85; }
+  .fc2 .felt { position:absolute; border-radius:50%; box-shadow:inset 0 0 60px rgba(0,0,0,.35); }
+  .fc2 .bubble { background:#F5F1E6; border-radius:18px; padding:18px 22px; position:relative; box-shadow:0 10px 24px rgba(0,0,0,.25); }
+  .fc2 .bubble::after { content:""; position:absolute; left:26px; bottom:-10px; border:12px solid transparent; border-top-color:#F5F1E6; }
+  .fc2 .bubble .dots { display:flex; gap:8px; }
+  .fc2 .bubble .dots i { width:12px; height:12px; border-radius:50%; }
+  .fc2 .txt { padding:20px 26px 26px; position:relative; }
+  .fc2 .txt .t { font-size:32px; font-weight:800; letter-spacing:3px; padding-right:96px; }
+  .fc2 .txt .s { font-size:var(--fs-mini); color:#8A8272; margin-top:7px; letter-spacing:1px; padding-right:96px; }
+  .fc2 .arrow {
+    position:absolute; right:16px; top:50%; transform:translateY(-50%); width:54px; height:54px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; color:#fff; font-size:26px;
+    box-shadow:0 5px 12px rgba(0,0,0,.28);
+  }
+  .fc2.f-create .art { background:linear-gradient(180deg,#4A7A62 0%, #2E5044 100%); }
+  .fc2.f-create .t { color:#2E5044; }
+  .fc2.f-create .arrow { background:#3F6B5A; }
+  .fc2.f-join .art { background:linear-gradient(180deg,#C96A50 0%, #A8523F 100%); }
+  .fc2.f-join .t { color:#A8523F; }
+  .fc2.f-join .arrow { background:#C96A50; }
+  .fc2.f-group .art { background:linear-gradient(180deg,#5B7A8C 0%, #46606F 100%); }
+  .fc2.f-group .t { color:#46606F; }
+  .fc2.f-group .arrow { background:#5B7A8C; }
+
+  /* 底部导航条（半透明深绿，贴参考图） */
+  .bottom-bar {
+    position:absolute; left:0; right:0; bottom:0; height:128px; padding-bottom:30px;
+    background:linear-gradient(180deg, rgba(24,34,30,.88), rgba(14,22,18,.95));
+    display:flex; align-items:center; justify-content:center; gap:120px;
+  }
+  .bottom-bar .bi { display:flex; flex-direction:column; align-items:center; gap:4px; color:#E9E2D2; font-size:var(--fs-mini); cursor:pointer; }
+  .bottom-bar .bi .e { font-size:30px; }
+  .bottom-bar .bi:hover { color:#fff; }
+  .wm { position:absolute; right:34px; bottom:34px; color:rgba(233,226,210,.5); font-size:var(--fs-mini); letter-spacing:3px; }
+
+  /* 品牌 Logo（大厅顶部中央，UI 层文字版） */
+  .brand-lobby { position:absolute; left:50%; top:36px; transform:translateX(-50%); text-align:center; }
+  .brand-lobby .b1 {
+    font-size:64px; font-weight:800; letter-spacing:10px; color:#3A3428;
+    font-family:"STKaiti","KaiTi","PingFang SC",serif;
+    text-shadow:0 2px 0 rgba(255,255,255,.5), 0 8px 20px rgba(60,40,20,.25);
+    display:inline-flex; align-items:flex-start; gap:10px;
+  }
+  .brand-lobby .seal {
+    width:44px; height:44px; border-radius:8px; background:var(--vermilion);
+    color:#F7F1E3; font-size:20px; line-height:1.15; display:flex; align-items:center; justify-content:center;
+    writing-mode:vertical-rl; font-weight:700; margin-top:6px; box-shadow:0 4px 10px rgba(0,0,0,.25);
+  }
+  .brand-lobby .b2 {
+    display:flex; align-items:center; gap:16px; margin-top:10px; justify-content:center;
+    color:#7A6C4E; font-size:var(--fs-sub); letter-spacing:5px;
+  }
+  .brand-lobby .b2 i { display:block; width:150px; height:1px; background:rgba(138,109,73,.55); }
+
+  /* 二级页（创建房间） */
+  .lk-dim-warm { position:absolute; inset:0; background:linear-gradient(180deg, rgba(58,44,26,.44), rgba(44,34,18,.52)); }
+</style></head>
+<body class="screen" data-screen="09-settings">
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>09-settings · 麻雀精灵</title>
+<link rel="stylesheet" href="../tokens.css"><style>
+  .paper-veil { position:absolute; inset:0; background:linear-gradient(155deg, rgba(247,241,227,.50) 0%, rgba(240,232,214,.34) 50%, rgba(240,232,214,.25) 100%); backdrop-filter:blur(5.5px); }
+  .lk-heading { display:flex; align-items:center; gap:22px; padding:var(--safe) 60px 0; }
+  .lk-heading .panel-title { color:var(--ink); }
+  .lk-heading .right-actions { margin-left:auto; display:flex; gap:14px; }
+  .lk-btn-jade { display:inline-flex; align-items:center; justify-content:center; height:84px; border:none; cursor:pointer; border-radius:var(--radius-md); background:linear-gradient(180deg,#4A7A62,#3F6B5A 60%,#34594B); color:#F2EBDD; font-size:var(--fs-btn-lg); font-weight:800; letter-spacing:5px; box-shadow:0 6px 0 rgba(34,58,48,.6), 0 14px 28px rgba(60,40,20,.3); }
+  .lk-btn-jade.is-disabled { background:var(--disabled-bg); color:var(--disabled-tx); box-shadow:none; pointer-events:none; }
+  .keypad .btn { background:rgba(247,241,227,.9); color:var(--ink); border:1px solid rgba(138,109,73,.35); }
+</style></head>
+<body class="screen" data-screen="09-settings">
+
+  <img class="bg-cover" src="../assets/bg-lobby.png">
+  <div class="scrim paper-veil"></div>
+  
+  <div class="lk-heading"><div class="btn btn-ghost" style="font-size:26px; color:var(--ink);">‹ 返回大厅</div><div class="panel-title">设 置</div></div>
+  <div style="padding:10px 120px 0;">
+    <div style="background:rgba(247,241,227,.9); border-radius:var(--radius-lg); padding:8px 30px; box-shadow:0 16px 36px rgba(60,40,20,.22);">
+      
+  <div class="row" style="justify-content:space-between; padding:26px 20px;">
+    <div style="display:flex; align-items:center; gap:18px; width:300px;">
+      <span style="font-size:34px;">🎵</span><span style="font-size:var(--fs-body); color:var(--ink);">音乐 Music</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:26px; flex:1; justify-content:flex-end;">
+      <div class="volume"></div><span class="num" style="font-size:var(--fs-sub); color:var(--ink);">62</span>
+      <div class="btn btn-secondary btn-sm" style="height:52px; padding:0 18px; background:rgba(247,241,227,.92); color:var(--ink); border-color:rgba(138,109,73,.35);">静音</div>
+      <div class="switch on"></div>
+    </div>
+  </div>
+      
+  <div class="row" style="justify-content:space-between; padding:26px 20px;">
+    <div style="display:flex; align-items:center; gap:18px; width:300px;">
+      <span style="font-size:34px;">🔔</span><span style="font-size:var(--fs-body); color:var(--ink);">音效 SFX</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:26px; flex:1; justify-content:flex-end;">
+      <div class="volume"></div><span class="num" style="font-size:var(--fs-sub); color:var(--ink);">62</span>
+      <div class="btn btn-secondary btn-sm" style="height:52px; padding:0 18px; background:rgba(247,241,227,.92); color:var(--ink); border-color:rgba(138,109,73,.35);">静音</div>
+      <div class="switch on"></div>
+    </div>
+  </div>
+      
+  <div class="row" style="justify-content:space-between; padding:26px 20px;">
+    <div style="display:flex; align-items:center; gap:18px; width:300px;">
+      <span style="font-size:34px;">🎙️</span><span style="font-size:var(--fs-body); color:var(--ink);">语音 Voice</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:26px; flex:1; justify-content:flex-end;">
+      
+      <div class="btn btn-secondary btn-sm" style="height:52px; padding:0 18px; background:rgba(247,241,227,.92); color:var(--ink); border-color:rgba(138,109,73,.35);">静音</div>
+      <div class="switch "></div>
+    </div>
+  </div>
+    </div>
+    <div style="color:var(--ink-2); font-size:var(--fs-mini); margin:16px 6px 0;">
+      三个独立音频通道（Music / SFX / Voice），实现阶段绑定 AudioManager；当前无本地存储，设计占位。
+    </div>
+    <div style="display:flex; gap:24px; margin-top:34px; align-items:center;">
+      <button class="btn btn-danger btn-sm" style="width:300px;">退出登录</button>
+      <span style="color:var(--ink-2); font-size:var(--fs-mini);">版本信息 · 设计稿 v1.0</span>
+    </div>
+  </div>
+<script>
+  if (new URLSearchParams(location.search).get("ext") === "1") {
+    for (const el of document.querySelectorAll(".js-nick")) el.textContent = "超级超级超级长的玩家昵称测试";
+    for (const el of document.querySelectorAll(".js-gname")) el.textContent = "超级超级超级长的群聊名称测试";
+    for (const el of document.querySelectorAll(".js-uid")) el.textContent = "1800000001";
+    for (const el of document.querySelectorAll(".js-points")) el.textContent = "9999";
+    for (const el of document.querySelectorAll(".js-roomno")) el.textContent = "999999";
+    for (const el of document.querySelectorAll(".js-delta")) el.textContent = "+9999";
+  }
+</script>
+</body></html>
+<script>
+  if (new URLSearchParams(location.search).get("ext") === "1") {
+    for (const el of document.querySelectorAll(".js-nick")) el.textContent = "超级超级超级长的玩家昵称测试";
+    for (const el of document.querySelectorAll(".js-uid")) el.textContent = "1800000001";
+    for (const el of document.querySelectorAll(".js-points")) el.textContent = "99999";
+    for (const el of document.querySelectorAll(".js-roomno")) el.textContent = "999999";
+  }
+</script>
+</body></html>
