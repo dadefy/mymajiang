@@ -451,6 +451,8 @@ export class RoomPage {
     this.playerList = scrollList(this.view, 0, 0, 1, 1);
     this.playerList.parent.visible = false;
     this.waitingTable = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+    // 背景铺满画布，但必须留在顶栏、复制、规则/设置/退出按钮下面。
+    this.waitingTable.zOrder = -1;
     this.waitingControls = box(this.view, 0, 900, TABLE_WIDTH, 130);
     textButton(this.waitingControls, "分享名片", 500, 12, 260, 80, THEME.accentDark, () => shareDialog(this.view, this.flow), 24);
     this.readyButton = textButton(this.waitingControls, "准备", 830, 12, 260, 80, TABLE_THEME.jade, () => {
