@@ -605,9 +605,12 @@ function buildRealtimeServer(
     const timers = new Map<number, ReturnType<typeof setTimeout>>();
     const game = active.game;
     // 同一局的并行选择阶段共用固定截止时间，某一家提交不延长其他家的时间。
+    // claiming 也算：它同样是"全员并行提交、到点统一 auto-pass"的阶段 ——
+    // 不固定的话，任何一次广播（别人 auth 重连 / presence 暂离往返 / 断线广播）
+    // 都会把 deadline 从 now + 8s 重新生成一遍，反复广播能把 claiming 无限拉长。
     const preserveDeadline = active.deadlineGame === game
       && active.deadlinePhase === game.phase
-      && (game.phase === "swapping" || game.phase === "missing")
+      && (game.phase === "swapping" || game.phase === "missing" || game.phase === "claiming")
       && active.actionDeadlineAt !== undefined;
     if (!preserveDeadline) {
       active.actionDeadlineAt = Date.now() + (game.phase === "claiming" ? claimTimeoutMs : playTimeoutMs);

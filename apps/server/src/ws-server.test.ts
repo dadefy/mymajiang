@@ -1438,6 +1438,61 @@ describe("退出托管与重新接管", () => {
     back.close();
   });
 
+  it("claiming 窗口 deadline 固定：断线广播 / presence 往返不再顺延 8 秒", async () => {
+    // claiming 是"全员并行提交、到点统一 auto-pass"的阶段，窗口创建时定一次死线。
+    // 修复前 deadline 只在 swapping/missing 固定 —— claiming 里每一次广播都把
+    // actionDeadlineAt 从 now 重新生成 8s：别人断线广播、auth 重连、presence 暂离往返，
+    // 都能把 claiming 无限拉长（任何一座都能这样把整场牌局 stall 住）。
+    const { app, dependencies, tokens } = fixture();
+    const port = (nextPort += 1);
+    const userIds = ["甲", "乙", "丙", "丁"].map((name) => createBetaUser(dependencies, name));
+    const room = makeRoom(dependencies, userIds);
+    room.start(userIds[0]!);
+    const { state } = claimingStoredRound(userIds);
+    dependencies.gameStateStore = staleStoreOf(state, 1);
+    const wss = await createWebSocketServer(dependencies, port, {
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+    wssInstances.push(wss);
+
+    const clients: TestClient[] = [];
+    for (const index of [0, 1, 2, 3]) {
+      const client = new TestClient();
+      await client.connect(port);
+      client.send({ type: "auth", token: await tokens.issueUserToken(userIds[index]!), roomId: room.roomId });
+      await readUntil(client, (message) => message.type === "game" && message.state.phase === "claiming");
+      clients.push(client);
+    }
+    // 读当前窗口的截止时刻：随便触发一次广播，帧里就带着权威的 actionDeadlineAt
+    const probe = await app.inject({
+      method: "POST",
+      url: `/v1/rooms/${room.roomId}/seat/presence`,
+      headers: { "x-auth-token": await tokens.issueUserToken(userIds[0]!) },
+      payload: { away: true },
+    });
+    expect(probe.statusCode).toBe(200);
+    const baseline = await readUntil(clients[1]!, (message) => message.type === "game", 5_000);
+    const deadline = baseline.state.actionDeadlineAt;
+    expect(deadline).toBeTypeOf("number");
+
+    // 再来两次广播（presence 往返，期间没有人为出牌/过牌）：
+    // 修复前每次都是 now + 8s，deadline 会一路往后跳。
+    // 注意 away 必须真的发生状态变化（false→false 幂等不发事件、不广播）。
+    for (const away of [true, false]) {
+      await app.inject({
+        method: "POST",
+        url: `/v1/rooms/${room.roomId}/seat/presence`,
+        headers: { "x-auth-token": await tokens.issueUserToken(userIds[2]!) },
+        payload: { away },
+      });
+      const frame = await readUntil(clients[1]!, (message) => message.type === "game", 5_000);
+      expect(frame.state.actionDeadlineAt).toBe(deadline);
+      expect(frame.state.phase).toBe("claiming");
+    }
+    await app.close();
+  });
+
   it("当前出牌人失联超期后重新 auth：其他三家立即看到 trustee，托管自动出牌继续推进", async () => {
     const { clients, room, userIds, tokens, states } = await playingMatch({
       playTimeoutMs: 60_000,
