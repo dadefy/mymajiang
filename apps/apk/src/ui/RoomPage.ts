@@ -97,6 +97,14 @@ const CLOCK_FONT = 58;
 const CLOCK_FONT_FINAL = 66;
 const clockLine = (font: number): number => Math.ceil(font * 1.3);
 
+/**
+ * 顶栏通知带：左边让开「房号 …」（约 462 收口），右边让开「退出 / 菜单」（1788 起）。
+ *
+ * 通知只能待在顶栏这一行 —— 往下一点到 `Y.topbar + 52` 就压住对家的座位信息（`Y.topInfo`）。
+ */
+const NOTICE_X = 480;
+const NOTICE_W = 1280;
+
 /** 碰/杠/胡 的瞬时提示位置（贴着**动作发起方**的手牌一侧，不压牌河/副露/桌芯）。 */
 const SHOUT_ANCHOR: Record<TableSide, { x: number; y: number }> = {
   bottom: { x: 700, y: 806 },
@@ -250,8 +258,8 @@ export class RoomPage {
       THEME.panelBg2, () => this.openTableMenu(), 22);
     this.menuButton.visible = false;
 
-    this.noticeLabel = label(this.view, "", 24, { width: TABLE_WIDTH - SAFE * 2, align: "center", color: THEME.warn, wordWrap: true });
-    this.noticeLabel.pos(SAFE, Y.topbar + 52);
+    this.noticeLabel = label(this.view, "", 24, { width: NOTICE_W, align: "center", color: THEME.warn, wordWrap: true });
+    this.noticeLabel.pos(NOTICE_X, Y.topbar + 6);
     this.noticeLabel.visible = false;
 
     /* ---------- 等人期间 ---------- */
@@ -267,6 +275,10 @@ export class RoomPage {
 
     /* ---------- 牌桌本体 ---------- */
     this.matchArea = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+    // 桌布是一整块不透明的 1920×1080，而顶栏（房号/通知/退出·菜单）和等人层都比它先建。
+    // 不压 zOrder 的话它会把那些节点**画在下面**，Laya 的命中判定走同一套排序，
+    // 于是「菜单」也点不动 —— 牌局中返回大厅 / 退出托管全断。
+    this.matchArea.zOrder = -1;
     this.paintFelt(this.matchArea);
 
     /* ---------- 一小场那屏：压在桌芯上的一小块 ---------- */
@@ -296,7 +308,8 @@ export class RoomPage {
     this.resultTime.visible = false;
     this.resultBody = box(this.resultOverlay, 0, 122, 1080, 400);
     this.resultNotice = label(this.resultOverlay, "", 25, { width: 1080, align: "center", color: THEME.warn });
-    this.resultNotice.pos(0, 534);
+    // 说明只能放在名单与按钮行之间那一条（名单最后一行收到 478，按钮行从 528 起）。
+    this.resultNotice.pos(0, 486);
     this.resultNotice.height = 34;
     this.resultNotice.valign = "middle";
     this.resultNotice.visible = false;
@@ -400,8 +413,8 @@ export class RoomPage {
       overlay.destroy(true);
       this.confirmQuitGame();
     }, 40);
-    label(overlay, "返回大厅：暂时离开牌桌，你仍属于这一局，随时可以回来接着打。", 25, { width: 700, color: THEME.textDim, wordWrap: true }).pos(610, 650);
-    label(overlay, "退出游戏：由服务器接管你的座位并自动代打，牌、座次与积分都保留。", 25, { width: 700, color: THEME.textDim, wordWrap: true }).pos(610, 710);
+    label(overlay, "返回大厅：暂时离开牌桌，你仍属于这一局，随时可以回来接着打。", 25, { width: 900, color: THEME.textDim, wordWrap: true }).pos(510, 650);
+    label(overlay, "退出游戏：由服务器接管你的座位并自动代打，牌、座次与积分都保留。", 25, { width: 900, color: THEME.textDim, wordWrap: true }).pos(510, 716);
   }
 
   /**
@@ -993,7 +1006,7 @@ export class RoomPage {
     const time = matchTimeText(settled.startedAt, settled.finishedAt);
     this.resultTime.text = dissolved
       ? `已完成 ${settled.completedRounds}/${this.lastResult?.totalRounds ?? TOTAL_ROUNDS_FALLBACK} 局 · 当前未完成小局已作废`
-      : `打满 ${settled.completedRounds} 小场${time === null ? "" : ` · 耗时 ${time}`}`;
+      : `打满 ${settled.completedRounds} 小场${time === null ? "" : ` · ${time}`}`;
     this.resultTime.visible = true;
     this.resultBody.removeChildren();
 
@@ -1037,8 +1050,10 @@ export class RoomPage {
     });
 
     const done = `${settled.completedRounds}/${this.lastResult?.totalRounds ?? TOTAL_ROUNDS_FALLBACK}`;
-    const foot = label(this.resultOverlay, `已完成 ${done} 局`, 25, { width: 400, color: THEME.textDim });
-    foot.pos(44, 560);
+    // 局数放在按钮行中间那段空白里（「返回大厅」收到 244，「再来一局」从 700 起）：
+    // 面板只有 620 高，按钮行以下没有第四条可站。
+    const foot = label(this.resultOverlay, `已完成 ${done} 局`, 25, { width: 424, align: "center", color: THEME.textDim });
+    foot.pos(260, 546);
     foot.height = 34;
     foot.valign = "middle";
     this.resultOverlay.visible = true;
