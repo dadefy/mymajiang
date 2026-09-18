@@ -45,8 +45,13 @@ export interface PresentationDirectorOptions {
  */
 const FALLBACK_TURN_SECONDS = 20;
 
-/** 倒计时提醒的分档：到点各响一次，同一秒不重复。 */
-const WARNING_SECONDS = [5, 4, 3, 2, 1] as const;
+/**
+ * 倒计时提醒的两个触发点：进最后 5 秒催一声，进最后 1 秒再收一声。
+ *
+ * 中间每一秒不再各响一次 —— 那是四下连击，读起来像警报而不是催促。
+ */
+const WARN_AT_SECONDS = 5;
+const FINAL_AT_SECONDS = 1;
 
 /**
  * 仅靠**状态差分**推不出来的事件，写清楚而不是硬凑。
@@ -345,20 +350,17 @@ export class PresentationDirector {
     const seconds = deadlineSeconds(frame.deadlineAt, this.now());
     if (seconds === null) return;
     this.options.animations.setCountdown(seconds, this.turnTotalSeconds);
-    if (seconds > WARNING_SECONDS[0]) return;
-    for (const mark of WARNING_SECONDS) {
-      if (seconds > mark) continue;
-      /**
-       * 250ms 一跳会连着撞上同一秒，去重交给 `AudioManager` 的已播表：
-       * 截止时间每一轮都是新值，所以「这一轮的 3 秒」天然只有一条记录。
-       */
-      this.options.audio.playConfirmed({
-        eventId: `${this.roomId ?? "room"}:${frame.deadlineAt}:warn-${mark}`,
-        source: "server",
-        cue: mark === 1 ? "countdown-1" : "countdown-3",
-      });
-      return;
-    }
+    if (seconds > WARN_AT_SECONDS) return;
+    /**
+     * 250ms 一跳会连着撞上同一档，去重交给 `AudioManager` 的已播表：
+     * 截止时间每一轮都是新值，所以「这一轮的最后 5 秒」天然只有一条记录。
+     */
+    const mark = seconds <= FINAL_AT_SECONDS ? FINAL_AT_SECONDS : WARN_AT_SECONDS;
+    this.options.audio.playConfirmed({
+      eventId: `${this.roomId ?? "room"}:${frame.deadlineAt}:warn-${mark}`,
+      source: "server",
+      cue: mark === FINAL_AT_SECONDS ? "countdown-1" : "countdown-3",
+    });
   }
 
   private syncSustainedTimer(): void {

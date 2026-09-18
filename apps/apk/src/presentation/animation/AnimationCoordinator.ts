@@ -64,6 +64,7 @@ const PLAYED_CAP = 600;
  */
 export class AnimationCoordinator {
   private enabled = true;
+  private disposed = false;
   private latestRevision = -1;
   private readonly played = new Set<string>();
   /** 在途事件：eventId → cue，用于按事件名精确打断。 */
@@ -97,7 +98,7 @@ export class AnimationCoordinator {
    * 保证「动画播完的画面」与「服务端认定的牌桌」是同一副牌。
    */
   async playConfirmed(event: ConfirmedAnimation): Promise<boolean> {
-    if (event.source !== "server") return false;
+    if (this.disposed || event.source !== "server") return false;
     if (event.snapshotRevision < this.latestRevision) return false;
     if (this.played.has(event.eventId)) return false;
     this.remember(event.eventId);
@@ -114,7 +115,7 @@ export class AnimationCoordinator {
   }
 
   private async run(eventId: string, cue: AnimationCue, payload: AnimationPayload | undefined, revision: number, source: AnimationSource): Promise<boolean> {
-    if (!this.enabled) return false;
+    if (this.disposed || !this.enabled) return false;
     this.running.set(eventId, cue);
     try {
       await this.driver.play({ eventId, source, snapshotRevision: revision, cue, payload });
@@ -128,11 +129,13 @@ export class AnimationCoordinator {
    * 持续态：当前出牌者的呼吸环。关掉动画时一律收掉，驱动没实现就当无事发生。
    */
   setActivePlayer(side: SeatSide | null): void {
+    if (this.disposed) return;
     this.driver.setActivePlayer?.(this.enabled ? side : null);
   }
 
   /** 持续态：倒计时环（同上）。 */
   setCountdown(seconds: number | null, totalSeconds: number | null): void {
+    if (this.disposed) return;
     if (!this.enabled) this.driver.setCountdown?.(null, null);
     else this.driver.setCountdown?.(seconds, totalSeconds);
   }
@@ -142,6 +145,7 @@ export class AnimationCoordinator {
 
   /** 页面销毁：收动画，并放开播记录（下一次进房是另一副牌桌）。 */
   dispose(): void {
+    this.disposed = true;
     this.cancelEverything();
     this.played.clear();
     this.driver.dispose?.();

@@ -183,6 +183,8 @@ export class AudioManager {
   private bgmPath: string | null = null;
   /** 当前**该放**哪一档场景音乐；与 `bgmPath` 分开，因为素材可能仍未就位。 */
   private bgmTrack: BgmTrack | null = null;
+  /** 销毁后一律不再起声：延迟回来的帧不该在没人看的牌桌上响。 */
+  private disposed = false;
 
   constructor(
     private readonly driver: AudioDriver,
@@ -228,7 +230,16 @@ export class AudioManager {
   unmute(): void {
     if (!this.settings.masterMuted) return;
     this.settings = { ...this.settings, masterMuted: false };
-    if (this.bgmTrack !== null) this.playSceneBgm(this.bgmTrack);
+    if (this.bgmTrack !== null) {
+      this.playSceneBgm(this.bgmTrack);
+      return;
+    }
+    const path = this.bgmPath;
+    if (path === null) return;
+    // 先清空再走 `switchBgm`：静音那一刻已经 `stopCategory("bgm")` 收掉了，
+    // 路径却没变，「同一首不重放」那道判断会把恢复挡掉。
+    this.bgmPath = null;
+    this.switchBgm(path);
   }
 
   /**
@@ -249,6 +260,7 @@ export class AudioManager {
 
   /** 换 BGM 前先收掉旧的，避免两个场景的音乐叠着放。同一首不重放。 */
   switchBgm(path: string): void {
+    if (this.disposed) return;
     if (this.bgmPath === path && this.audible("bgm")) return;
     this.bgmPath = path;
     this.driver.stopCategory("bgm");
@@ -277,6 +289,7 @@ export class AudioManager {
    * 语音不是预置素材：仓库里没有、也不该有一条「示例语音」当正式资源。
    */
   playVoice(path: string): boolean {
+    if (this.disposed) return false;
     if (!path || !this.audible("voice")) return false;
     if (!this.allow("voice")) return false;
     this.driver.play(path, { loop: false, volume: this.settings.voiceVolume, category: "voice" });
@@ -294,6 +307,8 @@ export class AudioManager {
 
   /** 离开牌桌 / 页面销毁：收干净，别留一条没停的 BGM。 */
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.bgmPath = null;
     this.bgmTrack = null;
     this.driver.stopCategory("bgm");
@@ -334,6 +349,7 @@ export class AudioManager {
   }
 
   private playLayer(gateKey: string, resource: AudioResource): boolean {
+    if (this.disposed) return false;
     if (resource.ready === false) return false;
     if (!this.audible(resource.category)) return false;
     if (!this.allow(gateKey)) return false;
