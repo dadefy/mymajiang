@@ -301,6 +301,7 @@ export class RoomPage {
    */
   private readonly backHomeButton: Laya.Box;
   private readonly startButton: Laya.Box;
+  private readonly readyButton: Laya.Box;
   private readonly matchArea: Laya.Box;
   private readonly resultOverlay: Laya.Sprite;
   private readonly resultTitle: Laya.Label;
@@ -449,11 +450,15 @@ export class RoomPage {
     this.playerHeading.visible = false;
     this.playerList = scrollList(this.view, 0, 0, 1, 1);
     this.playerList.parent.visible = false;
-    this.waitingTable = box(this.view, 360, 130, 1200, 750, THEME.felt);
-    this.waitingControls = box(this.view, 0, 920, TABLE_WIDTH, 110);
-    textButton(this.waitingControls, "分享名片", 570, 0, 260, 80, THEME.accentDark, () => shareDialog(this.view, this.flow), 24);
+    this.waitingTable = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+    this.waitingControls = box(this.view, 0, 900, TABLE_WIDTH, 130);
+    textButton(this.waitingControls, "分享名片", 500, 12, 260, 80, THEME.accentDark, () => shareDialog(this.view, this.flow), 24);
+    this.readyButton = textButton(this.waitingControls, "准备", 830, 12, 260, 80, TABLE_THEME.jade, () => {
+      const me = this.snapshot?.players.find((player) => player.userId === this.getMe()?.userId);
+      if (me) void this.flow.setReady(!me.ready);
+    }, 24);
     this.backHomeButton = textButton(this.view, "返回大厅", SAFE, 980, 230, 70, THEME.panelBg2, () => { void this.flow.backHome(); }, 22);
-    this.startButton = textButton(this.waitingControls, "开始对局", 1090, 0, 260, 80, THEME.accentDark, () => void this.flow.startMatch(), 24);
+    this.startButton = textButton(this.waitingControls, "开始对局", 1160, 12, 260, 80, THEME.accentDark, () => void this.flow.startMatch(), 24);
 
     /* ---------- 牌桌本体 ---------- */
     this.matchArea = box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
@@ -882,25 +887,34 @@ export class RoomPage {
 
   private renderPlayers(): void {
     this.waitingTable.removeChildren();
+    const backdrop = new Laya.Image("resources/bg/bg-room.png");
+    backdrop.pos(0, 0); backdrop.size(TABLE_WIDTH, TABLE_HEIGHT); this.waitingTable.addChild(backdrop);
+    box(this.waitingTable, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#F4EEDC22").mouseEnabled = false;
+    const table = roundRect(this.waitingTable, 430, 145, 1060, 700, 80, "#1E6657DD", TABLE_THEME.goldSoft, 4);
     const players = this.snapshot?.players ?? [];
     const me = Math.max(0, players.findIndex((player) => player.userId === this.getMe()?.userId));
-    const positions = [[505, 565], [940, 295], [505, 25], [70, 295]];
+    const positions = [[435, 520], [835, 270], [435, 20], [35, 270]];
     for (let index = 0; index < 4; index++) {
       const player = players[(me + index) % 4];
       const [x, y] = positions[index]!;
-      const seat = box(this.waitingTable, x!, y!, 190, 160);
+      const seat = box(table, x!, y!, 190, 160, "#183A34CC");
       socialAvatar(seat, player?.nickname ?? "＋", player?.avatarUrl, 59, 0, 72);
       label(seat, player?.nickname ?? "等待入座", 25, { width: 190, align: "center" }).pos(0, 83);
       if (player) {
         label(seat, `ID ${player.userId}`, 20, { width: 190, align: "center", color: THEME.textDim }).pos(0, 114);
-        if (player.userId === this.snapshot?.ownerId) label(seat, "房主", 20, { width: 190, align: "center", color: THEME.accent }).pos(0, 141);
+        const role = player.userId === this.snapshot?.ownerId ? "房主" : player.ready ? "已准备" : "未准备";
+        label(seat, role, 20, { width: 190, align: "center", color: player.ready ? TABLE_THEME.jadeLight : THEME.accent }).pos(0, 141);
       }
     }
-    label(this.waitingTable, `房号 ${this.roomNo}\n${players.length}/4 人`, 40, { width: 340, align: "center", wordWrap: true, color: THEME.text }).pos(430, 320);
+    label(table, `房号 ${this.roomNo}\n${players.length}/4 人`, 40, { width: 340, align: "center", wordWrap: true, color: THEME.text }).pos(360, 300);
+    label(table, `规则 ${this.snapshot?.ruleVersion ?? "读取中"} · 共 8 小局`, 23, { width: 600, align: "center", color: TABLE_THEME.goldSoft }).pos(230, 410);
   }
 
   private renderWaitingControls(): void {
     this.startButton.visible = this.snapshot?.ownerId === this.getMe()?.userId;
+    const me = this.snapshot?.players.find((player) => player.userId === this.getMe()?.userId);
+    this.readyButton.visible = me !== undefined;
+    setButtonText(this.readyButton, me?.ready ? "取消准备" : "准备");
     const full = this.snapshot?.players.length === 4;
     this.startButton.mouseEnabled = full;
     this.startButton.alpha = full ? 1 : 0.45;
