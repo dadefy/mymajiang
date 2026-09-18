@@ -1252,5 +1252,217 @@ describe("退出托管与重新接管", () => {
     expect(room.status).toBe("dissolved");
     expect(room.completedRounds).toBe(0);
   });
+
+  /**
+   * 本地真跑一局，弃牌直到出现「**唯一** claimant 的 claiming 局面」，返回存档与 claimant 座位。
+   * 多个 candidate 时全部代为 pass 继续找 —— 保证注入服务器的局面里只有一个人能响应，
+   * 他失联转托管后 claiming 是否推进就完全取决于是否重挂了 autoAct timer。
+   */
+  function claimingStoredRound(
+    userIds: readonly string[],
+  ): { state: ReturnType<MahjongGame["serialize"]>; claimantSeat: number } {
+    for (const seed of [4242, 77, 2026, 314159, 987654]) {
+      const table = new MahjongGame(seed, [userIds[0]!, userIds[1]!, userIds[2]!, userIds[3]!]);
+      for (const id of userIds) table.autoSwap(id);
+      for (const id of userIds) table.autoMissing(id);
+      for (let guard = 0; guard < 60 && table.phase === "playing"; guard += 1) {
+        const player = table.players[table.currentPlayerSeat]!;
+        // 定缺规则：手里还有缺门牌时必须先打缺门，否则引擎拒收 —— 逐张试出第一张合法牌。
+        for (const tile of [...player.hand]) {
+          try {
+            table.discard(player.id, tile);
+            break;
+          } catch {
+            // 缺门限制，换下一张
+          }
+        }
+        if (table.phase !== "claiming") continue;
+        // 真 candidate 的标志是能碰/能胡 —— claiming 里人人都有 ["pass"]，不能拿 actions 判候选
+        const candidates = table.players.filter((p) => {
+          if (p.seat === player.seat || p.won) return false;
+          const actions = table.allowedActions(p.id);
+          return actions.includes("peng") || actions.includes("hu");
+        });
+        if (candidates.length === 1) {
+          return { state: table.serialize(), claimantSeat: candidates[0]!.seat };
+        }
+        for (const candidate of candidates) {
+          // 最后一个 pass 会当场 resolveClaims 并前进 phase，之后的 claim 会抛错 —— 逐个检查
+          if (table.phase !== "claiming") break;
+          table.claim(candidate.id, "pass");
+        }
+      }
+    }
+    throw new Error("fixed seeds produced no single-claimant claiming scenario");
+  }
+
+  /** 把一局快照伪装成「进程重启前落盘的存档」，首个 auth 的玩家会接上它。 */
+  function staleStoreOf(state: ReturnType<MahjongGame["serialize"]>, roundNumber: number): GameStateStore {
+    return {
+      save() {},
+      clear() {},
+      async load() {
+        return { roundNumber, state };
+      },
+    };
+  }
+
+  it("claiming 唯一 claimant 失联超期后重新 auth：转 trustee 并自动 pass，claiming 必须结束", async () => {
+    // 这是 Laya 四客户端联调卡死的确定性复现：claimant 失联且保护期已过、
+    // 服务器没有定时器盯着（等价重启后恢复）—— 他 auth 回来时被就地转托管，
+    // 旧的 claiming timer 已死。修复前：无人重排 → 四家 actions 全空、claiming 永久卡死。
+    const { dependencies, tokens } = fixture();
+    const port = (nextPort += 1);
+    const userIds = ["甲", "乙", "丙", "丁"].map((name) => createBetaUser(dependencies, name));
+    const room = makeRoom(dependencies, userIds);
+    room.start(userIds[0]!);
+    const { state, claimantSeat } = claimingStoredRound(userIds);
+    dependencies.gameStateStore = staleStoreOf(state, 1);
+    const wss = await createWebSocketServer(dependencies, port, {
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+    wssInstances.push(wss);
+
+    // 其他三家先上线：接手存档（此时 claimant 保护期未过期，不会被提前转托管）
+    const others = [0, 1, 2, 3].filter((index) => index !== claimantSeat);
+    const clients: TestClient[] = new Array(4);
+    for (const index of others) {
+      const client = new TestClient();
+      await client.connect(port);
+      client.send({ type: "auth", token: await tokens.issueUserToken(userIds[index]!), roomId: room.roomId });
+      await readUntil(client, (message) => message.type === "game" && message.state.phase === "claiming");
+      clients[index] = client;
+    }
+
+    const claimant = room.players.get(userIds[claimantSeat]!)!;
+    claimant.connected = false;
+    claimant.reconnectDeadline = new Date(Date.now() - 1000);
+
+    // claimant 重新 auth：就地转 trustee（进来 ≠ 接管），修复点保证全场广播 + 重挂 0ms autoAct
+    const back = new TestClient();
+    await back.connect(port);
+    back.send({ type: "auth", token: await tokens.issueUserToken(userIds[claimantSeat]!), roomId: room.roomId });
+    await readUntil(back, (message) => message.type === "game" && message.state.control === "trustee");
+
+    // 关键断言：claiming 被自动 pass 推进（3 秒内回到 playing），不永久卡死
+    await readUntil(
+      clients[others[0]!]!,
+      (message) => message.type === "game" && message.state.phase === "playing",
+      3000,
+    );
+    expect(claimant.control).toBe("trustee");
+    // 掉线转托管 ≠ 主动退出，也不能自动恢复 human
+    expect(claimant.renounced).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(claimant.control).toBe("trustee");
+    back.close();
+  });
+
+  it("当前出牌人失联超期后重新 auth：其他三家立即看到 trustee，托管自动出牌继续推进", async () => {
+    const { clients, room, userIds, tokens, states } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+    const actor = states[0]!.currentPlayerSeat as number;
+    // 「失联且保护期已过、无定时器盯着」（等价重启后恢复的确定性形态）
+    const player = room.players.get(userIds[actor]!)!;
+    player.connected = false;
+    player.reconnectDeadline = new Date(Date.now() - 1000);
+
+    clients[actor]!.send({ type: "auth", token: await tokens.issueUserToken(userIds[actor]!), roomId: room.roomId });
+    // 回来的人：进来 ≠ 接管，看到的是「托管中」
+    await readUntil(clients[actor]!, (message) => message.type === "game" && message.state.control === "trustee");
+    // 修复点：转托管必须全场广播 —— 三家立即看到这一座变成 trustee
+    for (const index of [0, 1, 2, 3].filter((index) => index !== actor)) {
+      await readUntil(
+        clients[index]!,
+        (message) => message.type === "game"
+          && message.state.players.some((p: any) => p.seat === actor && p.presence === "trustee"),
+        3000,
+      );
+    }
+    // 托管 0ms autoAct 立即出牌，牌局继续推进
+    await readUntil(
+      clients[0]!,
+      (message) => message.type === "game" && message.state.players[actor].discards.length > 0,
+      3000,
+    );
+    expect(player.control).toBe("trustee");
+  });
+
+  it("同一座位反复 auth：不重复 autoAct、不重复触发全场广播", async () => {
+    const { clients, room, userIds, tokens, states } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+    const actor = states[0]!.currentPlayerSeat as number;
+    const player = room.players.get(userIds[actor]!)!;
+    player.connected = false;
+    player.reconnectDeadline = new Date(Date.now() - 1000);
+
+    clients[actor]!.send({ type: "auth", token: await tokens.issueUserToken(userIds[actor]!), roomId: room.roomId });
+    await readUntil(clients[actor]!, (message) => message.type === "game" && message.state.control === "trustee");
+    const discardFrame = await readUntil(
+      clients[0]!,
+      (message) => message.type === "game" && message.state.players[actor].discards.length > 0,
+      3000,
+    );
+    const discardCount = discardFrame.state.players[actor].discards.length;
+
+    // 第二次 auth：控制权已是 trustee、保护期已清 —— 不得再转、再广播、再 autoAct
+    clients[actor]!.send({ type: "auth", token: await tokens.issueUserToken(userIds[actor]!), roomId: room.roomId });
+    await readUntil(clients[actor]!, (message) => message.type === "game", 2000);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(player.control).toBe("trustee");
+    // 下一个出牌人是人工（60s），牌局应冻结在原处：没有第二手托管牌、没有新帧
+    const late = await clients[0]!.next(500).catch(() => null);
+    expect(late === null || late.type !== "game" || late.state.players[actor].discards.length === discardCount).toBe(true);
+  });
+
+  it("纯暂离返回：不转 trustee、控制权仍 human、暂离消失照常广播", async () => {
+    const { clients, room, userIds, tokens, port } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+    const index = 1;
+    room.markAway(userIds[index]!, true);
+
+    const back = new TestClient();
+    await back.connect(port);
+    back.send({ type: "auth", token: await tokens.issueUserToken(userIds[index]!), roomId: room.roomId });
+    const entered = await readUntil(back, (message) => message.type === "game");
+    expect(entered.state.control).toBe("human");
+    expect(entered.state.away).toBe(false);
+    for (const other of [0, 2, 3]) {
+      await readUntil(
+        clients[other]!,
+        (message) => message.type === "game"
+          && message.state.players.some((p: any) => p.seat === index && p.presence === "online"),
+        5000,
+      );
+    }
+    expect(room.players.get(userIds[index]!)!.control).toBe("human");
+    back.close();
+  });
+
+  it("保护期未过就回来：不发生错误托管，控制权仍 human", async () => {
+    const { clients, room, userIds, tokens } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+    });
+    const index = 2;
+    const player = room.players.get(userIds[index]!)!;
+    player.connected = false;
+    player.reconnectDeadline = new Date(Date.now() + 60_000); // 还在保护期内
+
+    clients[index]!.send({ type: "auth", token: await tokens.issueUserToken(userIds[index]!), roomId: room.roomId });
+    const entered = await readUntil(clients[index]!, (message) => message.type === "game");
+    expect(entered.state.control).toBe("human");
+    expect(player.control).toBe("human");
+    expect(player.connected).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    for (const p of room.players.values()) expect(p.control).toBe("human");
+  });
 });
 

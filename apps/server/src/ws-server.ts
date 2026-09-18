@@ -884,9 +884,12 @@ function buildRealtimeServer(
       connection.roomId = roomId;
       const beforeReconnect = activeMatches.get(roomId);
       const beforeSeat = beforeReconnect?.seatsByUser.get(userId);
+      /** reconnect 是否就地转了托管（120 秒保留期已过的失联玩家）。 */
+      let reconnected = false;
       try {
         // 返回值 = 120 秒保留期已过，控制权就地交给了服务器（域层同步落库）。
-        if (room.reconnect(userId) && beforeReconnect && beforeSeat !== undefined) {
+        reconnected = room.reconnect(userId);
+        if (reconnected && beforeReconnect && beforeSeat !== undefined) {
           beforeReconnect.seatEpoch.set(beforeSeat, seatEpochOf(beforeReconnect, beforeSeat) + 1);
         }
       } catch (error) {
@@ -923,7 +926,11 @@ function buildRealtimeServer(
         if (active.terminating) return;
         sendPlayerState(connection, active, seat);
         // 另外三家也要立刻看到「暂离」消失 —— 上面那一发只发给回来的本人。
-        if (returnedFromLobby && !settled) await broadcastState(active);
+        // `reconnected`（失联超期、就地转托管）**同样必须全场广播**：广播是
+        // `scheduleAutoActions` 的唯一入口，缺了它，被 epoch bump 作废的旧 action timer
+        // 不会有新 timer 顶上 —— 该座位若正持有唯一待决动作（claiming 的 claimant /
+        // playing 的当前出牌人），整局就停在"四家 actions 全空"上无人推进（真实卡死复现）。
+        if ((returnedFromLobby || reconnected) && !settled) await broadcastState(active);
       } else {
         connection.send({ type: "room", status: room.status, playerCount: room.players.size });
       }
