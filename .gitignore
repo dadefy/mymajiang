@@ -13,3 +13,7 @@ storage/
 # 用通配是为了覆盖 `.keys-ledger.local.txt` 这类自建变体 ——
 # 本地预览时用 KEYS_LEDGER 指过另一个文件名，那条规则单独的 .txt 挡不住。
 .keys-ledger*.txt
+
+# QA 本地隔离 pnpm store 与废弃目录
+.qa-store/
+_discarded-node_modules/
