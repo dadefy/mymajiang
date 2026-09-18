@@ -121,6 +121,7 @@ async function main() {
     const envArgs = existsSync(envFile) ? ["--env-file=" + envFile] : [];
     if (!run("smoke（接口自检）", node, [...envArgs, "apps/server/scripts/smoke.mjs"])) return finish();
     if (!run("acceptance（四人 8 局端到端）", node, [...envArgs, "apps/server/scripts/acceptance.mjs"], { timeoutMs: 10 * 60_000 })) return finish();
+    if (!run("abandonment（四人弃局提前终局）", node, [...envArgs, "apps/server/scripts/abandonment-acceptance.mjs"], { timeoutMs: 5 * 60_000 })) return finish();
   }
 
   if (tier === "public-online" || tier === "all") {
