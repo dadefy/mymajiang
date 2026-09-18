@@ -614,21 +614,50 @@ function buildRealtimeServer(
    * 而那个时刻还在 —— 所以另有 `settleExpiredSeats()` 在"有人进来 / 有人操作"时按墙钟重判。
    * 两条路径走的是同一个域层判断，因此不会打架、也不会重复动作。
    */
+  /**
+   * 窗口定时器到点的一次判定。被 {@link scheduleWindowExpiry} 与它的重试定时器共用。
+   *
+   * 域层返回 true（真的转了托管）才广播并顺带判一次提前终局；
+   * 返回 false 时分两种情况：
+   *   * 座位已不可转（人回来了 / 已托管 / 对局已结束）→ 静默退出，什么都不做；
+   *   * 座位**仍该转**（人工 + 有保留期 + 对局中）→ 这是定时器与墙钟的错位：
+   *     定时器按单调钟计时，域层按墙钟（`reconnectDeadline`）判死线，NTP 微调/步进
+   *   会让两者错开约 1ms，到点瞬间墙钟可能还没到 deadline。补一个短重试定时器
+   *   （10ms，幂等），直到墙钟追上或座位不再该转为止 —— 否则这个座位会永远卡在
+   *   人工控制上（四人全断线时没有任何消息会再触发墙钟重判，对局就此挂死）。
+   */
+  function windowExpiryTick(active: ActiveMatch, seat: number, userId: string): void {
+    windowTimers.get(active)?.delete(seat);
+    if (!active.room.expireReconnectWindow(userId)) {
+      const player = active.room.players.get(userId);
+      if (player && active.room.status === "playing"
+        && player.control === "human" && player.reconnectDeadline) {
+        const retry = setTimeout(() => windowExpiryTick(active, seat, userId), 10);
+        retry.unref();
+        let timers = windowTimers.get(active);
+        if (!timers) {
+          timers = new Map();
+          windowTimers.set(active, timers);
+        }
+        timers.set(seat, retry);
+      }
+      return;
+    }
+    active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
+    void broadcastState(active).catch(() => undefined);
+    // 最后一个保护期到点 = 条件 B（全员失联且都已过保护期 / 已退出）可能成立的时刻。
+    // 判据仍是域层墙钟；没凑齐时这里是无副作用的纯读。
+    if (abandonmentReached(active)) {
+      void terminateAbandonedMatch(active).catch(() => undefined);
+    }
+  }
+
   function scheduleWindowExpiry(active: ActiveMatch, seat: number, userId: string): void {
     clearWindowTimer(active, seat);
     const deadline = active.room.players.get(userId)?.reconnectDeadline;
     if (!deadline) return;
-    const timer = setTimeout(() => {
-      windowTimers.get(active)?.delete(seat);
-      if (!active.room.expireReconnectWindow(userId)) return;
-      active.seatEpoch.set(seat, seatEpochOf(active, seat) + 1);
-      void broadcastState(active).catch(() => undefined);
-      // 最后一个保护期到点 = 条件 B（全员失联且都已过保护期 / 已退出）可能成立的时刻。
-      // 判据仍是域层墙钟；没凑齐时这里是无副作用的纯读。
-      if (abandonmentReached(active)) {
-        void terminateAbandonedMatch(active).catch(() => undefined);
-      }
-    }, Math.max(0, deadline.getTime() - Date.now()));
+    const timer = setTimeout(() => windowExpiryTick(active, seat, userId),
+      Math.max(0, deadline.getTime() - Date.now()));
     timer.unref();
     let timers = windowTimers.get(active);
     if (!timers) {

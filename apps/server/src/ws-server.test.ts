@@ -1149,6 +1149,37 @@ describe("退出托管与重新接管", () => {
     }
   });
 
+  it("条件 B 兜底：窗口定时器到点撞上墙钟错位被拒 → 短重试兜底，终局不得丢触发", async () => {
+    // 真实生产事故路径（服务器部署验证时偶发复现）：定时器按单调钟计时、
+    // 域层按墙钟判 deadline，NTP 微调会让两者错开约 1ms —— 定时器到点那一瞬间
+    // 墙钟还没到 deadline，expireReconnectWindow 返回 false。旧实现被拒后直接放弃，
+    // 四人全断线时再没有任何消息触发墙钟重判，对局永久卡在 playing。
+    const { clients, room } = await playingMatch({
+      playTimeoutMs: 60_000,
+      claimTimeoutMs: 60_000,
+      reconnectWindowMs: 200,
+    });
+
+    // 确定性复现：第一拍到点强制返回 false（模拟墙钟还差 <1ms），之后走真判定。
+    // 没有重试兜底时，这一拍被拒后无人再触发，waitFor 必然超时。
+    const original = room.expireReconnectWindow;
+    let vetoed = false;
+    room.expireReconnectWindow = (userId: string) => {
+      if (!vetoed) {
+        vetoed = true;
+        return false;
+      }
+      return original.call(room, userId);
+    };
+
+    for (const client of clients) client.close();
+    await waitFor(() => room.status === "dissolved", 10_000);
+    expect(vetoed).toBe(true); // 确认确实走过"被拒"分支，测试没有空转
+    for (const player of room.players.values()) {
+      expect(player.renounced).toBe(false);
+    }
+  });
+
   it("条件 B 混合形态：3 人退出 + 1 人掉线，凑齐条件后提前终局", async () => {
     const { clients, room, userIds } = await playingMatch({
       playTimeoutMs: 60_000,
