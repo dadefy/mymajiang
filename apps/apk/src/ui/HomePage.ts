@@ -20,7 +20,7 @@ export class HomePage {
     this.view = box(parent, 0, 0, NON_TABLE.width, NON_TABLE.height);
     background(this.view, "lobby");
     const veil = box(this.view, 0, 0, NON_TABLE.width, NON_TABLE.height, "#F4EEDC77"); veil.mouseEnabled = false;
-    pageTitle(this.view, "绵阳血战麻将", "好友相聚 · 服务器权威牌局");
+    pageTitle(this.view, "麻雀精灵", "一桌好牌 · 一群好友");
     const nav = paperPanel(this.view, 72, 178, 300, 790);
     const entries: Array<[Tab, string]> = [["lobby", "游戏大厅"], ["groups", "牌友群"], ["matches", "战绩"], ["profile", "个人中心"], ["settings", "设置"]];
     entries.forEach(([key, text], i) => textButton(nav, text, 25, 40 + i * 100, 250, 72, key === "lobby" ? NON_TABLE.jade : "#789084", () => this.switchTab(key), 18));

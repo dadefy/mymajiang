@@ -21,8 +21,8 @@ export class KeyEntryPage {
     box(this.view, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#10251F55").mouseEnabled = false;
     const panel = paperPanel(this.view, 1030, 115, 720, 850);
 
-    label(this.view, "绵阳血战麻将", 70, { width: 900, align: "center", bold: true, color: "#F4EEDC" }).pos(90, 330);
-    label(this.view, "好友相聚 · 血战到底", 30, { width: 900, align: "center", color: "#E3D4AD" }).pos(90, 430);
+    label(this.view, "麻雀精灵", 70, { width: 900, align: "center", bold: true, color: "#F4EEDC" }).pos(90, 330);
+    label(this.view, "一桌好牌 · 一群好友", 30, { width: 900, align: "center", color: "#E3D4AD" }).pos(90, 430);
     label(panel, "登录", 46, { width: 720, align: "center", bold: true, color: NON_TABLE.ink }).pos(0, 55);
     label(panel, "输入邀请密钥或使用已有账号", 24, { width: 720, align: "center", color: NON_TABLE.dim }).pos(0, 120);
 
