@@ -513,8 +513,11 @@ export class LayaAnimationDriver implements AnimationDriver {
   /** 页面切换：一层不接命中的深色帷幕擦过。它不吃点击，所以哪怕正在放也不挡操作。 */
   private cueScreenTransition(add: Add, done: Laya.Handler, duration: number): void {
     const veil = new Laya.Sprite();
-    veil.size(this.overlay.width, this.overlay.height);
-    veil.graphics.drawRect(0, 0, veil.width, veil.height, "#04100A");
+    // 帷幕要盖住**整屏**，而大厅是竖屏、牌桌是横屏，设计尺寸每切一次页就变一回。
+    const width = Laya.stage.designWidth || this.overlay.width;
+    const height = Laya.stage.designHeight || this.overlay.height;
+    veil.size(width, height);
+    veil.graphics.drawRect(0, 0, width, height, "#04100A");
     veil.alpha = 0;
     add(veil);
     Laya.Tween.to(veil, { alpha: 0.5 }, duration * 0.35, Laya.Ease.quadIn);

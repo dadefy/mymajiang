@@ -62,6 +62,22 @@ export interface AudioResource {
   ready?: boolean;
 }
 
+/** 场景 BGM 的三档：大厅、等待房、牌桌。 */
+export type BgmTrack = "lobby" | "waitingRoom" | "game";
+
+/**
+ * 场景 → BGM 资源。
+ *
+ * 三行全部 `ready: false`：仓库里没有任何已授权背景音乐（东方休闲 / 古筝 / 笛子 / 轻打击，
+ * 不要战斗音乐与高频鼓点），素材未到位前发起请求只会 404。
+ * 接线已经完成，拿到素材后把 `ready` 打开即可，调用方一行都不用改。
+ */
+const BGM_TRACKS: Record<BgmTrack, AudioResource> = {
+  lobby: { category: "bgm", path: "resources/audio/bgm/bgm_lobby.mp3", ready: false },
+  waitingRoom: { category: "bgm", path: "resources/audio/bgm/bgm_waiting_room.mp3", ready: false },
+  game: { category: "bgm", path: "resources/audio/bgm/bgm_game.mp3", ready: false },
+};
+
 export interface AudioPlayOptions {
   loop: boolean;
   volume: number;
@@ -165,6 +181,8 @@ export class AudioManager {
   private readonly lastCueAt = new Map<string, number>();
   private burstAt: number[] = [];
   private bgmPath: string | null = null;
+  /** 当前**该放**哪一档场景音乐；与 `bgmPath` 分开，因为素材可能仍未就位。 */
+  private bgmTrack: BgmTrack | null = null;
 
   constructor(
     private readonly driver: AudioDriver,
@@ -210,12 +228,24 @@ export class AudioManager {
   unmute(): void {
     if (!this.settings.masterMuted) return;
     this.settings = { ...this.settings, masterMuted: false };
-    if (this.bgmPath) this.playBgm(this.bgmPath);
+    if (this.bgmTrack !== null) this.playSceneBgm(this.bgmTrack);
   }
 
-  playBgm(path = "resources/audio/bgm/table.mp3"): void {
-    this.switchBgm(path);
+  /**
+   * 切到某一场景的 BGM。资源未就位时只记录意图、不发起请求（见 `BGM_TRACKS`）。
+   */
+  playSceneBgm(track: BgmTrack): boolean {
+    this.bgmTrack = track;
+    const asset = BGM_TRACKS[track];
+    if (asset.ready === false) {
+      if (this.bgmPath !== null) this.stopBgm();
+      return false;
+    }
+    this.switchBgm(asset.path);
+    return this.bgmPath !== null;
   }
+
+  get currentBgmTrack(): BgmTrack | null { return this.bgmTrack; }
 
   /** 换 BGM 前先收掉旧的，避免两个场景的音乐叠着放。同一首不重放。 */
   switchBgm(path: string): void {
@@ -265,6 +295,7 @@ export class AudioManager {
   /** 离开牌桌 / 页面销毁：收干净，别留一条没停的 BGM。 */
   dispose(): void {
     this.bgmPath = null;
+    this.bgmTrack = null;
     this.driver.stopCategory("bgm");
     this.driver.stopCategory("sfx");
     this.driver.stopCategory("voice");
