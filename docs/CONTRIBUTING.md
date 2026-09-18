@@ -143,8 +143,10 @@ git pull --rebase            # 开始干活前先同步
 
 ```powershell
 pnpm build       # 生产构建 + 各共享包构建（必须在 test 之前，见下面的坑）
-pnpm test        # 全部测试（当前 46 个文件 / 466 项）
+pnpm test        # 全部测试（当前 46 个文件 / 546 项，2026-09-18 实测）
 pnpm typecheck   # 各包类型检查
+pnpm qa          # 一键回归（tools/qa/）：上面三条 + 离线 domcheck 探针；
+                 # 另有 qa:local-online / qa:public-online / manual 四档，见 tools/qa/README.md
 ```
 
 三条都必须通过，才算完成。任何一条红了就别提交。

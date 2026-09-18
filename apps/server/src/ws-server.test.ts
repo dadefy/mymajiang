@@ -1160,13 +1160,14 @@ describe("退出托管与重新接管", () => {
       reconnectWindowMs: 200,
     });
 
-    // 确定性复现：第一拍到点强制返回 false（模拟墙钟还差 <1ms），之后走真判定。
-    // 没有重试兜底时，这一拍被拒后无人再触发，waitFor 必然超时。
+    // 确定性复现：每一座的第一次到点都强制返回 false（同一面墙钟错位影响所有座位，
+    // 与生产事故一致），之后走真判定。只否决第一座的话，其余三座的定时器会把对局
+    // 救活，测试就在没有重试兜底的情况下假绿（2026-09-18 mutation 验证发现并修正）。
     const original = room.expireReconnectWindow;
-    let vetoed = false;
+    const vetoedOnce = new Set<string>();
     room.expireReconnectWindow = (userId: string) => {
-      if (!vetoed) {
-        vetoed = true;
+      if (!vetoedOnce.has(userId)) {
+        vetoedOnce.add(userId);
         return false;
       }
       return original.call(room, userId);
@@ -1174,7 +1175,7 @@ describe("退出托管与重新接管", () => {
 
     for (const client of clients) client.close();
     await waitFor(() => room.status === "dissolved", 10_000);
-    expect(vetoed).toBe(true); // 确认确实走过"被拒"分支，测试没有空转
+    expect(vetoedOnce.size).toBe(4); // 确认四座的第一次到点确实都被拒，测试没有空转
     for (const player of room.players.values()) {
       expect(player.renounced).toBe(false);
     }

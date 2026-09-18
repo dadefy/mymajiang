@@ -6,7 +6,10 @@
     "build": "pnpm -r --if-present build",
     "start": "pnpm build && node apps/server/dist/main.js",
     "test": "vitest run",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "typecheck": "pnpm -r --if-present typecheck",
+    "qa": "node tools/qa/run-regression.mjs offline",
+    "qa:local-online": "node tools/qa/run-regression.mjs local-online",
+    "qa:public-online": "node tools/qa/run-regression.mjs public-online"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

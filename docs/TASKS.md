@@ -181,7 +181,7 @@
 ```powershell
 git pull --rebase        # 开工前先同步
 # ... 干活 ...
-pnpm test && pnpm typecheck && pnpm build    # 三条全绿
+pnpm build && pnpm test && pnpm typecheck    # 三条全绿（build 必须在 test 之前）
 git add <你自己的文件...> && git commit -F 消息文件    # 只加自己的文件，见 CONTRIBUTING
 git push
 ```
@@ -190,16 +190,21 @@ git push
 - 同一目录撞车了，先沟通再动，不要互相覆盖
 - 规格有分歧时以 `docs/PROJECT_STATUS.md` 为准；确实要改规格，先更新文档再改代码
 
-## 当前状态（2026-09-16）
+## 当前状态（2026-09-18 更新）
 
-- 远端：`https://github.com/dadefy/mymajiang.git`（**私有**），分支 `main`
-- 测试：35 个文件 / 309 项全通过（语音消息合并后本机实测）
+- 远端：`git@github.com:dadefy/mymajiang.git`（**私有**，SSH），分支 `main`
+- 测试：46 个文件 / 546 项全通过（2026-09-18 本机实测，`pnpm build` 后跑）
+- 一键回归：`pnpm qa`（offline）/ `pnpm qa:local-online` / `pnpm qa:public-online`，见 `tools/qa/`
+- **生产已上线**：Ubuntu 服务器 + PostgreSQL + Cloudflare 隧道（`https://0106.wiki`），
+  生产 commit `5717175`；故障恢复修复（21f745f/2cdeaad/410a3de/5717175）已部署并完成生产冒烟
 - 已完成：规则引擎、领域逻辑、服务端（HTTP + WebSocket + PostgreSQL）、
   客户端业务骨架（`apps/client`）、邀请密钥登录、群聊实时推送、群管理、管理后台网页（A2）、
   账号注销（A4）、战绩游标分页（B1）、快照写入节流（B2）、解散群软删除（B4）、群消息分页（B3）、
   管理员账号体系与接口限流（P2-1/P2-2）、对象存储链路（P0-2）、
-  客户端渲染层骨架（A1，待真机验收）、**群聊页面（D2，待真机验收）**、
-  **图片上传与语音消息（A3 客户端侧）**、**幂等键与弱网重试（P1-1）**、
-  HTTP/WebSocket 单端口联网调试与浏览器调试客户端
+  客户端渲染层骨架（A1，待真机验收）、群聊页面（D2，待真机验收）、
+  图片上传与语音消息（A3 客户端侧）、幂等键与弱网重试（P1-1）、
+  HTTP/WebSocket 单端口联网调试与浏览器调试客户端、
+  全员放弃/失联提前终局、三票解散实时收尾、claiming deadline 固定、杠分规则守护、
+  生产部署套件（tools/deploy、tools/ubuntu-deploy）与备份（mymj-backup.sh）
 - **功能开发已全部完成。** 剩下的是：真机验收（D1/D2 牌局、图片与语音互通）、
-  语音播放与图片预览（渲染层）、部署与合规（服务器、域名、HTTPS、备份、监控、备案、协议文本）。
+  横屏 UI 改造验收（UI 协作者进行中）、部署与合规（备案、协议文本、版号）。
