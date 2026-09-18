@@ -17,3 +17,7 @@ storage/
 # QA 本地隔离 pnpm store 与废弃目录
 .qa-store/
 _discarded-node_modules/
+
+# 浏览器验收（tools/laya-presentation）的一次跑一份：截图 + 事件清单，属于验证产物而非工程资源。
+# 必须带前导斜杠：只忽略仓库根下这一份，否则连 tools/laya-presentation/ 里的脚本本体也被吞掉。
+/laya-presentation/

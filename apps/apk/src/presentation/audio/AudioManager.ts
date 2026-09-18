@@ -170,6 +170,14 @@ const SAME_CUE_COOLDOWN_MS = 70;
  */
 const BURST_LIMIT = 4;
 const BURST_WINDOW_MS = 120;
+/**
+ * 一场里只响一两次的「大事」：胡 / 自摸 / 小局结算 / 整场结束。
+ *
+ * 它们**不受并发窗口上限约束**（仍然占一个名额）。四家都由服务端代打时行牌可以快过人手，
+ * 真页面验收里就出现过整场结束那一声正好落进小局结算的 120 毫秒窗口被丢掉 ——
+ * 少响一声「你打完了」，比多一声哒哒更糟。
+ */
+const MILESTONE_CUES: ReadonlySet<AudioCue> = new Set<AudioCue>(["hu", "self-draw", "round-finished", "match-finished"]);
 /** 已播 eventId 容量：一小场几十条足够，设上限防长局内存泄漏。 */
 const PLAYED_EVENTS_CAP = 400;
 
@@ -341,18 +349,19 @@ export class AudioManager {
     const name = normalizeCue(cue);
     const primary = CUES[name];
     if (!primary) return false;
+    const reserved = MILESTONE_CUES.has(name);
     let played = false;
-    if (this.playLayer(name, primary)) played = true;
+    if (this.playLayer(name, primary, reserved)) played = true;
     const announcement = VOICE_ANNOUNCEMENTS[name];
-    if (announcement && this.playLayer(`${name}:voice`, announcement)) played = true;
+    if (announcement && this.playLayer(`${name}:voice`, announcement, reserved)) played = true;
     return played;
   }
 
-  private playLayer(gateKey: string, resource: AudioResource): boolean {
+  private playLayer(gateKey: string, resource: AudioResource, reserved = false): boolean {
     if (this.disposed) return false;
     if (resource.ready === false) return false;
     if (!this.audible(resource.category)) return false;
-    if (!this.allow(gateKey)) return false;
+    if (!this.allow(gateKey, reserved)) return false;
     this.driver.play(resource.path, {
       loop: false,
       volume: resource.category === "voice" ? this.settings.voiceVolume
@@ -369,12 +378,13 @@ export class AudioManager {
     return this.settings.effectsEnabled;
   }
 
-  private allow(cue: string): boolean {
+  private allow(cue: string, reserved = false): boolean {
     const at = this.now();
     const previous = this.lastCueAt.get(cue);
     if (previous !== undefined && at - previous < SAME_CUE_COOLDOWN_MS) return false;
     const recent = this.burstAt.filter((time) => at - time < BURST_WINDOW_MS);
-    if (recent.length >= BURST_LIMIT) return false;
+    // 里程碑音只**占**名额、不**受**名额限制，否则整场结束会被前面四声哒哒挤掉。
+    if (!reserved && recent.length >= BURST_LIMIT) return false;
     this.lastCueAt.set(cue, at);
     recent.push(at);
     this.burstAt = recent;

@@ -141,20 +141,37 @@ describe("防叠爆", () => {
     ]);
   });
 
+  // 第五条用的是普通音：胡/结算这类「大事」不吃这个上限（见下面那条），别混进来当陪衬。
+  const ORDINARY = ["draw", "discard", "peng", "kong", "tileSelect"] as const;
+
   it("短窗口里最多四条：第五声丢掉，宁可不响也不炸耳", () => {
     const { audio, sounds } = harness();
-    const cues = ["draw", "discard", "peng", "kong", "hu"] as const;
-    for (const cue of cues) audio.playConfirmed(confirmed(`burst:${cue}`, cue));
+    for (const cue of ORDINARY) audio.playConfirmed(confirmed(`burst:${cue}`, cue));
     expect(sounds().length).toBe(4);
   });
 
   it("过了窗口再来一批，照样响", () => {
     const { audio, sounds, advance } = harness();
-    const cues = ["draw", "discard", "peng", "kong", "hu"] as const;
-    for (const cue of cues) audio.playConfirmed(confirmed(`b1:${cue}`, cue));
+    for (const cue of ORDINARY) audio.playConfirmed(confirmed(`b1:${cue}`, cue));
     advance(200);
-    for (const cue of cues) audio.playConfirmed(confirmed(`b2:${cue}`, cue));
+    for (const cue of ORDINARY) audio.playConfirmed(confirmed(`b2:${cue}`, cue));
     expect(sounds().length).toBe(4 + 4);
+  });
+
+  it("整场结束不被前面四声挤掉，但同名冷却照旧", () => {
+    const { audio, sounds, advance } = harness();
+    for (const cue of ["draw", "discard", "peng", "kong"] as const) audio.playConfirmed(confirmed(`m:${cue}`, cue));
+    expect(sounds().length).toBe(4);
+    // 四家全托管时，最后两小场的结算音可以落在同一个 120 毫秒窗口里。
+    audio.playConfirmed(confirmed("m:round", "round-finished"));
+    audio.playConfirmed(confirmed("m:match", "match-finished"));
+    expect(sounds().length).toBe(6);
+    // 重放同一事件（换了 eventId 也算同一 cue）不该连着响两声整场结束。
+    audio.playConfirmed(confirmed("m:match-again", "match-finished"));
+    expect(sounds().length).toBe(6);
+    advance(80);
+    audio.playConfirmed(confirmed("m:match-later", "match-finished"));
+    expect(sounds().length).toBe(7);
   });
 
   it("背景音乐不算进并发窗口：换场景不该被上一声牌音挤掉", () => {

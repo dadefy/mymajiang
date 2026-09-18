@@ -73,8 +73,14 @@ WebView 不应从 `file://` 加载。使用 AndroidX `WebViewAssetLoader` 的 `h
 | --- | --- | --- |
 | `SAME_CUE_COOLDOWN_MS` | 70 | 同一个 cue 的最短间隔；碰完紧接着胡是两回事，不受影响 |
 | `BURST_LIMIT` / `BURST_WINDOW_MS` | 4 / 120 | 非 BGM 音的并发上限，超了**直接丢**：少响一声远好过听不清谁在动 |
+| `MILESTONE_CUES` | `hu` / `self-draw` / `round-finished` / `match-finished` | 只**占**并发名额、不**受**名额限制 |
 | `PLAYED_EVENTS_CAP` | 400 | 已播 eventId 容量，插入序淘汰，防长局内存泄漏 |
 | `PLAYED_CAP`（动画） | 600 | 同上，动画侧 |
+
+里程碑音不受并发上限约束，是因为**全自动牌桌跑得比人手快得多**：一圈托管可以在几十毫秒里连着出四声牌音，
+紧接着的小局/大局结算就会被名额挤掉（实测出现过 `match_finish` 音 0）。少响一声哒哒无所谓，
+一局结束没响一声就是「是不是卡住了」。所以里程碑音照样占名额（同一窗口内后来的普通音仍然会被压），
+只是自己不会被丢；同名 70ms 冷却照旧生效，重连补发的旧帧还是响不出来。
 
 `eventId` 由 director 合成：牌局事件 `${roomId}:${round}:${kind}#${序号}`，倒计时 `${roomId}:${deadlineAt}:warn-${档}`。
 服务端帧里没有事件 id，所以这一层由客户端负责，但**同一轮同一档天然只有一条记录**，重连拿到旧帧也响不出来。
@@ -172,11 +178,29 @@ presentationControls(presentation)                              // 交给设置�
 冻结动画资源（环、托管/接管图标）从 `mj-icon-design` **只读复制**到 `resources/animation/`，沿用牌面在
 `resources/tiles/` 的既有约定，没有另起新目录。
 
-`.wav` 与 manifest 目前**没有** `.meta`（PNG 都有），等 Laya Web 构建验证是否需要。
+`.wav` 与 manifest 的 `.meta` 由 Laya Web 构建自动生成（内容只有一个资产 uuid，不含引擎参数），随素材一起提交，
+这样下次构建不会因为 uuid 变了而重导资源。
 
 缺少：全部 BGM 与语音（含男女声与方言版本）；正式的按钮点击与倒计时音；版权清晰的默认头像；横屏桌布与牌河底纹；最终按钮/状态图标（网络、离线、away、托管、音量、振动、返回）；胡/碰/杠的正式特效；品牌启动图；Android adaptive icon（foreground/background/monochrome）；通知图标；商店截图。
 
 素材必须自制、委托并取得商业授权，或使用明确允许商业分发与改编的许可，并保存作者、来源、许可文本和取得日期。
+
+## 浏览器验收（11 场景）
+
+`tools/laya-presentation/check-laya-presentation.mjs` 跑的是**真实构建产物**，不是 jsdom：
+
+```
+LAYA_PREVIEW_PORT=3123 node tools/laya-preview.mjs   # 同一个端口发 release/web 与 API
+node tools/laya-presentation/check-laya-presentation.mjs
+```
+
+它启一个 headless Chrome 走 CDP，在页面上按 11 个场景点真实按钮（摸牌、选牌、出牌、碰、杠、胡、过、
+当前玩家、倒计时、托管/接管、小局与大局结算），另外拉三个 Node 客户端把牌局推到需要的位置。
+判定方式是往 `Laya.Tween.to` 与 `Laya.SoundManager.play*` 上装探针，逐场景统计「响了几声 / 动了几次 / 呼吸环转了几圈」，
+每个场景留一张截图。整套跑完约 20~30 分钟（大局结算只能等 8 小局自然打完，REST 没有解散入口）。
+
+产物写在仓库根的 `laya-presentation/<时间戳>/`（截图 + 事件清单），属于验证产物，已在 `.gitignore` 里忽略；
+**注意只忽略根目录这一层**，否则会把 `tools/laya-presentation/` 里的脚本本体一起吞掉。
 
 ## 进入 APK 阶段的门槛
 
