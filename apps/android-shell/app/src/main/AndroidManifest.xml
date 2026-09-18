@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  麻雀精灵 Android 壳。
+  权限最小集：
+  - INTERNET / ACCESS_NETWORK_STATE：HTTPS + WSS 实时通道（页面用 navigator.onLine 判断断网恢复）
+  - RECORD_AUDIO + MODIFY_AUDIO_SETTINGS：麦克风录音（语音消息），RECORD_AUDIO 为运行时权限，
+    由 MainActivity 在页面 getUserMedia 时按需申请
+  横屏锁定：sensorLandscape（横屏两个方向随重力，页面按 1920x1080 横版设计）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="false"
+        android:allowBackup="false"
+        android:supportsRtl="false">
+
+        <!-- 覆盖默认线上入口（不填则用 BuildConfig.DEFAULT_APP_URL）：
+             <meta-data android:name="app_url" android:value="https://xxx/app" /> -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|locale|layoutDirection"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
