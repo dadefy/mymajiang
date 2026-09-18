@@ -68,6 +68,23 @@ import {
   tileName,
   tileRun,
 } from "./widgets.js";
+import {
+  SKIN,
+  SLAB,
+  TABLE_THEME,
+  a2,
+  addTileFace,
+  avatarDisc,
+  faceTile,
+  handTile,
+  iconButton,
+  inkPanel,
+  pieMask,
+  plate,
+  setPie,
+  tileBack,
+  type A2Key,
+} from "./table-skin.js";
 
 const PHASE_NAMES: Record<MatchState["phase"], string> = {
   swapping: "换三张",
@@ -98,12 +115,26 @@ const CLOCK_FONT_FINAL = 66;
 const clockLine = (font: number): number => Math.ceil(font * 1.3);
 
 /**
- * 顶栏通知带：左边让开「房号 …」（约 462 收口），右边让开「退出 / 菜单」（1788 起）。
+ * 顶栏通知带：左边让开「房号牌匾」（约 370 收口），右边让开右侧栏第一枚图标（1648 起）。
  *
  * 通知只能待在顶栏这一行 —— 往下一点到 `Y.topbar + 52` 就压住对家的座位信息（`Y.topInfo`）。
  */
 const NOTICE_X = 480;
-const NOTICE_W = 1280;
+const NOTICE_W = 1120;
+
+/**
+ * 右侧栏三枚图标按钮（规则 / 设置 / 退出）：从右往左等距排，最右一枚收在安全边内。
+ *
+ * `iconButton` 的节点高是 `size + 28`（圆底 + 下方短文字），所以这一栏比顶栏文字略高一点，
+ * 纵向中心对到 `Y.topbar` 那一行才不显得往下坠。
+ */
+const RAIL_SIZE = 68;
+const RAIL_Y = Y.topbar - 6;
+const RAIL_X = [
+  TABLE_WIDTH - SAFE - RAIL_SIZE - 2 * (RAIL_SIZE + 18),
+  TABLE_WIDTH - SAFE - RAIL_SIZE - 1 * (RAIL_SIZE + 18),
+  TABLE_WIDTH - SAFE - RAIL_SIZE,
+] as const;
 
 /** 碰/杠/胡 的瞬时提示位置（贴着**动作发起方**的手牌一侧，不压牌河/副露/桌芯）。 */
 const SHOUT_ANCHOR: Record<TableSide, { x: number; y: number }> = {
@@ -112,6 +143,55 @@ const SHOUT_ANCHOR: Record<TableSide, { x: number; y: number }> = {
   left: { x: 292, y: 214 },
   right: { x: 1392, y: 214 },
 };
+
+/** 设置面板那三个开关的键。 */
+type SettingKey = "music" | "sfx" | "voice";
+
+/**
+ * 把一串文本放进剪贴板，返回**是否真的成功**。
+ *
+ * `navigator.clipboard` 在非安全上下文（Http 调试页、部分 Android WebView）里直接是 undefined
+ * 或者抛错，所以留一条隐藏 textarea + `execCommand("copy")` 的退路。
+ * 两条都不成也不骗人 —— 调用方据此决定要不要亮「已复制」。
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+  const clipboard = (Laya.Browser.window as {
+    navigator?: { clipboard?: { writeText?: (s: string) => Promise<void> } };
+  }).navigator?.clipboard;
+  if (clipboard?.writeText) {
+    try {
+      await clipboard.writeText(text);
+      return true;
+    } catch {
+      /* 落到下面的 execCommand 退路 */
+    }
+  }
+  const doc = Laya.Browser.document as unknown as {
+    body?: { appendChild: (n: unknown) => void; removeChild: (n: unknown) => void };
+    execCommand?: (command: string) => boolean;
+  };
+  if (!doc.body || !doc.execCommand) return false;
+  let area: HTMLTextAreaElement;
+  try {
+    area = Laya.Browser.createElement("textarea");
+  } catch {
+    return false;
+  }
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "absolute";
+  area.style.left = "-9999px";
+  doc.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = doc.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  doc.body.removeChild(area);
+  return ok;
+}
 
 /**
  * 座位号 → 昵称。
@@ -150,10 +230,13 @@ function snapshotSignature(snapshot: RoomSnapshot | null): string {
 /** 房间等待、完整牌桌操作与单局/整场结算。所有动作仍由服务端 actions 列表授权。 */
 export class RoomPage {
   readonly view: Laya.Box;
+  private readonly roomLabel: Laya.Label;
   private readonly statusLabel: Laya.Label;
-  private readonly exitButton: Laya.Box;
+  /** 「已复制」的就地提示，只在点复制后短暂出现。 */
+  private readonly copyHint: Laya.Label;
+  private readonly exitButton: Laya.Sprite;
   /** 牌桌菜单入口。只在牌局进行中出现 —— 那时候"退出房间"不是一个合法动作。 */
-  private readonly menuButton: Laya.Box;
+  private readonly menuButton: Laya.Sprite;
   /** 托管中压在牌桌正中的那一块：报「正在托管中 · 第 N/8 局」并给「重新接管」。 */
   private readonly trusteePanel: Laya.Sprite;
   private readonly trusteeRoundLabel: Laya.Label;
@@ -231,6 +314,15 @@ export class RoomPage {
   private drawnTile: Tile | null = null;
   /** 结算浮层里那条「再来一局未接通」的说明是否已经点出来过。 */
   private rematchHintShown = false;
+  /** 「已复制」自己收掉的定时器（1.2 秒）。 */
+  private copyHintTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 复制房号那枚圆钮：按下去要自己缩一下再弹回，所以得留住建句。 */
+  private readonly copyButton: Laya.Sprite;
+  /** 设置面板三个开关的当前值。纯本地：音频模块未接入，这里不假装能改掉声音。 */
+  private readonly settingOn: Record<SettingKey, boolean> = { music: true, sfx: true, voice: true };
+  /** 规则面板 / 设置面板：从侧栏图标点开的那一块，关掉即销毁，不参与牌桌重画。 */
+  private infoPanel: Laya.Sprite | null = null;
+  private infoPanelKind: "rules" | "settings" | null = null;
 
   constructor(
     private readonly flow: ClientFlow,
@@ -242,20 +334,43 @@ export class RoomPage {
     this.view.size(TABLE_WIDTH, TABLE_HEIGHT);
     parent.addChild(this.view);
 
-    /* ---------- 顶栏：极简，只放房号/局数 + 聊天/菜单 ---------- */
-    this.statusLabel = label(this.view, "", 30, { bold: true, color: THEME.text });
-    this.statusLabel.pos(SAFE, Y.topbar + 6);
-    this.statusLabel.height = 40;
+    /* ---------- 顶栏牌匾：房号 + 复制 · 局数与房间状态 ---------- */
+    inkPanel(this.view, SAFE, Y.topbar - 2, 336, 68);
+    this.roomLabel = label(this.view, "房号读取中", 30, { bold: true, color: TABLE_THEME.cream });
+    this.roomLabel.pos(SAFE + 14, Y.topbar + 2);
+    this.roomLabel.height = 34;
+    this.roomLabel.valign = "middle";
+    this.statusLabel = label(this.view, "", 22, { color: TABLE_THEME.goldSoft });
+    this.statusLabel.pos(SAFE + 14, Y.topbar + 34);
+    this.statusLabel.height = 28;
     this.statusLabel.valign = "middle";
-    // 两种退出在同一个位置上互斥出现：
-    //   等人/未开局 → 「退出」= 真的离开房间（waiting 期合法，服务端会放行）
-    //   牌局进行中  → 「菜单」= 继续游戏 / 返回大厅 / 退出游戏
-    //                  （这一阶段服务端拒绝"离开房间"，必须走托管那条路）
-    const buttonY = Y.topbar + 2;
-    this.exitButton = textButton(this.view, "退出", TABLE_WIDTH - SAFE - 100, buttonY, 100, 44,
-      THEME.panelBg2, () => void this.flow.leaveRoom(), 22);
-    this.menuButton = textButton(this.view, "菜单", TABLE_WIDTH - SAFE - 100, buttonY, 100, 44,
-      THEME.panelBg2, () => this.openTableMenu(), 22);
+    /** 「已复制」就地提示：借牌匾第二行那几个字的位置，不弹盖住牌面的大 toast。 */
+    this.copyHint = label(this.view, "已复制", 22, { color: TABLE_THEME.jadeLight });
+    this.copyHint.pos(SAFE + 14, Y.topbar + 34);
+    this.copyHint.height = 28;
+    this.copyHint.valign = "middle";
+    this.copyHint.visible = false;
+    this.copyButton = new Laya.Sprite();
+    this.copyButton.pos(SAFE + 272, Y.topbar + 6);
+    this.copyButton.size(44, 44);
+    circle(this.copyButton, 22, 22, 21, "#12282388", TABLE_THEME.goldDeep, 2);
+    a2(this.copyButton, "icon_copy", 8, 10, 28, 28);
+    this.copyButton.on(Laya.Event.CLICK, null, () => { void this.copyRoomNo(); });
+    this.view.addChild(this.copyButton);
+
+    /* ---------- 右侧栏：规则 / 设置 / 退出（A2 图标 + 短文字） ---------- */
+    // 必须建在 matchArea **之前**：整块牌桌背景是 1920×1080 的命中区，
+    // 靠 matchArea 的 zOrder = -1 才让顶栏点得动（见下面那段注释）。
+    iconButton(this.view, RAIL_X[0], RAIL_Y, RAIL_SIZE, "icon_rules", "规则", () => this.toggleRulesPanel());
+    iconButton(this.view, RAIL_X[1], RAIL_Y, RAIL_SIZE, "icon_settings", "设置", () => this.toggleSettingsPanel());
+    // 两种退出在同一个位置上互斥出现（图标与短文字相同，差别只在点下去之后）：
+    //   等人/未开局 → 直接离开房间（waiting 期合法，服务端会放行）
+    //   牌局进行中 → 开牌桌菜单：继续游戏 / 返回大厅 / 退出游戏
+    //                （这一阶段服务端拒绝"离开房间"，必须走托管那条路）
+    this.exitButton = iconButton(this.view, RAIL_X[2], RAIL_Y, RAIL_SIZE, "icon_exit", "退出",
+      () => void this.flow.leaveRoom());
+    this.menuButton = iconButton(this.view, RAIL_X[2], RAIL_Y, RAIL_SIZE, "icon_exit", "退出",
+      () => this.openTableMenu());
     this.menuButton.visible = false;
 
     this.noticeLabel = label(this.view, "", 24, { width: NOTICE_W, align: "center", color: THEME.warn, wordWrap: true });
@@ -333,16 +448,28 @@ export class RoomPage {
     this.trusteePanel.visible = false;
   }
 
-  /** 桌布：深绿底 + 木框 + 一圈极轻的内暗角（三笔描边，不做大面积渐变）。 */
+  /**
+   * 桌布三层：湖亭背景 → 青墨压暗 → 八角翡翠石板。
+   *
+   * `renderMatch` 每帧清空 matchArea 后会重新调它一次；三张图都走 Laya 的纹理缓存，
+   * 重复挂节点不会重复解码。压暗那层是**一笔画出来的矩形**（约 22%），
+   * 不用实时模糊/滤镜 —— Android WebView 上那是要掉帧的。
+   */
   private paintFelt(area: Laya.Box): void {
-    const felt = new Laya.Sprite();
-    felt.graphics.drawRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT, THEME.felt);
-    area.addChild(felt);
-    for (let i = 0; i < 3; i++) {
-      const inset = 6 + i * 10;
-      roundRect(area, inset, inset, TABLE_WIDTH - inset * 2, TABLE_HEIGHT - inset * 2, 10,
-        "#00000000", i === 0 ? THEME.wood : "#00000022", i === 0 ? 12 : 6);
-    }
+    const bg = new Laya.Image();
+    bg.skin = SKIN.bg;
+    bg.size(TABLE_WIDTH, TABLE_HEIGHT);
+    area.addChild(bg);
+
+    const veil = new Laya.Sprite();
+    veil.graphics.drawRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#081A1E38");
+    area.addChild(veil);
+
+    const slab = new Laya.Image();
+    slab.skin = SKIN.slab;
+    slab.pos(SLAB.x, SLAB.y);
+    slab.size(SLAB.w, SLAB.h);
+    area.addChild(slab);
   }
 
   show(screen: Screen): void {
@@ -391,6 +518,8 @@ export class RoomPage {
   hide(): void {
     this.stopPolling();
     this.stopClock();
+    // 切走时把弹层一起收掉：不然下次进房会带着一块「读规则」的遮罩回来。
+    this.closeInfoPanel();
   }
 
   /**
@@ -439,6 +568,167 @@ export class RoomPage {
   }
 
   /**
+   * 复制房间号。
+   *
+   * 优先走剪贴板 API；Android WebView 里它常常因为不是安全上下文而直接抛错，
+   * 那就退回一次性隐藏 textarea。两条路都不成也不弹错误框 —— 房号本来就写在牌匾上，
+   * 念出来就行；这时「已复制」也不能骗人，所以只在真成功时才亮。
+   */
+  private async copyRoomNo(): Promise<void> {
+    if (this.roomNo.length === 0) return;
+    this.copyButton.scale(0.9, 0.9);
+    setTimeout(() => this.copyButton.scale(1, 1), 110);
+    if (!(await copyToClipboard(this.roomNo))) return;
+    if (this.copyHintTimer !== null) clearTimeout(this.copyHintTimer);
+    // 第二行让给「已复制」：局数和状态晚 1.2 秒回来，牌匾上不会同时挤两组字。
+    this.statusLabel.visible = false;
+    this.copyHint.visible = true;
+    this.copyHintTimer = setTimeout(() => {
+      this.copyHintTimer = null;
+      this.copyHint.visible = false;
+      this.statusLabel.visible = true;
+    }, 1200);
+  }
+
+  /** 「规则」入口：再点一次收掉。 */
+  private toggleRulesPanel(): void {
+    if (this.infoPanelKind === "rules") this.closeInfoPanel();
+    else this.openInfoPanel("rules");
+  }
+
+  /** 「设置」入口：再点一次收掉。 */
+  private toggleSettingsPanel(): void {
+    if (this.infoPanelKind === "settings") this.closeInfoPanel();
+    else this.openInfoPanel("settings");
+  }
+
+  /** 收掉侧栏弹层。**必须 destroy 而不是只藏** —— 那块 1920×1080 的背景留着就是全屏命中区。 */
+  private closeInfoPanel(): void {
+    this.infoPanel?.destroy(true);
+    this.infoPanel = null;
+    this.infoPanelKind = null;
+  }
+
+  /**
+   * 侧栏弹层（规则 / 设置）：一块居中的墨青牌匾，压在牌桌之上。
+   *
+   * 收法有两种 —— 点空白处、或点底部的「关闭」，跟牌桌菜单一致。
+   * 弹层建在 `this.view` 上而不是 `matchArea` 里：`renderMatch` 每帧会清空 matchArea，
+   * 读规则的人正盯着这一屏，不该被下一帧牌局快照抹掉。
+   */
+  private openInfoPanel(kind: "rules" | "settings"): void {
+    this.closeInfoPanel();
+    this.infoPanelKind = kind;
+    const layer = new Laya.Sprite();
+    layer.size(TABLE_WIDTH, TABLE_HEIGHT);
+    layer.zOrder = 95;
+    this.view.addChild(layer);
+    this.infoPanel = layer;
+
+    const backdrop = box(layer, 0, 0, TABLE_WIDTH, TABLE_HEIGHT, "#04100AD9");
+    backdrop.on(Laya.Event.CLICK, null, () => this.closeInfoPanel());
+
+    const w = 760;
+    const h = kind === "rules" ? 860 : 560;
+    const x = TABLE_WIDTH / 2 - w / 2;
+    const y = (TABLE_HEIGHT - h) / 2;
+    inkPanel(layer, x, y, w, h);
+    const head = new Laya.Sprite();
+    head.pos(x, y);
+    layer.addChild(head);
+    a2(head, kind === "rules" ? "icon_rules" : "icon_settings", 40, 26, 52, 52);
+    label(head, kind === "rules" ? "房间规则" : "设置", 34, { bold: true, color: TABLE_THEME.cream })
+      .pos(108, 32);
+    a2(head, "divider_gold", 40, 96, w - 80, 26);
+
+    const body = new Laya.Sprite();
+    body.pos(x + 40, y + 140);
+    layer.addChild(body);
+    if (kind === "rules") this.renderRulesBody(body, w - 80);
+    else this.renderSettingsBody(body, w - 80);
+
+    textButton(layer, "关闭", x + w / 2 - 130, y + h - 96, 260, 76, TABLE_THEME.jadeDeep,
+      () => this.closeInfoPanel(), 38);
+  }
+
+  /**
+   * 规则面板：只列**这个玩法真实现了**的条目，一条都不照着效果图编。
+   *
+   * 每条都对应到 `packages/rules`（108 张、不能吃、番数封顶、底分）或 `apps/server`
+   * （换三张 → 定缺 → 摸打的阶段顺序、手里有缺门牌必须先打、超时的服务器托管）。
+   * 具体番型与得分不写在这里：那由服务端结算下发，抄一份到面板上早晚和结算口径对不上。
+   */
+  private renderRulesBody(body: Laya.Sprite, width: number): void {
+    const total = this.match?.totalRounds ?? TOTAL_ROUNDS_FALLBACK;
+    const rows: [string, string][] = [
+      ["牌局", `四人一桌 · 万 / 筒 / 条 共 108 张，不含字牌`],
+      ["局数", `一整局 ${total} 小场，每一小场独立结算`],
+      ["开局", "先换三张，再定缺，缺门牌必须先打"],
+      ["出牌", "只能碰、杠、胡，不能吃牌"],
+      ["杠", "明杠、暗杠、加杠三种都算，杠后补摸一张"],
+      ["胡牌", "一家胡后牌局继续打到底，一小场可能有三家胡"],
+      ["计分", "番数封顶 4 番，得分由服务端结算"],
+      ["托管", "超时由服务器代打，可随时点「重新接管」"],
+    ];
+    let y = 0;
+    for (const [tag, text] of rows) {
+      a2(body, "tag_jade_base", 0, y, 104, 40, "fill");
+      const tagLabel = label(body, tag, 22, { width: 104, align: "center", color: TABLE_THEME.cream });
+      tagLabel.pos(0, y + 4);
+      tagLabel.height = 32;
+      tagLabel.valign = "middle";
+      const detail = label(body, text, 25, { width: width - 128, wordWrap: true, color: TABLE_THEME.ivory });
+      detail.pos(128, y + 2);
+      detail.height = 36;
+      y += 76;
+    }
+  }
+
+  /**
+   * 设置面板：音乐 / 音效 / 语音三个开关。
+   *
+   * ⚠️ 音频模块（AudioManager）由另一条线在做，本工作区里还没有可调的接口，
+   * 所以这里**只给控制界面**，状态记在本地，不假装能改掉声音 —— 底部那行说明就是留给这个缺口的。
+   */
+  private renderSettingsBody(body: Laya.Sprite, width: number): void {
+    const rows: [SettingKey, string, string][] = [
+      ["music", "音乐", "牌桌背景乐"],
+      ["sfx", "音效", "摸牌、碰杠胡的提示音"],
+      ["voice", "语音", "牌局内的语音播报"],
+    ];
+    let y = 0;
+    for (const [key, name, hint] of rows) {
+      label(body, name, 30, { width: 160, color: TABLE_THEME.cream, bold: true }).pos(0, y + 6);
+      label(body, hint, 22, { width: width - 220, color: TABLE_THEME.goldSoft }).pos(160, y + 14);
+      this.drawSwitch(body, key, width - 110, y);
+      y += 96;
+    }
+    label(body, "音频模块尚未接入，这里的开关暂不影响声音。", 22, {
+      width, wordWrap: true, color: TABLE_THEME.goldSoft,
+    }).pos(0, y + 8);
+  }
+
+  /** 一个拨动开关：画在面板上，点一下就就地变色，状态存在本地。 */
+  private drawSwitch(parent: Laya.Sprite, key: SettingKey, x: number, y: number): void {
+    const node = new Laya.Sprite();
+    node.pos(x, y);
+    node.size(88, 46);
+    this.paintSwitch(node, this.settingOn[key]);
+    node.on(Laya.Event.CLICK, null, () => {
+      this.settingOn[key] = !this.settingOn[key];
+      this.paintSwitch(node, this.settingOn[key]);
+    });
+    parent.addChild(node);
+  }
+
+  private paintSwitch(node: Laya.Sprite, on: boolean): void {
+    node.graphics.clear();
+    node.graphics.drawRoundRect(0, 0, 88, 46, 23, 23, 23, 23,
+      on ? TABLE_THEME.jade : TABLE_THEME.inkSoft, TABLE_THEME.goldDeep, 2);
+    node.graphics.drawCircle(on ? 65 : 23, 23, 17, on ? TABLE_THEME.cream : TABLE_THEME.scoreFlat);
+  }
+
+  /**
    * 「再来一局」。
    *
    * ⚠️ 服务端**没有**重开能力：`room.start()` 要求 `status === "waiting"`，
@@ -456,9 +746,10 @@ export class RoomPage {
     this.noticeLabel.text = notice ?? "";
     const waiting = this.snapshot?.status === "waiting" && this.match === null;
     // 显示房间号而不是内部 roomId —— 玩家要把它念给下一桌的人听。
-    const number = this.roomNo.length > 0 ? `房号 ${this.roomNo}` : "房号读取中";
-    const round = this.match ? ` · 第 ${this.match.roundNumber}/${this.match.totalRounds ?? 8} 局` : "";
-    this.statusLabel.text = `${number}${round} · ${this.roomStatusText()}`;
+    // 房号单独占一行（它是要被复制、被转述的那串），局数与状态是第二行的辅助信息。
+    this.roomLabel.text = this.roomNo.length > 0 ? `房号 ${this.roomNo}` : "房号读取中";
+    const round = this.match ? `第 ${this.match.roundNumber}/${this.match.totalRounds ?? TOTAL_ROUNDS_FALLBACK} 局 · ` : "";
+    this.statusLabel.text = `${round}${this.roomStatusText()}`;
     const inProgress = this.match !== null || this.snapshot?.status === "playing";
     this.exitButton.visible = !inProgress;
     this.menuButton.visible = inProgress;
@@ -713,11 +1004,15 @@ export class RoomPage {
     if (side === "top") {
       const total = count * (BACK_TOP_W + BACK_TOP_GAP) - BACK_TOP_GAP;
       const startX = cx - total / 2;
-      for (let i = 0; i < count; i++) box(this.matchArea, startX + i * (BACK_TOP_W + BACK_TOP_GAP), Y.topBacks, BACK_TOP_W, BACK_TOP_H, "#1E5740");
+      for (let i = 0; i < count; i++) {
+        tileBack(this.matchArea, startX + i * (BACK_TOP_W + BACK_TOP_GAP), Y.topBacks, BACK_TOP_W, BACK_TOP_H);
+      }
       return;
     }
     const x = side === "left" ? leftBacksX : rightBacksX;
-    for (let i = 0; i < count; i++) box(this.matchArea, x, SIDE_RIVER_Y + i * (BACK_SIDE_H + BACK_SIDE_GAP), BACK_SIDE_W, BACK_SIDE_H, "#1E5740");
+    for (let i = 0; i < count; i++) {
+      tileBack(this.matchArea, x, SIDE_RIVER_Y + i * (BACK_SIDE_H + BACK_SIDE_GAP), BACK_SIDE_W, BACK_SIDE_H);
+    }
   }
 
   /** 副露：放在各自手牌**朝中心的一侧**，与牌河留出间距。 */
@@ -735,17 +1030,13 @@ export class RoomPage {
       const count = meld.kind === "kong" ? 4 : 3;
       const w = count * (MELD_W + 2) + 6;
       const cell = box(this.matchArea, x, anchor.y, w, MELD_H + 6);
-      roundRect(cell, 0, 0, w, MELD_H + 6, 8, "#00000033");
+      inkPanel(cell, 0, 0, w, MELD_H + 6);
       for (let i = 0; i < count; i++) {
         // 暗杠：牌值不可见时画扣着的背，不泄露牌面。
         if (meld.tile === null || (meld.kind === "kong" && meld.concealed && i > 0)) {
-          box(cell, 3 + i * (MELD_W + 2), 3, MELD_W, MELD_H, "#1E5740");
+          tileBack(cell, 3 + i * (MELD_W + 2), 3, MELD_W, MELD_H);
         } else {
-          const image = new Laya.Image();
-          image.skin = tileAsset(meld.tile);
-          image.pos(3 + i * (MELD_W + 2), 3);
-          image.size(MELD_W, MELD_H);
-          cell.addChild(image);
+          faceTile(cell, 3 + i * (MELD_W + 2), 3, MELD_W, MELD_H, tileAsset(meld.tile));
         }
       }
       x += w + 8;
@@ -761,15 +1052,14 @@ export class RoomPage {
     const lastIndex = match.phase === "claiming" && isSelf ? tiles.length - 1 : -1;
     tiles.forEach((tile, index) => {
       const col = index % cols, row = Math.floor(index / cols);
-      const cell = box(this.matchArea,
+      const cell = faceTile(this.matchArea,
         x + col * (DISCARD_W + DISCARD_GAP_X),
         y + row * (DISCARD_H + DISCARD_GAP_Y),
-        DISCARD_W, DISCARD_H);
-      const image = new Laya.Image();
-      image.skin = tileAsset(tile);
-      image.size(DISCARD_W, DISCARD_H);
-      cell.addChild(image);
-      if (index === lastIndex) roundRect(cell, -2, -2, DISCARD_W + 4, DISCARD_H + 4, 7, "#00000000", THEME.accent, 3);
+        DISCARD_W, DISCARD_H, tileAsset(tile));
+      if (index === lastIndex) {
+        // 象牙白牌面上金边几乎看不见，最近一张用朱红框定位。
+        roundRect(cell, -2, -2, DISCARD_W + 4, DISCARD_H + 4, 7, "#00000000", TABLE_THEME.vermilion, 3);
+      }
     });
   }
 
@@ -787,7 +1077,7 @@ export class RoomPage {
   /**
    * 手牌：整副牌里最醒目的主体。
    *
-   * 刚摸到的那张**不排进顺子**，单独放在最右、和其余牌留 16px 间距并上浮
+   * 刚摸到的那张**不排进顺子**，单独放在最右、和其余牌留 28px 间距并上浮
    * —— 这是麻将桌的惯例，一眼就能看出"这是刚摸的"。
    */
   private renderHand(hand: Tile[], match: MatchState, handX: number): void {
@@ -809,22 +1099,22 @@ export class RoomPage {
       const enabled = !trustee && (canSwap || (discardable?.has(index) ?? false));
       // 三种弱化分开：缺门限制最重、不是自己操作只轻微、托管与缺门同级。
       const dim = enabled ? 1 : (myTurn ? 0.74 : 0.88);
-      const lift = (selected ? 18 : 0) + (isDrawn ? 10 : 0);
-      const card = box(this.matchArea, offsetX, Y.hand - lift, HAND_TILE_W, HAND_TILE_H);
-      const image = new Laya.Image();
-      image.skin = tileAsset(tile);
-      image.size(HAND_TILE_W, HAND_TILE_H);
-      card.addChild(image);
+      const lift = (selected ? 24 : 0) + (isDrawn ? 10 : 0);
+      // 描边与放大都落在牌**底下**那张垫板上 —— 直接套在牌面上会把万/筒/条的花色盖掉。
+      const card = handTile(this.matchArea, offsetX, Y.hand - lift, HAND_TILE_W, HAND_TILE_H,
+        tileAsset(tile), selected ? 1.03 : 1);
       if (dim < 1) card.alpha = dim;
-      if (selected) roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", THEME.accent, 3);
-      // 刚摸的牌：金色描边 + 上浮，动画结束后提示仍然保留。
-      if (isDrawn) roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", THEME.warn, 3);
+      if (selected) {
+        roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", TABLE_THEME.goldSoft, 3);
+      }
+      // 刚摸的牌：香槟金描边 + 上浮，动画结束后提示仍然保留。
+      if (isDrawn) roundRect(card, -3, -3, HAND_TILE_W + 6, HAND_TILE_H + 6, 9, "#00000000", TABLE_THEME.gold, 3);
       if (enabled) card.on(Laya.Event.CLICK, null, () => this.toggleTile(index, hand, match));
     };
 
     let x = handX;
     rest.forEach((tile, index) => { draw(tile, index, false, x); x += HAND_TILE_W + HAND_TILE_GAP; });
-    if (drawn !== null) draw(drawn, drawnIndex, true, x + 12);
+    if (drawn !== null) draw(drawn, drawnIndex, true, x + 24);
   }
 
   /**
